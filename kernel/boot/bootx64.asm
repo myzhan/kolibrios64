@@ -19,6 +19,15 @@ include '../const.inc'
 purge DQ ; because of some struct DQ in const.inc
 include 'uefi64.inc'
 
+; rbx - efi table
+; rcx - color = fore | back
+proc set_text_color; uses rax
+        mov     rax, rcx
+        mov     rcx, [rbx+EFI_SYSTEM_TABLE.ConOut]
+        fstcall [rcx+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.SetAttribute], rcx, rax
+        ret
+endp
+
 proc main _efi_handle, _efi_table
         mov     [efi_handle], rcx
         mov     [efi_table], rdx
@@ -28,8 +37,16 @@ proc main _efi_handle, _efi_table
         fstcall [rcx+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.Reset], rcx, 1
         test    eax, eax
         jnz     $       ; what can I do here?
+
+        fstcall set_text_color, EFI_BLUE or EFI_BACKGROUND_GREEN
+
         mov     rcx, [rbx+EFI_SYSTEM_TABLE.ConOut]
-        fstcall [rcx+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString], rcx, msg_hello_k64_loader
+        fstcall [rcx+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString], rcx, msg_hello_k64_loader ; todo functions for write text like set_text_color
+
+        fstcall set_text_color, EFI_LIGHTRED
+
+        mov     rcx, [rbx+EFI_SYSTEM_TABLE.ConOut]
+        fstcall [rcx+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString], rcx, msg_2
 
         jmp     $
 endp
@@ -42,6 +59,7 @@ efi_table   dq 0
 
 section '.rodata' data readable
 msg_hello_k64_loader du "Hello from Kolibri64 efi loader",13,10,0
+msg_2 du "Lorem ipsum !",13,10,0
 
 
 section '.reloc' fixups data discardable
