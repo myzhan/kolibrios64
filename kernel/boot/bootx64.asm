@@ -45,7 +45,7 @@ proc main _efi_handle, _efi_table
         mov     rcx, [rbx+EFI_SYSTEM_TABLE.ConOut]
         fstcall [rcx+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.Reset], rcx, 1
         test    eax, eax
-        jnz     $       ; what can I do here?
+        jnz     $ ; loop if fail to init text
 
         fstcall set_text_color, EFI_BLUE or EFI_BACKGROUND_GREEN
         fstcall print_string, msg_hello_k64_loader
@@ -53,7 +53,7 @@ proc main _efi_handle, _efi_table
         fstcall set_text_color, EFI_LIGHTRED
         fstcall print_string, msg_2
 
-        ;; TODO: print some dec, hex. => impl simple printf
+        ;; TODO: print some dec, hex. => impl simple printf. fdo.inc
 
         jmp     $
 endp
