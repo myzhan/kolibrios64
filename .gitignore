@@ -1,3 +1,5 @@
 *.code-workspace
 *.efi
 image/
+*.fas
+*.prep
