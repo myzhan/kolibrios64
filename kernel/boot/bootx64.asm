@@ -19,46 +19,35 @@ include '../const.inc'
 purge DQ ; because of some struct DQ in const.inc
 include 'uefi64.inc'
 
-; hmm proc64.inc uses TCHAR. to define string literals (?)
-struc TCHAR [val] {
-        common match any, val \{ . du val \}
-        match , val \{ . du ? \}
-}
-sizeof.TCHAR = 2
-
 ; rcx - color = fore | back
-proc efi_set_text_color
+efi_set_text_color:
         mov     rax, [efi_table]
         mov     rax, [rax+EFI_SYSTEM_TABLE.ConOut]
         mov     rdx, rcx ; arg2 - color
         mov     rcx, rax ; arg1 - this
         fstcall [rax+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.SetAttribute]
         ret
-endp
 
 ; rcx - null-terminated string
-proc efi_puts
+efi_puts:
         mov     rax, [efi_table]
         mov     rax, [rax+EFI_SYSTEM_TABLE.ConOut]
         mov     rdx, rcx ; arg2 - string
         mov     rcx, rax ; arg1 - this
         fstcall [rcx+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString]
         ret
-endp
 
 ; rcx - char
-proc efi_putc
-locals
-        cstr dq  0
-endl
+efi_putc:
         mov     rax, [efi_table]
         mov     rax, [rax+EFI_SYSTEM_TABLE.ConOut]
-        mov     byte [cstr], cl
-        lea     rdx, [cstr]
+        push    qword 0
+        mov     byte [rsp], cl
+        mov     rdx, rsp
         mov     rcx, rax
         fstcall [rcx+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString]
+        add     rsp, 8
         ret
-endp
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -73,15 +62,20 @@ proc main _efi_handle, _efi_table
         test    eax, eax
         jnz     $ ; loop if fail to init text
 
-        fstcall efi_set_text_color, EFI_BLUE or EFI_BACKGROUND_GREEN
-        fstcall efi_puts, msg_hello_k64_loader
-        fstcall efi_puts, <'hi there', 13, 10> ;; didnt work unless declared TCHAR
+        mov     rcx, EFI_BLUE or EFI_BACKGROUND_GREEN
+        call    efi_set_text_color
+        mov     rcx, msg_hello_k64_loader
+        call    efi_puts
 
-        fstcall efi_set_text_color, EFI_LIGHTRED
-        fstcall efi_puts, msg_2
+        mov     rcx, EFI_LIGHTRED
+        call    efi_set_text_color
+        mov     rcx, msg_2
+        call    efi_puts
 
-        fstcall efi_set_text_color, EFI_CYAN
-        fstcall efi_putc, 0+'a' ;; 0+ is to cast it to number to put in register it itself, not the address of string literal 'a' but function expects char in rcx
+        mov     rcx, EFI_CYAN
+        call    efi_set_text_color
+        mov     rcx, 'a'
+        call    efi_putc
 
         ;; TODO: print some dec, hex. => impl simple printf. fdo.inc
 
