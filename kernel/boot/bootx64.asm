@@ -20,6 +20,7 @@ purge DQ ; because of some struct DQ in const.inc
 include 'uefi64.inc'
 
 ; rcx - color = fore | back
+; uses - rax, rdx ; TODO maybe just save them?? or doesnt worth ??
 efi_set_text_color:
         mov     rax, [efi_table]
         mov     rax, [rax+EFI_SYSTEM_TABLE.ConOut]
@@ -29,6 +30,7 @@ efi_set_text_color:
         ret
 
 ; rcx - null-terminated string
+; uses - rax, rdx
 efi_puts:
         mov     rax, [efi_table]
         mov     rax, [rax+EFI_SYSTEM_TABLE.ConOut]
@@ -38,6 +40,7 @@ efi_puts:
         ret
 
 ; rcx - char
+; uses - rax, rdx
 efi_putc:
         mov     rax, [efi_table]
         mov     rax, [rax+EFI_SYSTEM_TABLE.ConOut]
@@ -49,20 +52,58 @@ efi_putc:
         add     rsp, 8
         ret
 
+; rcx - number
+; uses - rax
+efi_print_hex:
+        push    rax rbx rcx rdx r8
+
+        push    qword 0
+        push    qword 0
+        push    qword 0
+        push    qword 0
+        push    qword 0
+
+        ; TODO maybe add '0x' to buffer
+
+        mov     rdx, rcx
+        mov     rcx, 64 ; how many nibbles in qword
+        xor     r8, r8
+@@:
+        sub     rcx, 4
+
+        mov     rbx, rdx
+        shr     rbx, cl
+        and     rbx, 0xf
+
+        lea     rax, [hex_codes + rbx]
+        movzx   rax, byte [rax]
+        mov     byte [rsp + r8*2 ], al
+        mov     byte [rsp + r8*2 + 1], 0 ; set high byte to 0 bc UEFI OutputString needs CHAR16
+        inc     r8
+
+        test    rcx, rcx
+        jnz     @b
+
+        mov     rcx, rsp
+        call    efi_puts
+
+        pop     r8 rdx rcx rbx rax
+        add     rsp, 8*5
+        ret
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 proc main _efi_handle, _efi_table
         mov     [efi_handle], rcx
         mov     [efi_table], rdx
-        mov     rbx, rdx
 
-        mov     rcx, [rbx+EFI_SYSTEM_TABLE.ConOut]
+        mov     rcx, [rdx+EFI_SYSTEM_TABLE.ConOut]
         fstcall [rcx+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.Reset], rcx, 1
         test    eax, eax
         jnz     $ ; loop if fail to init text
 
-        mov     rcx, EFI_BLUE or EFI_BACKGROUND_GREEN
+        mov     rcx, EFI_BLUE or EFI_BACKGROUND_CYAN
         call    efi_set_text_color
         mov     rcx, msg_hello_k64_loader
         call    efi_puts
@@ -76,8 +117,13 @@ proc main _efi_handle, _efi_table
         call    efi_set_text_color
         mov     rcx, 'a'
         call    efi_putc
+        mov     rcx, ' '
+        call    efi_putc
 
-        ;; TODO: print some dec, hex. => impl simple printf. fdo.inc
+        mov     rcx, EFI_LIGHTGREEN
+        call    efi_set_text_color
+        mov     rcx, 0xCAFEBABEFEEDCAFE
+        call    efi_print_hex
 
         jmp     $
 endp
@@ -86,6 +132,8 @@ endp
 section '.data' data readable writeable
 efi_handle  dq 0
 efi_table   dq 0
+hex_codes:
+        db '0123456789ABCDEF', 0
 
 
 section '.rodata' data readable
