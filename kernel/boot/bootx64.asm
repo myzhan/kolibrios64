@@ -105,6 +105,7 @@ proc main _efi_handle, _efi_table
         test    eax, eax
         jnz     $ ; loop if fail to init text
 
+        mov     rdx, [efi_table]
         mov     rcx, msg_firmware_vendor
         call    efi_puts
         mov     rcx, [rdx + EFI_SYSTEM_TABLE.FirmwareVendor]
