@@ -99,22 +99,33 @@ efi_print_hex:
 proc main _efi_handle, _efi_table
         mov     [efi_handle], rcx
         mov     [efi_table], rdx
+        mov     rbx, rdx
 
-        mov     rcx, [rdx+EFI_SYSTEM_TABLE.ConOut]
-        fstcall [rcx+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.Reset], rcx, 1
+        ; reset the console
+        mov     rcx, [rbx + EFI_SYSTEM_TABLE.ConOut]
+        fstcall [rcx + EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.Reset], rcx, 1
         test    eax, eax
         jnz     $ ; loop if fail to init text
 
-        mov     rdx, [efi_table]
+        ; disable the default watchdog timer, otherwise it will reboot the pc after 5 mins of this app work
+        mov     rcx, [rbx + EFI_SYSTEM_TABLE.BootServices]
+        fstcall [rcx + EFI_BOOT_SERVICES.SetWatchdogTimer], rcx, 0, 0, 0, 0
+        test    eax, eax
+        jz      @f
+        mov     rcx, msg_failed_disable_watchdog
+        call    efi_puts
+        jmp     $
+@@:
+
         mov     rcx, msg_firmware_vendor
         call    efi_puts
-        mov     rcx, [rdx + EFI_SYSTEM_TABLE.FirmwareVendor]
+        mov     rcx, [rbx + EFI_SYSTEM_TABLE.FirmwareVendor]
         call    efi_puts
         mov     rcx, msg_newline
         call    efi_puts
         mov     rcx, msg_firmware_revision
         call    efi_puts
-        mov     rcx, qword [rdx + EFI_SYSTEM_TABLE.FirmwareRevision]
+        mov     ecx, [rbx + EFI_SYSTEM_TABLE.FirmwareRevision]
         call    efi_print_hex
         mov     rcx, msg_newline
         call    efi_puts
@@ -159,6 +170,7 @@ msg_2 du "Lorem ipsum ! !",13,10,0
 msg_firmware_vendor du "UEFI vendor: ", 0
 msg_firmware_revision du "UEFI revision: ", 0
 msg_newline du 13,10,0
+msg_failed_disable_watchdog du "Failed to disable watchdog timer!", 13,10,0
 
 
 section '.reloc' fixups data discardable
