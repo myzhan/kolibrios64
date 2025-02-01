@@ -20,28 +20,30 @@ purge DQ ; because of some struct DQ in const.inc
 include 'uefi64.inc'
 
 ; rcx - color = fore | back
-; uses - rax, rdx ; TODO maybe just save them?? or doesnt worth ??
 efi_set_text_color:
+        push    rax rdx
         mov     rax, [efi_table]
         mov     rax, [rax+EFI_SYSTEM_TABLE.ConOut]
         mov     rdx, rcx ; arg2 - color
         mov     rcx, rax ; arg1 - this
         fstcall [rax+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.SetAttribute]
+        pop     rdx rax
         ret
 
 ; rcx - null-terminated string
-; uses - rax, rdx
 efi_puts:
+        push    rax rdx
         mov     rax, [efi_table]
         mov     rax, [rax+EFI_SYSTEM_TABLE.ConOut]
         mov     rdx, rcx ; arg2 - string
         mov     rcx, rax ; arg1 - this
         fstcall [rcx+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString]
+        pop     rdx rax
         ret
 
 ; rcx - char
-; uses - rax, rdx
 efi_putc:
+        push    rax rdx
         mov     rax, [efi_table]
         mov     rax, [rax+EFI_SYSTEM_TABLE.ConOut]
         push    qword 0
@@ -50,10 +52,10 @@ efi_putc:
         mov     rcx, rax
         fstcall [rcx+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString]
         add     rsp, 8
+        pop     rdx rax
         ret
 
 ; rcx - number
-; uses - rax
 efi_print_hex:
         push    rax rbx rcx rdx r8
 
@@ -103,6 +105,19 @@ proc main _efi_handle, _efi_table
         test    eax, eax
         jnz     $ ; loop if fail to init text
 
+        mov     rcx, msg_firmware_vendor
+        call    efi_puts
+        mov     rcx, [rdx + EFI_SYSTEM_TABLE.FirmwareVendor]
+        call    efi_puts
+        mov     rcx, msg_newline
+        call    efi_puts
+        mov     rcx, msg_firmware_revision
+        call    efi_puts
+        mov     rcx, qword [rdx + EFI_SYSTEM_TABLE.FirmwareRevision]
+        call    efi_print_hex
+        mov     rcx, msg_newline
+        call    efi_puts
+
         mov     rcx, EFI_BLUE or EFI_BACKGROUND_CYAN
         call    efi_set_text_color
         mov     rcx, msg_hello_k64_loader
@@ -125,6 +140,7 @@ proc main _efi_handle, _efi_table
         mov     rcx, 0xCAFEBABEFEEDCAFE
         call    efi_print_hex
 
+
         jmp     $
 endp
 
@@ -139,6 +155,9 @@ hex_codes:
 section '.rodata' data readable
 msg_hello_k64_loader du "Hello from Kolibri64 efi loader",13,10,0
 msg_2 du "Lorem ipsum ! !",13,10,0
+msg_firmware_vendor du "UEFI vendor: ", 0
+msg_firmware_revision du "UEFI revision: ", 0
+msg_newline du 13,10,0
 
 
 section '.reloc' fixups data discardable
