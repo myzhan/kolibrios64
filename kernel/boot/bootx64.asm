@@ -108,8 +108,8 @@ proc main _efi_handle, _efi_table
         jnz     $ ; loop if fail to init text
 
         ; disable the default watchdog timer, otherwise it will reboot the pc after 5 mins of this app work
-        mov     rcx, [rbx + EFI_SYSTEM_TABLE.BootServices]
-        fstcall [rcx + EFI_BOOT_SERVICES.SetWatchdogTimer], rcx, 0, 0, 0, 0
+        mov     rax, [rbx + EFI_SYSTEM_TABLE.BootServices]
+        fstcall [rax + EFI_BOOT_SERVICES.SetWatchdogTimer], 0, 0, 0, 0
         test    eax, eax
         jz      @f
         mov     rcx, msg_failed_disable_watchdog
