@@ -19,6 +19,9 @@ include '../const.inc'
 purge DQ ; because of some struct DQ in const.inc
 include 'uefi64.inc'
 
+MEMORY_MAP_SIZE = 0x10000
+
+
 ; rcx - color = fore | back
 efi_set_text_color:
         push    rax rdx
@@ -55,8 +58,9 @@ efi_putc:
         pop     rdx rax
         ret
 
+; print hex without leading zeros
 ; rcx - number
-efi_print_hex:
+efi_print_hex_no_lz:
         push    rax rbx rcx rdx r8
 
         push    qword 0
@@ -65,34 +69,51 @@ efi_print_hex:
         push    qword 0
         push    qword 0
 
-        ; TODO maybe add '0x' to buffer
-
+        xor     r10, r10 ; leading zeros end flag
         mov     rdx, rcx
         mov     rcx, 64 ; how many nibbles in qword
         xor     r8, r8
-@@:
+        mov     byte [rsp + r8*2 ], '0'
+        mov     byte [rsp + r8*2 + 1], 0 
+        inc     r8
+        mov     byte [rsp + r8*2 ], 'x'
+        mov     byte [rsp + r8*2 + 1], 0
+        inc     r8
+.lp:
         sub     rcx, 4
 
         mov     rbx, rdx
         shr     rbx, cl
         and     rbx, 0xf
 
+        test    r10, r10
+        jnz     @f
+
+        test    rbx, rbx
+        jz      .lp_cont
+        mov     r10, 1
+@@:
         lea     rax, [hex_codes + rbx]
         movzx   rax, byte [rax]
         mov     byte [rsp + r8*2 ], al
         mov     byte [rsp + r8*2 + 1], 0 ; set high byte to 0 bc UEFI OutputString needs CHAR16
         inc     r8
 
+.lp_cont:
         test    rcx, rcx
-        jnz     @b
+        jnz     .lp
 
+        cmp     r8, 2
+        ja      @f
+        mov     byte [rsp + r8*2 ], '0'
+        mov     byte [rsp + r8*2 + 1], 0 
+@@:
         mov     rcx, rsp
         call    efi_puts
 
         pop     r8 rdx rcx rbx rax
         add     rsp, 8*5
         ret
-
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -102,8 +123,8 @@ proc main _efi_handle, _efi_table
         mov     rbx, rdx
 
         ; reset the console
-        mov     rcx, [rbx + EFI_SYSTEM_TABLE.ConOut]
-        fstcall [rcx + EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.Reset], rcx, 1
+        mov     rax, [rbx + EFI_SYSTEM_TABLE.ConOut]
+        fstcall [rax + EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.Reset], rax, 1
         test    eax, eax
         jnz     $ ; loop if fail to init text
 
@@ -117,6 +138,13 @@ proc main _efi_handle, _efi_table
         jmp     $
 @@:
 
+        mov     rcx, EFI_LIGHTGREEN
+        call    efi_set_text_color
+        mov     rcx, msg_hello_k64_loader
+        call    efi_puts
+        mov     rcx, EFI_LIGHTGRAY
+        call    efi_set_text_color
+
         mov     rcx, msg_firmware_vendor
         call    efi_puts
         mov     rcx, [rbx + EFI_SYSTEM_TABLE.FirmwareVendor]
@@ -126,51 +154,88 @@ proc main _efi_handle, _efi_table
         mov     rcx, msg_firmware_revision
         call    efi_puts
         mov     ecx, [rbx + EFI_SYSTEM_TABLE.FirmwareRevision]
-        call    efi_print_hex
+        call    efi_print_hex_no_lz
         mov     rcx, msg_newline
         call    efi_puts
 
-        mov     rcx, EFI_BLUE or EFI_BACKGROUND_CYAN
-        call    efi_set_text_color
-        mov     rcx, msg_hello_k64_loader
+        ; Obtain and print uefi memory map
+        mov     rbx, [efi_table] ;;
+        mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
+        fstcall [r10 + EFI_BOOT_SERVICES.AllocatePages], EFI_ALLOCATE_ANY_PAGES, \
+                EFI_RESERVED_MEMORY_TYPE, MEMORY_MAP_SIZE/0x1000, memory_map
+        ; mov     rcx, rax
+        ; call    efi_print_hex_no_lz
+        ; mov     rcx, msg_newline
+        ; call    efi_puts
+        ;; call    halt_on_error
+
+        mov     rbx, [efi_table] ;;
+        mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
+        fstcall [r10 + EFI_BOOT_SERVICES.GetMemoryMap], memory_map_size, \
+                [memory_map], memory_map_key, descriptor_size, descriptor_ver
+        ;; call    halt_on_error
+
+        mov     rcx, [memory_map]
+        add     rcx, [descriptor_size]
+        add     rcx, [descriptor_size]
+        add     rcx, [descriptor_size]
+        add     rcx, [descriptor_size]
+        add     rcx, [descriptor_size]
+        add     rcx, [descriptor_size]
+        add     rcx, [descriptor_size]
+        mov     rcx, [rcx]
+        call    efi_print_hex_no_lz
+        mov     rcx, msg_newline
         call    efi_puts
 
-        mov     rcx, EFI_LIGHTRED
-        call    efi_set_text_color
-        mov     rcx, msg_2
+
+        mov     rcx, msg_end_1
         call    efi_puts
 
-        mov     rcx, EFI_CYAN
-        call    efi_set_text_color
-        mov     rcx, 'a'
-        call    efi_putc
-        mov     rcx, ' '
-        call    efi_putc
+        mov     rcx, 0x000A000B00C
+        call    efi_print_hex_no_lz
+        mov     rcx, msg_newline
+        call    efi_puts
 
-        mov     rcx, EFI_LIGHTGREEN
-        call    efi_set_text_color
-        mov     rcx, 0xCAFEBABEFEEDCAFE
-        call    efi_print_hex
+
+        mov     rcx, 0xABCDEF133777
+        call    efi_print_hex_no_lz
+        mov     rcx, msg_newline
+        call    efi_puts
+
+        xor     rcx, rcx
+        call    efi_print_hex_no_lz
+        mov     rcx, msg_newline
+        call    efi_puts
 
 
         jmp     $
 endp
 
-
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 section '.data' data readable writeable
 efi_handle  dq 0
 efi_table   dq 0
 hex_codes:
         db '0123456789ABCDEF', 0
 
+memory_map_key  dq 0
+descriptor_size dq 0
+descriptor_ver  dq 0
+memory_map_size dq MEMORY_MAP_SIZE
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 section '.rodata' data readable
-msg_hello_k64_loader du "Hello from Kolibri64 efi loader",13,10,0
-msg_2 du "Lorem ipsum ! !",13,10,0
+msg_hello_k64_loader du "Kolibri64 EFI bootloader",13,10,0
 msg_firmware_vendor du "UEFI vendor: ", 0
 msg_firmware_revision du "UEFI revision: ", 0
 msg_newline du 13,10,0
 msg_failed_disable_watchdog du "Failed to disable watchdog timer!", 13,10,0
+msg_end_1 du "----------", 13,10,0
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+section '.bss' data readable writeable discardable
+memory_map      dq ?
 
 
 section '.reloc' fixups data discardable
