@@ -23,61 +23,54 @@ MEMORY_MAP_SIZE = 0x10000
 
 
 ; rcx - color = fore | back
-efi_set_text_color:
-        push    rax rdx
+proc efi_set_text_color uses rax rdx
         mov     rax, [efi_table]
         mov     rax, [rax+EFI_SYSTEM_TABLE.ConOut]
         mov     rdx, rcx ; arg2 - color
         mov     rcx, rax ; arg1 - this
         fstcall [rax+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.SetAttribute]
-        pop     rdx rax
         ret
+endp
 
 ; rcx - null-terminated string
-efi_puts:
-        push    rax rdx
+proc efi_puts uses rax rdx
         mov     rax, [efi_table]
         mov     rax, [rax+EFI_SYSTEM_TABLE.ConOut]
         mov     rdx, rcx ; arg2 - string
         mov     rcx, rax ; arg1 - this
         fstcall [rcx+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString]
-        pop     rdx rax
         ret
+endp
 
 ; rcx - char
-efi_putc:
-        push    rax rdx
+proc efi_putc uses rax rdx
+locals
+        chr     dq 0
+endl
         mov     rax, [efi_table]
         mov     rax, [rax+EFI_SYSTEM_TABLE.ConOut]
-        push    qword 0
-        mov     byte [rsp], cl
-        mov     rdx, rsp
-        mov     rcx, rax
+        mov     byte [chr], cl
+        lea     rdx, [chr] ; arg2 - string
+        mov     rcx, rax   ; arg1 - this
         fstcall [rcx+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString]
-        add     rsp, 8
-        pop     rdx rax
         ret
+endp
 
 ; print hex without leading zeros
 ; rcx - number
-efi_print_hex_no_lz:
-        push    rax rbx rcx rdx r8
-
-        push    qword 0
-        push    qword 0
-        push    qword 0
-        push    qword 0
-        push    qword 0
-
+proc efi_print_hex_no_lz uses rax rbx rcx rdx r8 r10 ; TODO also need function that displays with leading zeros
+locals
+        buf     dq 5 dup(0)
+endl
         xor     r10, r10 ; leading zeros end flag
         mov     rdx, rcx
         mov     rcx, 64 ; how many nibbles in qword
         xor     r8, r8
-        mov     byte [rsp + r8*2 ], '0'
-        mov     byte [rsp + r8*2 + 1], 0 
+        mov     byte [buf + r8*2 ], '0'
+        mov     byte [buf + r8*2 + 1], 0 
         inc     r8
-        mov     byte [rsp + r8*2 ], 'x'
-        mov     byte [rsp + r8*2 + 1], 0
+        mov     byte [buf + r8*2 ], 'x'
+        mov     byte [buf + r8*2 + 1], 0
         inc     r8
 .lp:
         sub     rcx, 4
@@ -95,8 +88,8 @@ efi_print_hex_no_lz:
 @@:
         lea     rax, [hex_codes + rbx]
         movzx   rax, byte [rax]
-        mov     byte [rsp + r8*2 ], al
-        mov     byte [rsp + r8*2 + 1], 0 ; set high byte to 0 bc UEFI OutputString needs CHAR16
+        mov     byte [buf + r8*2 ], al
+        mov     byte [buf + r8*2 + 1], 0 ; set high byte to 0 bc UEFI OutputString needs CHAR16
         inc     r8
 
 .lp_cont:
@@ -105,15 +98,14 @@ efi_print_hex_no_lz:
 
         cmp     r8, 2
         ja      @f
-        mov     byte [rsp + r8*2 ], '0'
-        mov     byte [rsp + r8*2 + 1], 0 
+        mov     byte [buf + r8*2 ], '0'
+        mov     byte [buf + r8*2 + 1], 0 
 @@:
-        mov     rcx, rsp
-        call    efi_puts
+        lea     rcx, [buf]
+        fstcall efi_puts, rcx
 
-        pop     r8 rdx rcx rbx rax
-        add     rsp, 8*5
         ret
+endp
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -133,48 +125,36 @@ proc main _efi_handle, _efi_table
         fstcall [rax + EFI_BOOT_SERVICES.SetWatchdogTimer], 0, 0, 0, 0
         test    eax, eax
         jz      @f
-        mov     rcx, msg_failed_disable_watchdog
-        call    efi_puts
+        fstcall efi_puts, msg_failed_disable_watchdog
         jmp     $
 @@:
 
-        mov     rcx, EFI_LIGHTGREEN
-        call    efi_set_text_color
-        mov     rcx, msg_hello_k64_loader
-        call    efi_puts
-        mov     rcx, EFI_LIGHTGRAY
-        call    efi_set_text_color
+        fstcall efi_set_text_color, EFI_LIGHTGREEN
+        fstcall efi_puts, msg_hello_k64_loader
+        fstcall efi_set_text_color, EFI_LIGHTGRAY
 
-        mov     rcx, msg_firmware_vendor
-        call    efi_puts
-        mov     rcx, [rbx + EFI_SYSTEM_TABLE.FirmwareVendor]
-        call    efi_puts
-        mov     rcx, msg_newline
-        call    efi_puts
-        mov     rcx, msg_firmware_revision
-        call    efi_puts
-        mov     ecx, [rbx + EFI_SYSTEM_TABLE.FirmwareRevision]
-        call    efi_print_hex_no_lz
-        mov     rcx, msg_newline
-        call    efi_puts
+        fstcall efi_puts, msg_firmware_vendor
+        fstcall efi_puts,  [rbx + EFI_SYSTEM_TABLE.FirmwareVendor]
+        fstcall efi_puts, msg_newline
+
+        fstcall efi_puts, msg_firmware_revision
+        fstcall efi_print_hex_no_lz, [rbx + EFI_SYSTEM_TABLE.FirmwareRevision]
+        fstcall efi_puts, msg_newline
 
         ; Obtain and print uefi memory map
         mov     rbx, [efi_table] ;;
         mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
         fstcall [r10 + EFI_BOOT_SERVICES.AllocatePages], EFI_ALLOCATE_ANY_PAGES, \
                 EFI_RESERVED_MEMORY_TYPE, MEMORY_MAP_SIZE/0x1000, memory_map
-        ; mov     rcx, rax
-        ; call    efi_print_hex_no_lz
-        ; mov     rcx, msg_newline
-        ; call    efi_puts
-        ;; call    halt_on_error
+        ;; call    halt_on_error ; TODO
 
         mov     rbx, [efi_table] ;;
         mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
         fstcall [r10 + EFI_BOOT_SERVICES.GetMemoryMap], memory_map_size, \
                 [memory_map], memory_map_key, descriptor_size, descriptor_ver
-        ;; call    halt_on_error
+        ;; call    halt_on_error ; TODO
 
+        ; TODO iretae through memory map and print it in e820 form
         mov     rcx, [memory_map]
         add     rcx, [descriptor_size]
         add     rcx, [descriptor_size]
@@ -183,31 +163,21 @@ proc main _efi_handle, _efi_table
         add     rcx, [descriptor_size]
         add     rcx, [descriptor_size]
         add     rcx, [descriptor_size]
-        mov     rcx, [rcx]
-        call    efi_print_hex_no_lz
-        mov     rcx, msg_newline
-        call    efi_puts
+        fstcall efi_print_hex_no_lz, qword [rcx]
+        fstcall efi_puts, msg_newline
 
+        fstcall efi_puts, msg_end_1
 
-        mov     rcx, msg_end_1
-        call    efi_puts
+        fstcall    efi_print_hex_no_lz, 0x000A000B00C
+        fstcall    efi_puts, msg_newline
 
-        mov     rcx, 0x000A000B00C
-        call    efi_print_hex_no_lz
-        mov     rcx, msg_newline
-        call    efi_puts
+        fstcall    efi_print_hex_no_lz, 0xABCDEF133777
+        fstcall    efi_puts, msg_newline
 
+        fstcall    efi_print_hex_no_lz, 0xCAFE
+        fstcall    efi_puts, msg_newline
 
-        mov     rcx, 0xABCDEF133777
-        call    efi_print_hex_no_lz
-        mov     rcx, msg_newline
-        call    efi_puts
-
-        xor     rcx, rcx
-        call    efi_print_hex_no_lz
-        mov     rcx, msg_newline
-        call    efi_puts
-
+        fstcall    efi_putc, <0+'a'>
 
         jmp     $
 endp
