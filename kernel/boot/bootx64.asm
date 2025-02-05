@@ -21,91 +21,15 @@ include 'uefi64.inc'
 
 MEMORY_MAP_SIZE = 0x10000
 
+; linux/arch/x86/include/uapi/asm/e820.h
+E820_RAM       = 1
+E820_RESERVED  = 2
+E820_ACPI      = 3
+E820_NVS       = 4
+E820_UNUSABLE  = 5
+E820_PMEM      = 7
 
-; rcx - color = fore | back
-proc efi_set_text_color uses rax rdx
-        mov     rax, [efi_table]
-        mov     rax, [rax+EFI_SYSTEM_TABLE.ConOut]
-        mov     rdx, rcx ; arg2 - color
-        mov     rcx, rax ; arg1 - this
-        fstcall [rax+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.SetAttribute]
-        ret
-endp
-
-; rcx - null-terminated string
-proc efi_puts uses rax rdx
-        mov     rax, [efi_table]
-        mov     rax, [rax+EFI_SYSTEM_TABLE.ConOut]
-        mov     rdx, rcx ; arg2 - string
-        mov     rcx, rax ; arg1 - this
-        fstcall [rcx+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString]
-        ret
-endp
-
-; rcx - char
-proc efi_putc uses rax rdx
-locals
-        chr     dq 0
-endl
-        mov     rax, [efi_table]
-        mov     rax, [rax+EFI_SYSTEM_TABLE.ConOut]
-        mov     byte [chr], cl
-        lea     rdx, [chr] ; arg2 - string
-        mov     rcx, rax   ; arg1 - this
-        fstcall [rcx+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString]
-        ret
-endp
-
-; print hex without leading zeros
-; rcx - number
-proc efi_print_hex_no_lz uses rax rbx rcx rdx r8 r10 ; TODO also need function that displays with leading zeros
-locals
-        buf     dq 5 dup(0)
-endl
-        xor     r10, r10 ; leading zeros end flag
-        mov     rdx, rcx
-        mov     rcx, 64 ; how many nibbles in qword
-        xor     r8, r8
-        mov     byte [buf + r8*2 ], '0'
-        mov     byte [buf + r8*2 + 1], 0 
-        inc     r8
-        mov     byte [buf + r8*2 ], 'x'
-        mov     byte [buf + r8*2 + 1], 0
-        inc     r8
-.lp:
-        sub     rcx, 4
-
-        mov     rbx, rdx
-        shr     rbx, cl
-        and     rbx, 0xf
-
-        test    r10, r10
-        jnz     @f
-
-        test    rbx, rbx
-        jz      .lp_cont
-        mov     r10, 1
-@@:
-        lea     rax, [hex_codes + rbx]
-        movzx   rax, byte [rax]
-        mov     byte [buf + r8*2 ], al
-        mov     byte [buf + r8*2 + 1], 0 ; set high byte to 0 bc UEFI OutputString needs CHAR16
-        inc     r8
-
-.lp_cont:
-        test    rcx, rcx
-        jnz     .lp
-
-        cmp     r8, 2
-        ja      @f
-        mov     byte [buf + r8*2 ], '0'
-        mov     byte [buf + r8*2 + 1], 0 
-@@:
-        lea     rcx, [buf]
-        fstcall efi_puts, rcx
-
-        ret
-endp
+include 'uefi_prints.inc'
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -141,43 +65,97 @@ proc main _efi_handle, _efi_table
         fstcall efi_print_hex_no_lz, [rbx + EFI_SYSTEM_TABLE.FirmwareRevision]
         fstcall efi_puts, msg_newline
 
+        fstcall efi_puts, msg_e820_memmap_here
+
         ; Obtain and print uefi memory map
+        fstcall efi_set_text_color, EFI_CYAN
         mov     rbx, [efi_table] ;;
         mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
         fstcall [r10 + EFI_BOOT_SERVICES.AllocatePages], EFI_ALLOCATE_ANY_PAGES, \
                 EFI_RESERVED_MEMORY_TYPE, MEMORY_MAP_SIZE/0x1000, memory_map
         ;; call    halt_on_error ; TODO
 
-        mov     rbx, [efi_table] ;;
+        ;mov     rbx, [efi_table] ;;
         mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
         fstcall [r10 + EFI_BOOT_SERVICES.GetMemoryMap], memory_map_size, \
                 [memory_map], memory_map_key, descriptor_size, descriptor_ver
         ;; call    halt_on_error ; TODO
 
-        ; TODO iretae through memory map and print it in e820 form
-        mov     rcx, [memory_map]
-        add     rcx, [descriptor_size]
-        add     rcx, [descriptor_size]
-        add     rcx, [descriptor_size]
-        add     rcx, [descriptor_size]
-        add     rcx, [descriptor_size]
-        add     rcx, [descriptor_size]
-        add     rcx, [descriptor_size]
-        fstcall efi_print_hex_no_lz, qword [rcx]
+        mov     rsi, [memory_map]
+        mov     r15, rsi
+        add     r15, [memory_map_size]
+.next_descr:
+        mov     rax, [rsi + EFI_MEMORY_DESCRIPTOR.PhysicalStart]
+        mov     r12, rax
+        fstcall efi_print_hex_fixed, rax
+        fstcall efi_puts, msg_spacer
+
+        mov     rax, [rsi + EFI_MEMORY_DESCRIPTOR.NumberOfPages]
+        shl     rax, 12
+        add     r12, rax
+        fstcall efi_print_hex_fixed, r12
+        fstcall efi_puts, msg_spacer
+
+        mov     ecx, [rsi+EFI_MEMORY_DESCRIPTOR.Type]
+        cmp     ecx, EFI_LOADER_CODE
+        jz      .mem_ram_if_wb
+        cmp     ecx, EFI_LOADER_DATA
+        jz      .mem_ram_if_wb
+        cmp     ecx, EFI_BOOT_SERVICES_CODE
+        jz      .mem_ram_if_wb
+        cmp     ecx, EFI_BOOT_SERVICES_DATA
+        jz      .mem_ram_if_wb
+        cmp     ecx, EFI_CONVENTIONAL_MEMORY
+        jz      .mem_ram_if_wb
+        cmp     ecx, EFI_ACPI_RECLAIM_MEMORY
+        mov     eax, E820_ACPI
+        jz      .type_done
+        cmp     ecx, EFI_ACPI_MEMORY_NVS
+        mov     eax, E820_NVS
+        jz      .type_done
+        cmp     ecx, EFI_UNUSABLE_MEMORY
+        mov     eax, E820_UNUSABLE
+        jz      .type_done
+        cmp     ecx, EFI_PERSISTENT_MEMORY
+        mov     eax, E820_PMEM
+        jz      .type_done
+        jmp     .reserved
+.mem_ram_if_wb:
+        test    [rsi+EFI_MEMORY_DESCRIPTOR.Attribute], dword EFI_MEMORY_WB
+        mov     eax, E820_RAM
+        jnz     .type_done
+.reserved:
+        mov     eax, E820_RESERVED
+.type_done:
+        lea     rax, [e820_typenames + rax*8]
+        fstcall efi_puts, qword [rax]
         fstcall efi_puts, msg_newline
 
-        fstcall efi_puts, msg_end_1
+.done:
+        add     rsi, [descriptor_size]
+        cmp     rsi, r15
+        jb      .next_descr
 
-        fstcall    efi_print_hex_no_lz, 0x000A000B00C
-        fstcall    efi_puts, msg_newline
 
-        fstcall    efi_print_hex_no_lz, 0xABCDEF133777
-        fstcall    efi_puts, msg_newline
+        ; fstcall efi_set_text_color, EFI_LIGHTGRAY
+        ; fstcall efi_puts, msg_end_1
 
-        fstcall    efi_print_hex_no_lz, 0xCAFE
-        fstcall    efi_puts, msg_newline
+        ; fstcall efi_print_hex_no_lz, 0x000A000B00C
+        ; fstcall efi_puts, msg_newline
 
-        fstcall    efi_putc, <0+'a'>
+        ; fstcall efi_print_hex_no_lz, 0xABCDEF133777
+        ; fstcall efi_puts, msg_newline
+
+        ; fstcall efi_print_hex_no_lz, 0xCAFE
+        ; fstcall efi_puts, msg_newline
+
+        ; fstcall efi_print_hex_fixed, 0x00764A0B
+        ; fstcall efi_puts, msg_newline
+
+        ; fstcall efi_print_hex_fixed, 0
+        ; fstcall efi_puts, msg_newline
+
+        ; fstcall efi_putc, <0+'a'>
 
         jmp     $
 endp
@@ -201,7 +179,27 @@ msg_firmware_vendor du "UEFI vendor: ", 0
 msg_firmware_revision du "UEFI revision: ", 0
 msg_newline du 13,10,0
 msg_failed_disable_watchdog du "Failed to disable watchdog timer!", 13,10,0
-msg_end_1 du "----------", 13,10,0
+msg_end_1 du 13,10,"---------- test printing functions:", 13,10,0
+msg_spacer du "  ", 0
+msg_dummy du "<....>", 0
+
+msg_e820_memmap_here du "Memory map (phys_start, phys_end, e820 type)",13,10,0
+msg_e820_available du "Available RAM", 0
+mag_e820_reserved du "Reserved RAM", 0
+mag_e820_acpi_reclaim du "ACPI reclaimable RAM", 0
+mag_e820_acpi_nvs du "ACPI NVS RAM", 0
+msg_e820_badmem du "Bad RAM", 0
+msg_e820_persistent du "Persistent RAM", 0
+
+e820_typenames:
+        dq msg_dummy
+        dq msg_e820_available
+        dq mag_e820_reserved
+        dq mag_e820_acpi_reclaim
+        dq mag_e820_acpi_nvs
+        dq msg_e820_badmem
+        dq msg_dummy
+        dq msg_e820_persistent
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 section '.bss' data readable writeable discardable
