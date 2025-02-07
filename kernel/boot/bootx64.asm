@@ -84,7 +84,11 @@ proc main _efi_handle, _efi_table
         mov     rsi, [memory_map]
         mov     r15, rsi
         add     r15, [memory_map_size]
+        xor     r14, r14 ; memmap entry idx
 .next_descr:
+        fstcall efi_print_hex_no_lz, r14
+        fstcall efi_puts, msg_spacer
+
         mov     rax, [rsi + EFI_MEMORY_DESCRIPTOR.PhysicalStart]
         mov     r12, rax
         fstcall efi_print_hex_fixed, rax
@@ -133,6 +137,7 @@ proc main _efi_handle, _efi_table
 
 .done:
         add     rsi, [descriptor_size]
+        inc     r14
         cmp     rsi, r15
         jb      .next_descr
 
