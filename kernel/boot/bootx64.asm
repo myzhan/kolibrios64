@@ -1,7 +1,7 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;                                                              ;;
 ;; Copyright (C) KolibriOS team 2025-2025. All rights reserved. ;;
-;; Distributed under terms of the GNU General Public License.   ;;
+;; Distributed under terms of the GNU General Public License v2 ;;
 ;;                                                              ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 format pe64 efi
@@ -185,7 +185,7 @@ msg_firmware_revision du "UEFI revision: ", 0
 msg_newline du 13,10,0
 msg_failed_disable_watchdog du "Failed to disable watchdog timer!", 13,10,0
 msg_end_1 du 13,10,"---------- test printing functions:", 13,10,0
-msg_spacer du "  ", 0
+msg_spacer du "    ", 0
 msg_dummy du "<....>", 0
 
 msg_e820_memmap_here du "Memory map (phys_start, phys_end, e820 type)",13,10,0
@@ -205,6 +205,9 @@ e820_typenames:
         dq msg_e820_badmem
         dq msg_dummy
         dq msg_e820_persistent
+
+
+kernel_file_path du '\EFI\KERNEL64.BIN', 0
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 section '.bss' data readable writeable discardable
