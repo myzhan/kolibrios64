@@ -8,15 +8,19 @@
 use64
 
 VIRT_KERNEL_BASE = 0xFFFFFFFF80000000
+DEFAULT_STACK_SIZE = 8192
 
 org VIRT_KERNEL_BASE
 
 dq 'KERNEL64' ; magic
-dq k64_entry - VIRT_KERNEL_BASE
-; maybe more fields in header
+dq k64_entry - VIRT_KERNEL_BASE ; entry point's offset from base where it loaded
+dq DEFAULT_STACK_SIZE ; how many bytes of stack we need
+kernel_phys_start dq 0 ; bootloader will put here phys addr where it loaded kernel
+kernel_phys_end dq 0 ; and phys end addr (including stack ofc)
 
 ; 64 bit kernel entry point
 k64_entry:
+        mov     rsp, kernel_default_stack
         pop     qword [qword puthex_ptr - VIRT_KERNEL_BASE]
         pop     qword [qword putstr_ptr - VIRT_KERNEL_BASE]
         
@@ -44,6 +48,7 @@ kmsg_ripis      db 'RIP = ',13,10,0
 puthex_ptr      dq 0
 putstr_ptr      dq 0
 
-rb 8192
-kernel_tmp_stack:
+rb DEFAULT_STACK_SIZE
+align 16
+kernel_default_stack:
 

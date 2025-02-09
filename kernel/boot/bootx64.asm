@@ -65,81 +65,114 @@ proc main _efi_handle, _efi_table
         fstcall efi_print_hex_no_lz, [rbx + EFI_SYSTEM_TABLE.FirmwareRevision]
         fstcall efi_puts, msg_newline
 
-        fstcall efi_puts, msg_e820_memmap_here
+;;;;;;;;;;;;; Obtain and print uefi memory map
+;         fstcall efi_puts, msg_e820_memmap_here
+;         fstcall efi_set_text_color, EFI_CYAN
+;         mov     rbx, [efi_table] ;;
+;         mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
+;         fstcall [r10 + EFI_BOOT_SERVICES.AllocatePages], EFI_ALLOCATE_ANY_PAGES, \
+;                 EFI_RESERVED_MEMORY_TYPE, MEMORY_MAP_SIZE/0x1000, memory_map
+;         ;; call    halt_on_error ; TODO
 
-        ; Obtain and print uefi memory map
-        fstcall efi_set_text_color, EFI_CYAN
-        mov     rbx, [efi_table] ;;
+;         ;mov     rbx, [efi_table] ;;
+;         mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
+;         fstcall [r10 + EFI_BOOT_SERVICES.GetMemoryMap], memory_map_size, \
+;                 [memory_map], memory_map_key, descriptor_size, descriptor_ver
+;         ;; call    halt_on_error ; TODO
+
+;         mov     rsi, [memory_map]
+;         mov     r15, rsi
+;         add     r15, [memory_map_size]
+;         xor     r14, r14 ; memmap entry idx
+; .next_descr:
+;         fstcall efi_print_hex_no_lz, r14
+;         fstcall efi_puts, msg_spacer
+
+;         mov     rax, [rsi + EFI_MEMORY_DESCRIPTOR.PhysicalStart]
+;         mov     r12, rax
+;         fstcall efi_print_hex_fixed, rax
+;         fstcall efi_puts, msg_spacer
+
+;         mov     rax, [rsi + EFI_MEMORY_DESCRIPTOR.NumberOfPages]
+;         shl     rax, 12
+;         add     r12, rax
+;         fstcall efi_print_hex_fixed, r12
+;         fstcall efi_puts, msg_spacer
+
+;         mov     ecx, [rsi+EFI_MEMORY_DESCRIPTOR.Type]
+;         cmp     ecx, EFI_LOADER_CODE
+;         jz      .mem_ram_if_wb
+;         cmp     ecx, EFI_LOADER_DATA
+;         jz      .mem_ram_if_wb
+;         cmp     ecx, EFI_BOOT_SERVICES_CODE
+;         jz      .mem_ram_if_wb
+;         cmp     ecx, EFI_BOOT_SERVICES_DATA
+;         jz      .mem_ram_if_wb
+;         cmp     ecx, EFI_CONVENTIONAL_MEMORY
+;         jz      .mem_ram_if_wb
+;         cmp     ecx, EFI_ACPI_RECLAIM_MEMORY
+;         mov     eax, E820_ACPI
+;         jz      .type_done
+;         cmp     ecx, EFI_ACPI_MEMORY_NVS
+;         mov     eax, E820_NVS
+;         jz      .type_done
+;         cmp     ecx, EFI_UNUSABLE_MEMORY
+;         mov     eax, E820_UNUSABLE
+;         jz      .type_done
+;         cmp     ecx, EFI_PERSISTENT_MEMORY
+;         mov     eax, E820_PMEM
+;         jz      .type_done
+;         jmp     .reserved
+; .mem_ram_if_wb:
+;         test    [rsi+EFI_MEMORY_DESCRIPTOR.Attribute], dword EFI_MEMORY_WB
+;         mov     eax, E820_RAM
+;         jnz     .type_done
+; .reserved:
+;         mov     eax, E820_RESERVED
+; .type_done:
+;         lea     rax, [e820_typenames + rax*8]
+;         fstcall efi_puts, qword [rax]
+;         fstcall efi_puts, msg_newline
+
+; .done:
+;         add     rsi, [descriptor_size]
+;         inc     r14
+;         cmp     rsi, r15
+;         jb      .next_descr
+
+        fstcall efi_set_text_color, EFI_LIGHTGRAY
+
+
+;;;;;;;;;;;;;; loading kernel to memory
         mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
-        fstcall [r10 + EFI_BOOT_SERVICES.AllocatePages], EFI_ALLOCATE_ANY_PAGES, \
-                EFI_RESERVED_MEMORY_TYPE, MEMORY_MAP_SIZE/0x1000, memory_map
-        ;; call    halt_on_error ; TODO
-
-        ;mov     rbx, [efi_table] ;;
+        fstcall [r10 + EFI_BOOT_SERVICES.HandleProtocol], [efi_handle], lip_guid, lip_interface
+        test    eax, eax
+        jz      @f
+        fstcall efi_set_text_color, EFI_LIGHTRED
+        fstcall efi_puts, msg_error_efi_lip_handle
+        jmp     $
+@@:
+        mov     r11, [lip_interface]
         mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
-        fstcall [r10 + EFI_BOOT_SERVICES.GetMemoryMap], memory_map_size, \
-                [memory_map], memory_map_key, descriptor_size, descriptor_ver
-        ;; call    halt_on_error ; TODO
-
-        mov     rsi, [memory_map]
-        mov     r15, rsi
-        add     r15, [memory_map_size]
-        xor     r14, r14 ; memmap entry idx
-.next_descr:
-        fstcall efi_print_hex_no_lz, r14
-        fstcall efi_puts, msg_spacer
-
-        mov     rax, [rsi + EFI_MEMORY_DESCRIPTOR.PhysicalStart]
-        mov     r12, rax
-        fstcall efi_print_hex_fixed, rax
-        fstcall efi_puts, msg_spacer
-
-        mov     rax, [rsi + EFI_MEMORY_DESCRIPTOR.NumberOfPages]
-        shl     rax, 12
-        add     r12, rax
-        fstcall efi_print_hex_fixed, r12
-        fstcall efi_puts, msg_spacer
-
-        mov     ecx, [rsi+EFI_MEMORY_DESCRIPTOR.Type]
-        cmp     ecx, EFI_LOADER_CODE
-        jz      .mem_ram_if_wb
-        cmp     ecx, EFI_LOADER_DATA
-        jz      .mem_ram_if_wb
-        cmp     ecx, EFI_BOOT_SERVICES_CODE
-        jz      .mem_ram_if_wb
-        cmp     ecx, EFI_BOOT_SERVICES_DATA
-        jz      .mem_ram_if_wb
-        cmp     ecx, EFI_CONVENTIONAL_MEMORY
-        jz      .mem_ram_if_wb
-        cmp     ecx, EFI_ACPI_RECLAIM_MEMORY
-        mov     eax, E820_ACPI
-        jz      .type_done
-        cmp     ecx, EFI_ACPI_MEMORY_NVS
-        mov     eax, E820_NVS
-        jz      .type_done
-        cmp     ecx, EFI_UNUSABLE_MEMORY
-        mov     eax, E820_UNUSABLE
-        jz      .type_done
-        cmp     ecx, EFI_PERSISTENT_MEMORY
-        mov     eax, E820_PMEM
-        jz      .type_done
-        jmp     .reserved
-.mem_ram_if_wb:
-        test    [rsi+EFI_MEMORY_DESCRIPTOR.Attribute], dword EFI_MEMORY_WB
-        mov     eax, E820_RAM
-        jnz     .type_done
-.reserved:
-        mov     eax, E820_RESERVED
-.type_done:
-        lea     rax, [e820_typenames + rax*8]
-        fstcall efi_puts, qword [rax]
-        fstcall efi_puts, msg_newline
-
-.done:
-        add     rsi, [descriptor_size]
-        inc     r14
-        cmp     rsi, r15
-        jb      .next_descr
+        fstcall [r10 + EFI_BOOT_SERVICES.HandleProtocol], [r11 + EFI_LOADED_IMAGE_PROTOCOL.DeviceHandle], sfsp_guid, sfsp_interface
+        test    eax, eax
+        jz      @f
+        fstcall efi_set_text_color, EFI_LIGHTRED
+        fstcall efi_puts, msg_error_lip_dev_sfsp
+        jmp     $
+@@:
+        mov     r10, [sfsp_interface]
+        fstcall [r10 + EFI_SIMPLE_FILE_SYSTEM_PROTOCOL.OpenVolume], [sfsp_interface], volume_root
+        test    eax, eax
+        jz      @f
+        fstcall efi_set_text_color, EFI_LIGHTRED
+        fstcall efi_puts, msg_error_sfsp_openvolume
+        jmp     $
+@@:
+        ;; TODO add function read_file, using it load kernel file
+        ;; read from kernel header how many stack it needs, allocpages for kernel code and stack
+        ;; put phys start / end to kernel header
+        ;; jmp to k64_entry (offset is in kernel header)
 
 
         ; fstcall efi_set_text_color, EFI_LIGHTGRAY
@@ -169,6 +202,10 @@ endp
 section '.data' data readable writeable
 efi_handle  dq 0
 efi_table   dq 0
+
+lip_interface   dq 0
+sfsp_interface  dq 0
+
 hex_codes:
         db '0123456789ABCDEF', 0
 
@@ -179,12 +216,25 @@ memory_map_size dq MEMORY_MAP_SIZE
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 section '.rodata' data readable
+
+gop_guid        db EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID
+lip_guid        db EFI_LOADED_IMAGE_PROTOCOL_GUID
+sfsp_guid       db EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID
+pcirbiop_guid   db EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_GUID
+
+kernel_file_path du '\EFI\KERNEL64.BIN', 0
+
 msg_hello_k64_loader du "Kolibri64 EFI bootloader",13,10,0
 msg_firmware_vendor du "UEFI vendor: ", 0
 msg_firmware_revision du "UEFI revision: ", 0
 msg_newline du 13,10,0
 msg_failed_disable_watchdog du "Failed to disable watchdog timer!", 13,10,0
-msg_end_1 du 13,10,"---------- test printing functions:", 13,10,0
+
+msg_error_efi_lip_handle  du "efi_handle can't handle LIP",13,10,0
+msg_error_lip_dev_sfsp    du "LIP device handle can't handle SFSP",13,10,0
+msg_error_sfsp_openvolume du "SFSP OpenVolume failed",13,10,0
+
+; msg_end_1 du 13,10,"---------- test printing functions:", 13,10,0
 msg_spacer du "    ", 0
 msg_dummy du "<....>", 0
 
@@ -207,11 +257,10 @@ e820_typenames:
         dq msg_e820_persistent
 
 
-kernel_file_path du '\EFI\KERNEL64.BIN', 0
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 section '.bss' data readable writeable discardable
 memory_map      dq ?
+volume_root     dq ?
 
 
 section '.reloc' fixups data discardable

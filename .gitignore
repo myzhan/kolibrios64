@@ -3,3 +3,5 @@
 image/
 *.fas
 *.prep
+*.bin
+*/*.bin
