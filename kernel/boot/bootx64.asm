@@ -13,6 +13,8 @@ include '../struct.inc'
 ; include '../macros.inc'
 ; include '../kglobals.inc'
 fastcall fix fstcall
+TCHAR fix du ; bc uefi uses CHAR16
+sizeof.TCHAR = 2
 include '../proc64.inc'
 include '../const.inc'
 
@@ -30,6 +32,38 @@ E820_UNUSABLE  = 5
 E820_PMEM      = 7
 
 include 'uefi_prints.inc'
+
+
+proc load_file _root, _name, _buffer, _size, _fatal
+        mov     [_root], rcx
+        mov     [_name], rdx
+        mov     [_buffer], r8
+        mov     [_size], r9
+        mov     r10, [_root]
+        mov     r11, [_name]
+        fstcall [r10 + EFI_FILE_PROTOCOL.Open], r10, file_handle, r11, EFI_FILE_MODE_READ, 0
+        test    eax, eax
+        jz      @f
+        mov     [_size], 0
+        cmp     [_fatal], 1
+        jnz     .done
+        fstcall efi_puts, msg_error_open_file
+        fstcall efi_puts, [_name]
+        jmp     $
+@@:
+        lea     rdx, [_size]
+        mov     r8, [_buffer]
+        mov     r10, [file_handle]
+        fstcall [r10 + EFI_FILE_PROTOCOL.Read], [file_handle], rdx, r8
+        mov     r10, [file_handle]
+        fstcall [r10 + EFI_FILE_PROTOCOL.Close], [file_handle]
+.done:
+        fstcall efi_puts, msg_bytes_read
+        fstcall efi_print_hex_no_lz, [_size]
+        fstcall efi_puts, msg_newline
+        mov     rax, [_size]
+        ret
+endp
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -49,7 +83,7 @@ proc main _efi_handle, _efi_table
         fstcall [rax + EFI_BOOT_SERVICES.SetWatchdogTimer], 0, 0, 0, 0
         test    eax, eax
         jz      @f
-        fstcall efi_puts, msg_failed_disable_watchdog
+        fstcall efi_puts, msg_error_disable_watchdog
         jmp     $
 @@:
 
@@ -169,14 +203,38 @@ proc main _efi_handle, _efi_table
         fstcall efi_puts, msg_error_sfsp_openvolume
         jmp     $
 @@:
-        ;; TODO add function read_file, using it load kernel file
-        ;; read from kernel header how many stack it needs, allocpages for kernel code and stack
-        ;; put phys start / end to kernel header
-        ;; jmp to k64_entry (offset is in kernel header)
+        fstcall efi_puts, msg_newline
+        ; fstcall efi_print_hex_fixed, [volume_root]
+        fstcall efi_puts, msg_reading_kernel_header
+        fstcall load_file, [volume_root], kernel_file_path, kernel_header_buf, 8*5, 0 ; TODO maybe kernel header make as struct => dont hardcode size use  sizeof
 
+        fstcall efi_puts, msg_newline
+        fstcall efi_puts, msg_thisis_kernel_header
+        xor     r14, r14
+@@:
+        fstcall efi_putc, [r14 + kernel_header_buf]
+        inc     r14
+        cmp     r14, 8
+        jl      @b
+@@:
+        fstcall efi_puts, msg_newline
+
+        fstcall efi_print_hex_no_lz, [kernel_header_buf + 8]
+        fstcall efi_puts, msg_newline
+
+        fstcall efi_print_hex_no_lz, [kernel_header_buf + 16]
+        fstcall efi_puts, msg_newline
+
+        ;; TODO
+        ;; read allocpages for kernel code  and stack  a contignuous range of pages 
+        ;; put phys start / end to kernel header
+        ;; set kernel rsp, jmp to k64_entry (offset is in kernel header)
+
+        fstcall efi_set_text_color, EFI_LIGHTGRAY
+        fstcall efi_puts, <"-----------------",0>
 
         ; fstcall efi_set_text_color, EFI_LIGHTGRAY
-        ; fstcall efi_puts, msg_end_1
+        ; fstcall efi_puts, <"dfdsfds",13,10,"fdfdf0983827",0>
 
         ; fstcall efi_print_hex_no_lz, 0x000A000B00C
         ; fstcall efi_puts, msg_newline
@@ -227,14 +285,18 @@ kernel_file_path du '\EFI\KERNEL64.BIN', 0
 msg_hello_k64_loader du "Kolibri64 EFI bootloader",13,10,0
 msg_firmware_vendor du "UEFI vendor: ", 0
 msg_firmware_revision du "UEFI revision: ", 0
-msg_newline du 13,10,0
-msg_failed_disable_watchdog du "Failed to disable watchdog timer!", 13,10,0
+msg_reading_kernel_header du "Reading kernel header..",13,10,0
+msg_thisis_kernel_header du "Kernel header:",13,10,0
+msg_bytes_read du "Bytes read: ", 0
 
+msg_error_disable_watchdog du "Failed to disable watchdog timer!", 13,10,0
+msg_error_open_file       du "Error: can't open file ",0
 msg_error_efi_lip_handle  du "efi_handle can't handle LIP",13,10,0
 msg_error_lip_dev_sfsp    du "LIP device handle can't handle SFSP",13,10,0
 msg_error_sfsp_openvolume du "SFSP OpenVolume failed",13,10,0
 
 ; msg_end_1 du 13,10,"---------- test printing functions:", 13,10,0
+msg_newline du 13,10,0
 msg_spacer du "    ", 0
 msg_dummy du "<....>", 0
 
@@ -261,6 +323,8 @@ e820_typenames:
 section '.bss' data readable writeable discardable
 memory_map      dq ?
 volume_root     dq ?
+file_handle     dq ? 
+kernel_header_buf   dq 4 dup(?)
 
 
 section '.reloc' fixups data discardable
