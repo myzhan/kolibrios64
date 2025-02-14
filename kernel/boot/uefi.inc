@@ -80,7 +80,10 @@ EFI_PROTOCOL_ERROR              = EFIERR or 24
 
 
 EFI_FILE_SYSTEM_INFO_ID equ 0x93,0x6e,0x57,0x09,0x3f,0x6d,0xd2,0x11, \
-                            0x39,0x8e,0x00,0xa0,0xc9,0x69,0x72,0x3b
+                            0x8e,0x39,0x00,0xa0,0xc9,0x69,0x72,0x3b
+
+EFI_FILE_INFO_ID        equ 0x92,0x6e,0x57,0x09,0x3f,0x6d,0xd2,0x11, \
+                            0x8e,0x39,0x00,0xa0,0xc9,0x69,0x72,0x3b
 
 EFI_SYSTEM_TABLE_SIGNATURE equ 0x49,0x42,0x49,0x20,0x53,0x59,0x53,0x54
 
@@ -153,6 +156,17 @@ struct EFI_FILE_SYSTEM_INFO
   FreeSpace     DQ ?
   BlockSize     dd ?
   VolumeLabel   rw 32
+ends
+
+struct EFI_FILE_INFO
+  Size              DQ ?
+  FileSize          DQ ?
+  PhysicalSize      DQ ?
+  CreateTime        rb 16 ; sizeof(EFI_TIME) = 16
+  LastAccessTime    rb 16
+  ModificationTime  rb 16
+  Attribute         DQ ?
+  FileName          rw 32 ; but in orig it is  FileName []; i.e any size
 ends
 
 struct EFI_TABLE_HEADER

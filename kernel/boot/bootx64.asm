@@ -67,6 +67,67 @@ endp
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
+; return in rax file size
+proc get_file_size uses r12 r13, _root, _name, _file_size
+        mov     [_root], rcx
+        mov     [_name], rdx
+        mov     [_file_size], r8
+        xor     r12, r12 ; default return value is 0
+        ; mov     rbx, [efi_table]
+
+        mov     r10, [_root]
+        mov     r11, [_name]
+        mov     [file_handle], 0 ; to know its empty if open fails
+        fstcall [r10 + EFI_FILE_PROTOCOL.Open], r10, file_handle, r11, EFI_FILE_MODE_READ, 0
+        test    eax, eax
+        jnz     .error
+
+        ; mov     rax, rsp
+        ; fstcall efi_print_hex_fixed, rax
+
+        mov     rcx, [file_handle]
+        mov     [buf_size], 0
+        fstcall [rcx + EFI_FILE_PROTOCOL.GetInfo], rcx, fid_guid, buf_size, 0
+        mov     rdx, EFI_BUFFER_TOO_SMALL
+        cmp     rax, rdx ; TODO how to do with imm?
+        jnz     .error  ; if error is not EFI_BUFFER_TOO_SMALL then error
+
+        mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
+        mov     [buf_ptr], 0 ; to know its none if AllocatePool fails
+        fstcall [r10 + EFI_BOOT_SERVICES.AllocatePool], EFI_LOADER_DATA, buf_size, buf_ptr
+        test    eax, eax
+        jnz     .error
+
+        mov     rcx, [file_handle]
+        fstcall [rcx + EFI_FILE_PROTOCOL.GetInfo], rcx, fid_guid, buf_size, [buf_ptr]
+        test    eax, eax
+        jnz     .error
+
+        mov     rcx, [buf_ptr]
+        mov     r12, [rcx + EFI_FILE_INFO.FileSize] ; here is the file size
+        jmp     .exit
+
+.error:
+        fstcall efi_puts, msg_get_file_size_error
+
+.exit:
+        cmp     [file_handle], 0
+        jz      @f
+        mov     rcx, [file_handle]
+        fstcall [rcx + EFI_FILE_PROTOCOL.Close], rcx
+@@:
+        cmp     [buf_ptr], 0
+        jz      @f
+        mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
+        fstcall [r10 + EFI_BOOT_SERVICES.FreePool], [buf_ptr]
+@@:
+        mov     rax, [_file_size]
+        mov     [rax], r12
+        ret
+endp
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 proc main _efi_handle, _efi_table
         mov     [efi_handle], rcx
         mov     [efi_table], rdx
@@ -177,7 +238,7 @@ proc main _efi_handle, _efi_table
         fstcall efi_set_text_color, EFI_LIGHTGRAY
 
 
-;;;;;;;;;;;;;; loading kernel to memory
+;;;;;;;;;;;;;;;;; loading kernel to memory
         mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
         fstcall [r10 + EFI_BOOT_SERVICES.HandleProtocol], [efi_handle], lip_guid, lip_interface
         test    eax, eax
@@ -203,12 +264,14 @@ proc main _efi_handle, _efi_table
         fstcall efi_puts, msg_error_sfsp_openvolume
         jmp     $
 @@:
+
+;;;;;;;;;;;;;;;;; read kernel file header
         fstcall efi_puts, msg_newline
         ; fstcall efi_print_hex_fixed, [volume_root]
         fstcall efi_puts, msg_reading_kernel_header
         fstcall load_file, [volume_root], kernel_file_path, kernel_header_buf, 8*5, 0 ; TODO maybe kernel header make as struct => dont hardcode size use  sizeof
 
-        fstcall efi_puts, msg_newline
+        ; fstcall efi_puts, msg_newline
         fstcall efi_puts, msg_thisis_kernel_header
         xor     r14, r14
 @@:
@@ -225,11 +288,30 @@ proc main _efi_handle, _efi_table
         fstcall efi_print_hex_no_lz, [kernel_header_buf + 16]
         fstcall efi_puts, msg_newline
 
+;;;;;;;;;;;;;;;;; get the kernel file size
+        fstcall efi_puts, msg_newline
+        fstcall get_file_size, [volume_root], kernel_file_path, kernel_file_size
+        fstcall efi_puts, "kernel file size = "
+        fstcall efi_print_hex_no_lz, [kernel_file_size]
+        fstcall efi_puts, msg_newline
+
+        mov     rax, [kernel_file_size]
+        add     rax, 4095
+        and     rax, -4096 ; round up to next 4k boundary
+        shr     rax, 12 ; / 4096
+        mov     [kernel_file_size_pages], rax
+
+        fstcall efi_puts, "Number of 4k pages needed for kernel image = "
+        fstcall efi_print_hex_no_lz, [kernel_file_size_pages]
+        fstcall efi_puts, msg_newline
+
         ;; TODO
-        ;; read allocpages for kernel code  and stack  a contignuous range of pages 
+        ;; allocpages for kernel code  and stack  a contignuous range of pages 
         ;; put phys start / end to kernel header
+        ;; read the kernel file to allocated memory
         ;; set kernel rsp, jmp to k64_entry (offset is in kernel header)
 
+;;;;;;;;;;;;;;;;; test output
         fstcall efi_set_text_color, EFI_LIGHTGRAY
         fstcall efi_puts, <"-----------------",0>
 
@@ -279,6 +361,7 @@ gop_guid        db EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID
 lip_guid        db EFI_LOADED_IMAGE_PROTOCOL_GUID
 sfsp_guid       db EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID
 pcirbiop_guid   db EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL_GUID
+fid_guid        db EFI_FILE_INFO_ID
 
 kernel_file_path du '\EFI\KERNEL64.BIN', 0
 
@@ -294,6 +377,7 @@ msg_error_open_file       du "Error: can't open file ",0
 msg_error_efi_lip_handle  du "efi_handle can't handle LIP",13,10,0
 msg_error_lip_dev_sfsp    du "LIP device handle can't handle SFSP",13,10,0
 msg_error_sfsp_openvolume du "SFSP OpenVolume failed",13,10,0
+msg_get_file_size_error   du "Error getting file size",13,10,0
 
 ; msg_end_1 du 13,10,"---------- test printing functions:", 13,10,0
 msg_newline du 13,10,0
@@ -321,10 +405,16 @@ e820_typenames:
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 section '.bss' data readable writeable discardable
-memory_map      dq ?
-volume_root     dq ?
-file_handle     dq ? 
-kernel_header_buf   dq 4 dup(?)
+memory_map             dq ?
+volume_root            dq ?
+file_handle            dq ? ; for load_file, get_file_size
+kernel_header_buf      dq 4 dup(?)
+kernel_file_size       dq ?
+kernel_file_size_pages dq ?
+buf_size               dq ? ; for get_file_size
+buf_ptr                dq ? ; for get_file_size
+
+tmp123              rq 1024
 
 
 section '.reloc' fixups data discardable
