@@ -10,7 +10,8 @@ exactly one space after a comma. Arguments continued in the next line must start
 position as in the first line.  
 * Prefixes `lock/rep[z|e|nz|ne]` are considered as a logical part of the command, so they start at  
 position 8, then after exactly one space follows the main mnemonic and arguments.  
-* All code and text files should be in UTF-8 without BOM.  
+* All code and text files should be in UTF-8 without BOM.
+* Naming and comments in English
   
 ### Recommended
 * Variables should have either a clear name or a comment.  
