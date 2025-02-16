@@ -33,6 +33,15 @@ E820_PMEM      = 7
 
 include 'uefi_prints.inc'
 
+struct KERNEL64_HEADER
+        magic              dq ? ; magic, must be 'KERNEL64'
+        entry_point_offset dq ? ; offset of 64bit kernel entry point in file
+        stack_size         dq ? ; default kernel stack in bytes
+        phys_start         dq ? ; bootloader will put here phys addr where it loaded kernel
+        phys_end           dq ? ; and phys end addr (including stack ofc)
+        ; to be continued :)
+ends
+
 
 proc load_file _root, _name, _buffer, _size, _fatal
         mov     [_root], rcx
@@ -269,23 +278,23 @@ proc main _efi_handle, _efi_table
         fstcall efi_puts, msg_newline
         ; fstcall efi_print_hex_fixed, [volume_root]
         fstcall efi_puts, msg_reading_kernel_header
-        fstcall load_file, [volume_root], kernel_file_path, kernel_header_buf, 8*5, 0 ; TODO maybe kernel header make as struct => dont hardcode size use  sizeof
+        fstcall load_file, [volume_root], kernel_file_path, kernel_header_buf, sizeof.KERNEL64_HEADER, 1
 
         ; fstcall efi_puts, msg_newline
         fstcall efi_puts, msg_thisis_kernel_header
         xor     r14, r14
 @@:
-        fstcall efi_putc, [r14 + kernel_header_buf]
+        fstcall efi_putc, qword [r14 + kernel_header_buf]
         inc     r14
         cmp     r14, 8
         jl      @b
 @@:
         fstcall efi_puts, msg_newline
 
-        fstcall efi_print_hex_no_lz, [kernel_header_buf + 8]
+        fstcall efi_print_hex_no_lz, [kernel_header_buf + KERNEL64_HEADER.entry_point_offset]
         fstcall efi_puts, msg_newline
 
-        fstcall efi_print_hex_no_lz, [kernel_header_buf + 16]
+        fstcall efi_print_hex_no_lz, [kernel_header_buf + KERNEL64_HEADER.stack_size]
         fstcall efi_puts, msg_newline
 
 ;;;;;;;;;;;;;;;;; get the kernel file size
@@ -298,22 +307,71 @@ proc main _efi_handle, _efi_table
         mov     rax, [kernel_file_size]
         add     rax, 4095
         and     rax, -4096 ; round up to next 4k boundary
-        shr     rax, 12 ; / 4096
+        shr     rax, BSF 4096
         mov     [kernel_file_size_pages], rax
-
-        fstcall efi_puts, "Number of 4k pages needed for kernel image = "
+        fstcall efi_puts, "4k pages need for kernel image = "
         fstcall efi_print_hex_no_lz, [kernel_file_size_pages]
         fstcall efi_puts, msg_newline
 
-        ;; TODO
-        ;; allocpages for kernel code  and stack  a contignuous range of pages 
-        ;; put phys start / end to kernel header
-        ;; read the kernel file to allocated memory
-        ;; set kernel rsp, jmp to k64_entry (offset is in kernel header)
+        mov     rax, [kernel_header_buf + KERNEL64_HEADER.stack_size]
+        add     rax, 4095
+        and     rax, -4096
+        shr     rax, BSF 4096
+        mov     [kernel_stack_size_pages], rax
+        fstcall efi_puts, "4k pages need for kernel stack = "
+        fstcall efi_print_hex_no_lz, [kernel_stack_size_pages]
+        fstcall efi_puts, msg_newline
+
+        mov     rax, [kernel_file_size_pages]
+        add     rax, [kernel_stack_size_pages]
+        mov     [kernel_image_total_pages], rax
+        fstcall efi_puts, "4k pages need for kernel image = "
+        fstcall efi_print_hex_no_lz, [kernel_image_total_pages]
+        fstcall efi_puts, msg_newline
+
+        mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
+        fstcall [r10 + EFI_BOOT_SERVICES.AllocatePages], EFI_ALLOCATE_ANY_PAGES, EFI_RESERVED_MEMORY_TYPE, \
+                [kernel_image_total_pages], kernel_image_phys_base
+
+        fstcall load_file, [volume_root], kernel_file_path, [kernel_image_phys_base], [kernel_file_size], 1
+
+        mov     rax, [kernel_image_phys_base]
+        mov     [rax + KERNEL64_HEADER.phys_start], rax
+        mov     rcx, [kernel_image_total_pages]
+        shl     rcx, BSF 4096
+        add     rcx, rax
+        mov     [rax + KERNEL64_HEADER.phys_end], rcx
+
+        fstcall efi_puts, "Kernel + kernel_stack loaded to phys region ["
+        fstcall efi_print_hex_fixed, [rax + KERNEL64_HEADER.phys_start]
+        fstcall efi_puts, ", "
+        fstcall efi_print_hex_fixed, [rax + KERNEL64_HEADER.phys_end]
+        fstcall efi_puts, <")",13,10,0>
+
+        ; TODO
+        ;; pass phys start / end to kernel header
+        ;; map [kernel_phys_start; kernel_phys_end) to 0xFFFFFFFF80000000, set kernel rsp, jmp to k64_entry
+        ;; NOTE: dont allocate after getting memmap bc uefi allocations change the memmap. => get memmmap last of all
+        ;; TODO: write memmap to some buffer, to pass it to the kernel. move getting memmap code to a separate function    
+
+        ; mov     rax, [kernel_file_size_pages]
+        ; shl     rax, BSF 4096 ; * 4096
+        ; add     rax, [kernel_image_phys_base]
+        ; ; fstcall efi_print_hex_fixed, rax
+        ; ; jmp $  
+        ; push    efi_puts
+        ; push    efi_print_hex_fixed
+        ; mov     rsp, rax
+        ; mov     rax, [kernel_header_buf + KERNEL64_HEADER.entry_point_offset]
+        ; add     rax, [kernel_image_phys_base]
+        ; ; fstcall efi_print_hex_fixed, rax
+        ; ; jmp $  
+        ; jmp     rax
+
 
 ;;;;;;;;;;;;;;;;; test output
         fstcall efi_set_text_color, EFI_LIGHTGRAY
-        fstcall efi_puts, <"-----------------",0>
+        fstcall efi_puts, <13,10,"-----------------",13,10,0>
 
         ; fstcall efi_set_text_color, EFI_LIGHTGRAY
         ; fstcall efi_puts, <"dfdsfds",13,10,"fdfdf0983827",0>
@@ -405,16 +463,21 @@ e820_typenames:
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 section '.bss' data readable writeable discardable
-memory_map             dq ?
-volume_root            dq ?
-file_handle            dq ? ; for load_file, get_file_size
-kernel_header_buf      dq 4 dup(?)
-kernel_file_size       dq ?
-kernel_file_size_pages dq ?
-buf_size               dq ? ; for get_file_size
-buf_ptr                dq ? ; for get_file_size
+memory_map               dq ?
+volume_root              dq ?
+file_handle              dq ? ; for load_file, get_file_size
+buf_size                 dq ? ; for get_file_size
+buf_ptr                  dq ? ; for get_file_size
 
-tmp123              rq 1024
+kernel_header_buf        KERNEL64_HEADER
+kernel_file_size         dq ?
+kernel_file_size_pages   dq ?
+
+kernel_stack_size_pages  dq ?
+
+kernel_image_total_pages dq ?
+kernel_image_phys_base   dq ?
+
 
 
 section '.reloc' fixups data discardable

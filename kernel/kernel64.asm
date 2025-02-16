@@ -20,7 +20,7 @@ kernel_phys_end dq 0 ; and phys end addr (including stack ofc)
 
 ; 64 bit kernel entry point
 k64_entry:
-        mov     rsp, kernel_default_stack
+        ;; NOTE! oops addresses are incorrect
         pop     qword [qword puthex_ptr - VIRT_KERNEL_BASE]
         pop     qword [qword putstr_ptr - VIRT_KERNEL_BASE]
         
@@ -47,8 +47,4 @@ kmsg_ripis      db 'RIP = ',13,10,0
 
 puthex_ptr      dq 0
 putstr_ptr      dq 0
-
-rb DEFAULT_STACK_SIZE
-align 16
-kernel_default_stack:
 
