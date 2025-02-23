@@ -444,18 +444,18 @@ msg_dummy du "<....>", 0
 
 msg_e820_memmap_here du "Memory map (phys_start, phys_end, e820 type)",13,10,0
 msg_e820_available du "Available RAM", 0
-mag_e820_reserved du "Reserved RAM", 0
-mag_e820_acpi_reclaim du "ACPI reclaimable RAM", 0
-mag_e820_acpi_nvs du "ACPI NVS RAM", 0
+msg_e820_reserved du "Reserved RAM", 0
+msg_e820_acpi_reclaim du "ACPI reclaimable RAM", 0
+msg_e820_acpi_nvs du "ACPI NVS RAM", 0
 msg_e820_badmem du "Bad RAM", 0
 msg_e820_persistent du "Persistent RAM", 0
 
 e820_typenames:
         dq msg_dummy
         dq msg_e820_available
-        dq mag_e820_reserved
-        dq mag_e820_acpi_reclaim
-        dq mag_e820_acpi_nvs
+        dq msg_e820_reserved
+        dq msg_e820_acpi_reclaim
+        dq msg_e820_acpi_nvs
         dq msg_e820_badmem
         dq msg_dummy
         dq msg_e820_persistent
