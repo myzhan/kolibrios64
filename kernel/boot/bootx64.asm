@@ -21,7 +21,9 @@ include '../const.inc'
 purge DQ ; because of some struct DQ in const.inc
 include 'uefi64.inc'
 
-MEMORY_MAP_SIZE = 0x10000
+MEMORY_MAP_SIZE = 0x10000 ; NOTE: can be bigger?
+
+VIRT_KERNEL_BASE = 0xFFFFFFFF80000000
 
 ; linux/arch/x86/include/uapi/asm/e820.h
 E820_RAM       = 1
@@ -341,6 +343,7 @@ proc main _efi_handle, _efi_table
         shl     rcx, BSF 4096
         add     rcx, rax
         mov     [rax + KERNEL64_HEADER.phys_end], rcx
+        mov     [kernel_image_phys_end], rcx
 
         fstcall efi_puts, "Kernel + kernel_stack loaded to phys region ["
         fstcall efi_print_hex_fixed, [rax + KERNEL64_HEADER.phys_start]
@@ -348,25 +351,60 @@ proc main _efi_handle, _efi_table
         fstcall efi_print_hex_fixed, [rax + KERNEL64_HEADER.phys_end]
         fstcall efi_puts, <")",13,10,0>
 
-        ; TODO
-        ;; pass phys start / end to kernel header
-        ;; map [kernel_phys_start; kernel_phys_end) to 0xFFFFFFFF80000000, set kernel rsp, jmp to k64_entry
-        ;; NOTE: dont allocate after getting memmap bc uefi allocations change the memmap. => get memmmap last of all
-        ;; TODO: write memmap to some buffer, to pass it to the kernel. move getting memmap code to a separate function    
+        ; Zero out the paging tables p1-p4
+        mov     rdi, table_p1
+        mov     rcx, 512*4
+        xor     rax, rax
+        cld
+        rep     stosq
 
-        ; mov     rax, [kernel_file_size_pages]
-        ; shl     rax, BSF 4096 ; * 4096
-        ; add     rax, [kernel_image_phys_base]
-        ; ; fstcall efi_print_hex_fixed, rax
-        ; ; jmp $  
-        ; push    efi_puts
-        ; push    efi_print_hex_fixed
-        ; mov     rsp, rax
-        ; mov     rax, [kernel_header_buf + KERNEL64_HEADER.entry_point_offset]
-        ; add     rax, [kernel_image_phys_base]
-        ; ; fstcall efi_print_hex_fixed, rax
-        ; ; jmp $  
-        ; jmp     rax
+        ; P4[P4_OFFSET(VIRT_KERNEL_BASE)] = P3 or flags
+        mov     rax, table_p3
+        or      rax, 0x3 ; present, r/w
+        mov     rdi, table_p4
+        add     rdi, ((VIRT_KERNEL_BASE shr 39) and 0x1FF)*8 ; offset of entry in P4
+        stosq
+
+        ; P3[P3_OFFSET(VIRT_KERNEL_BASE)] = P2 or flags
+        mov     rax, table_p2
+        or      rax, 0x3 ; present, r/w
+        mov     rdi, table_p3
+        add     rdi, ((VIRT_KERNEL_BASE shr 30) and 0x1FF)*8
+        stosq
+
+        ; P2[P2_OFFSET(VIRT_KERNEL_BASE)] = P1 or flags
+        mov     rax, table_p1
+        or      rax, 0x3 ; present, r/w
+        mov     rdi, table_p2
+        add     rdi, ((VIRT_KERNEL_BASE shr 21) and 0x1FF)*8
+        stosq
+
+        mov     rcx, [kernel_image_phys_base]
+        mov     rdx, VIRT_KERNEL_BASE
+.fill_p1:
+        mov     rax, rdx
+        shr     rax, 12
+        and     rax, 0x1FF
+        shl     rax, BSF 8 ; *8
+        add     rax, table_p1
+        mov     rdi, rcx
+        or      rdi, 0x3
+        mov     [rax], rdi
+
+        add     rcx, 4096
+        add     rdx, 4096
+        cmp     rcx, [kernel_image_phys_end]
+        jb      .fill_p1 
+
+        ; TODO
+        ;; put phys start / end into kernel header
+        ;; map [kernel_phys_start; kernel_phys_end) to 0xFFFFFFFF80000000
+        ;; (~~fill paging tables~~, ExitBootServices and switch to the new PML4), set kernel rsp, jmp to k64_entry
+        ;; NOTE: dont allocate after getting memmap bc uefi allocations change the memmap. => perform GetMemoryMap last of all..
+        ;; QUESTION: How to pass memory map to the kernel?
+        ;; Push in contents in stack? (wtf). Write memmap to some buffer,
+        ;; map it into kernel address space and push pointer to it into the kernel stack
+        ;; getting memmap should be a separate function   
 
 
 ;;;;;;;;;;;;;;;;; test output
@@ -477,6 +515,13 @@ kernel_stack_size_pages  dq ?
 
 kernel_image_total_pages dq ?
 kernel_image_phys_base   dq ?
+kernel_image_phys_end    dq ?
+
+align 4096
+table_p4                 rq 512
+table_p3                 rq 512
+table_p2                 rq 512
+table_p1                 rq 512
 
 
 
