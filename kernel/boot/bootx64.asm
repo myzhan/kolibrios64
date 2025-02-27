@@ -23,8 +23,6 @@ include 'uefi64.inc'
 
 MEMORY_MAP_SIZE = 0x10000 ; NOTE: can be bigger?
 
-VIRT_KERNEL_BASE = 0xFFFFFFFF80000000
-
 ; linux/arch/x86/include/uapi/asm/e820.h
 E820_RAM       = 1
 E820_RESERVED  = 2
@@ -396,8 +394,19 @@ proc main _efi_handle, _efi_table
         cmp     rcx, [kernel_image_phys_end]
         jb      .fill_p1 
 
+        ; causes fault and reboots. maybe i need exitbootservices first? maybe paging structures incorrect
+        ; mov     rax, table_p4
+        ; mov     cr3, rax
+
+        ; TODO ExitBootServices here
+
+        mov     rax, [kernel_image_phys_base]
+        mov     rax, [rax + KERNEL64_HEADER.entry_point_offset]
+        add     rax, [kernel_image_phys_base] ; jump to phys kernel for now
+        ; add     rax, VIRT_KERNEL_BASE
+        jmp     rax
+
         ; TODO
-        ;; put phys start / end into kernel header
         ;; map [kernel_phys_start; kernel_phys_end) to 0xFFFFFFFF80000000
         ;; (~~fill paging tables~~, ExitBootServices and switch to the new PML4), set kernel rsp, jmp to k64_entry
         ;; NOTE: dont allocate after getting memmap bc uefi allocations change the memmap. => perform GetMemoryMap last of all..
