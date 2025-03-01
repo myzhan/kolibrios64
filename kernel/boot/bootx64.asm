@@ -527,11 +527,10 @@ kernel_image_phys_base   dq ?
 kernel_image_phys_end    dq ?
 
 align 4096
-table_p4                 rq 512
-table_p3                 rq 512
-table_p2                 rq 512
 table_p1                 rq 512
-
+table_p2                 rq 512
+table_p3                 rq 512
+table_p4                 rq 512
 
 
 section '.reloc' fixups data discardable
