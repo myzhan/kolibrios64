@@ -539,8 +539,7 @@ e820_typenames:
         dq msg_dummy
         dq msg_e820_persistent
 
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 section '.bss' data readable writeable discardable
 memory_map               dq ?
 volume_root              dq ?
