@@ -10,7 +10,7 @@ proc efi_set_text_color uses rax rdx
 endp
 
 ; rcx - null-terminated string
-proc efi_puts uses rax rdx
+proc efi_puts uses rax rdx r10 ; TODO maybe other regs that are clobbered by inner calls
         mov     rax, [efi_table]
         mov     rax, [rax+EFI_SYSTEM_TABLE.ConOut]
         mov     rdx, rcx ; arg2 - string
@@ -20,7 +20,7 @@ proc efi_puts uses rax rdx
 endp
 
 ; rcx - char
-proc efi_putc uses rax rdx
+proc efi_putc uses rax rdx r10
 locals
         chr     dq 0
 endl

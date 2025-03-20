@@ -42,6 +42,16 @@ struct KERNEL64_HEADER
         ; to be continued :)
 ends
 
+proc halt_on_error
+        test    eax, eax
+        jz      @f
+        fstcall efi_puts, msg_halt_on_error
+        fstcall efi_print_hex_no_lz, eax
+        lea     rax, [rip]
+        jmp     rax
+@@:
+        ret
+endp
 
 proc load_file _root, _name, _buffer, _size, _fatal
         mov     [_root], rcx
@@ -173,16 +183,16 @@ proc main _efi_handle, _efi_table
 ;         fstcall efi_puts, msg_e820_memmap_here
 ;         fstcall efi_set_text_color, EFI_CYAN
 ;         mov     rbx, [efi_table] ;;
-;         mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
-;         fstcall [r10 + EFI_BOOT_SERVICES.AllocatePages], EFI_ALLOCATE_ANY_PAGES, \
-;                 EFI_RESERVED_MEMORY_TYPE, MEMORY_MAP_SIZE/0x1000, memory_map
-;         ;; call    halt_on_error ; TODO
+        ; mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
+        ; fstcall [r10 + EFI_BOOT_SERVICES.AllocatePages], EFI_ALLOCATE_ANY_PAGES, \
+        ;         EFI_RESERVED_MEMORY_TYPE, MEMORY_MAP_SIZE/0x1000, memory_map
+        ; ;; call    halt_on_error ; TODO
 
-;         ;mov     rbx, [efi_table] ;;
-;         mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
-;         fstcall [r10 + EFI_BOOT_SERVICES.GetMemoryMap], memory_map_size, \
-;                 [memory_map], memory_map_key, descriptor_size, descriptor_ver
-;         ;; call    halt_on_error ; TODO
+        ; ;mov     rbx, [efi_table] ;;
+        ; mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
+        ; fstcall [r10 + EFI_BOOT_SERVICES.GetMemoryMap], memory_map_size, \
+        ;         [memory_map], memory_map_key, descriptor_size, descriptor_ver
+        ;; call    halt_on_error ; TODO
 
 ;         mov     rsi, [memory_map]
 ;         mov     r15, rsi
@@ -243,8 +253,6 @@ proc main _efi_handle, _efi_table
 ;         inc     r14
 ;         cmp     rsi, r15
 ;         jb      .next_descr
-
-        fstcall efi_set_text_color, EFI_LIGHTGRAY
 
 
 ;;;;;;;;;;;;;;;;; loading kernel to memory
@@ -394,11 +402,37 @@ proc main _efi_handle, _efi_table
         cmp     rcx, [kernel_image_phys_end]
         jb      .fill_p1 
 
-        ; causes fault and reboots. maybe i need exitbootservices first? maybe paging structures incorrect
-        ; mov     rax, table_p4
-        ; mov     cr3, rax
+        ; Before performing ExitBootServces need to get fresh memory map
+        mov     rbx, [efi_table]
+        mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
+        fstcall [r10 + EFI_BOOT_SERVICES.AllocatePages], EFI_ALLOCATE_ANY_PAGES, \
+                EFI_RESERVED_MEMORY_TYPE, MEMORY_MAP_SIZE/0x1000, memory_map
+        call    halt_on_error
+        mov     rbx, [efi_table]
+        mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
+        fstcall [r10 + EFI_BOOT_SERVICES.GetMemoryMap], memory_map_size, \
+                [memory_map], memory_map_key, descriptor_size, descriptor_ver
 
-        ; TODO ExitBootServices here
+        mov     r10, [rbx + EFI_SYSTEM_TABLE.BootServices]
+        fstcall [r10 + EFI_BOOT_SERVICES.ExitBootServices], [efi_handle], [memory_map_key]
+        call    halt_on_error
+        ; fstcall efi_print_hex_fixed, 0x1337 ; you cant use boot services after you ExitBootServices. it crashed here => ExitBootServices was successfull
+
+        ; TODO NOTE
+        ; ядро замапил, а текущие адреса нет. CPU пытается исполнить следующую инструкцию после mov cr3, rax, а она уже не замаплена.
+        ; Либо замапь текущий код, либо выключи paging, прыгни на ядро, а оно обратно включит
+        ;
+        ; Думаю замаппить rip+N 1в1 чтобы код прыжка на ядро выполнился. А там уже ядро будет маппить все как надо
+        ; TODO Тут в загрузчике имеющийся код маппинга позволяет маппить регионы до 2Мб (см fill_p1). Вынести это в отдельную функцию. map_region_lessthan2mb че такое
+        ; и через эту функу замаппить и ядро и этот кусок rip+N.
+        ; А в ядре уже так будут функци маппинга любых регионов 
+
+        mov     rax, table_p4
+        mov     cr3, rax
+
+        ; lea     rax, [rip]
+        ; jmp     rax
+        ; fstcall efi_print_hex_fixed, table_p4
 
         mov     rax, [kernel_image_phys_base]
         mov     rax, [rax + KERNEL64_HEADER.entry_point_offset]
@@ -407,9 +441,6 @@ proc main _efi_handle, _efi_table
         jmp     rax
 
         ; TODO
-        ;; map [kernel_phys_start; kernel_phys_end) to 0xFFFFFFFF80000000
-        ;; (~~fill paging tables~~, ExitBootServices and switch to the new PML4), set kernel rsp, jmp to k64_entry
-        ;; NOTE: dont allocate after getting memmap bc uefi allocations change the memmap. => perform GetMemoryMap last of all..
         ;; QUESTION: How to pass memory map to the kernel?
         ;; Push in contents in stack? (wtf). Write memmap to some buffer,
         ;; map it into kernel address space and push pointer to it into the kernel stack
@@ -483,6 +514,7 @@ msg_error_efi_lip_handle  du "efi_handle can't handle LIP",13,10,0
 msg_error_lip_dev_sfsp    du "LIP device handle can't handle SFSP",13,10,0
 msg_error_sfsp_openvolume du "SFSP OpenVolume failed",13,10,0
 msg_get_file_size_error   du "Error getting file size",13,10,0
+msg_halt_on_error         du "Halting. Error = ",0
 
 ; msg_end_1 du 13,10,"---------- test printing functions:", 13,10,0
 msg_newline du 13,10,0
