@@ -5,7 +5,7 @@ proc efi_set_text_color uses rax rdx
         mov     rax, [rax+EFI_SYSTEM_TABLE.ConOut]
         mov     rdx, rcx ; arg2 - color
         mov     rcx, rax ; arg1 - this
-        fstcall [rax+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.SetAttribute]
+        fstcall qword [rax+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.SetAttribute]
         ret
 endp
 
@@ -15,7 +15,7 @@ proc efi_puts uses rax rdx r10 ; TODO maybe other regs that are clobbered by inn
         mov     rax, [rax+EFI_SYSTEM_TABLE.ConOut]
         mov     rdx, rcx ; arg2 - string
         mov     rcx, rax ; arg1 - this
-        fstcall [rcx+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString]
+        fstcall qword [rcx+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString]
         ret
 endp
 
@@ -29,7 +29,7 @@ endl
         mov     byte [chr], cl
         lea     rdx, [chr] ; arg2 - string
         mov     rcx, rax   ; arg1 - this
-        fstcall [rcx+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString]
+        fstcall qword [rcx+EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString]
         ret
 endp
 

@@ -173,7 +173,7 @@ struct EFI_TABLE_HEADER
   Signature             DQ ?
   Revision              dd ?
   HeaderSize            dd ?
-  CRC32                 dd ?
+  Crc32Value            dd ? ; "CRC32" would be taken for the SSE4 instruction
   Reserved              dd ?
 ends
 
