@@ -17,7 +17,9 @@
 | kolibrios64 | `028f27f` | MM 子系统 PMM/VMM/heap（冻结契约 K64-FOUNDATION-v1，复验） |
 | kolibrios64 | `553a031` | CPU+MM 内核基础集成（QEMU 验证） |
 | kolibrios64 | `983111c` | IRQ-v1 LAPIC 定时器闭环 + GOP 交接（QEMU 验证） |
-| kolibrios64 | `7b2c4b7` | GUI-G1 GOP framebuffer 图形闭环（QEMU 验证，当前 HEAD） |
+| kolibrios64 | `7b2c4b7` | GUI-G1 GOP framebuffer 图形闭环（QEMU 验证） |
+| kolibrios64 | `227c7dd` | docs：GUI-G1 提交哈希补录（当前 HEAD） |
+| kolibrios64 | 待补入 | IRQ-v2 IOAPIC + PS/2 键鼠输入闭环（QEMU 验证，即将提交，见 §8） |
 | fasm2 | `0253b7f` | macOS x64 自举工作流收口（自举里程碑，含 `aad830d` 自举宿主与自宿主测试） |
 
 以上锚点已用 `git log --oneline` 核对。本文档随后续里程碑一并提交，不单独入库。
@@ -434,17 +436,22 @@
   + gdbstub 仅绑定 127.0.0.1。默认 `-S` 冻结调试（lldb 经
   `tools/gen-kernel-symbols.py` + `tools/kernel64-elf.asm` 产出的符号
   ELF 下硬件断点；TCG 无 watchpoint）；`--no-freeze` 冒烟模式判定冻结：
-  八个里程碑 `K64-BOOT-OK → K64-CPU-OK → K64-PMM-OK → K64-VMM-OK →
-  K64-HEAP-OK → K64-IRQ-OK → K64-GUI-OK → K64-FOUNDATION-OK` 各恰好
-  一次且按序（K64-IRQ-OK 随 IRQ-v1、K64-GUI-OK 随 GUI-G1 插入，见
-  §6/§7），禁止
+  九个里程碑 `K64-BOOT-OK → K64-CPU-OK → K64-PMM-OK → K64-VMM-OK →
+  K64-HEAP-OK → K64-IRQ-OK → K64-INPUT-OK → K64-GUI-OK →
+  K64-FOUNDATION-OK` 各恰好一次且按序（K64-IRQ-OK 随 IRQ-v1、
+  K64-INPUT-OK 随 IRQ-v2、K64-GUI-OK 随 GUI-G1 插入，见
+  §6/§7/§8），禁止
   `K64-CPU-PANIC`/`K64-BOOT-FAIL`，CPU 自测 passed = 0x5FF（串口报告行），
-  六计数器 `mm_mask = 0`、`hook_hits = 3`、`core_mask = 0`、`irq_mask = 0`、
-  `irq_test_ticks = 10`、`video_selftest_mask = 0`（成功路径不打印，经
-  gdbstub 从 guest 内存读取；irq 两项随 IRQ-v1、video 一项随 GUI-G1
-  新增）。冒烟另在终止标记后经 QEMU monitor screendump 采帧做 28 探针
-  像素判定，并有 `--gui-skip` 回退判定模式（均随 GUI-G1 新增，见
-  §7.6/§7.8）。默认 CPU `qemu64,+popcnt`（裸 qemu64 缺
+  十计数器 `mm_mask = 0`、`hook_hits = 3`、`core_mask = 0`、`irq_mask = 0`、
+  `irq_test_ticks = 11`、`input mask = 0`、`kbd_count = 2`、
+  `mouse_count = 3`、`stage = 6`、`video_selftest_mask = 0`（成功路径
+  不打印，经 gdbstub 从 guest 内存读取；irq 两项随 IRQ-v1、video
+  一项随 GUI-G1、input 四项随 IRQ-v2 新增，ticks 终值 10→11 的推导
+  见 §8.7）。冒烟循环另驱动 IRQ-v2 输入握手：经 gdbstub 轮询
+  input_test_stage、按 stage 经 monitor 注入 sendkey/mouse_move/
+  mouse_button（见 §8.8）；终止标记后经 QEMU monitor screendump
+  采帧做 28 探针像素判定，并有 `--gui-skip` 回退判定模式（均随
+  GUI-G1 新增，见 §7.6/§7.8）。默认 CPU `qemu64,+popcnt`（裸 qemu64 缺
   MM 所需 POPCNT）。QEMU 进程组随退出/中断整体清理，不留 stray 进程。
   注意：QEMU TCG 自行翻译 guest 指令，**与宿主 Rosetta 无关**；正常启动
   在 `-d cpu_reset` 下有 2 次复位（上电 + OVMF 平台复位），判异常须排除。
@@ -598,6 +605,10 @@
   恰 20 tick/mask 窗口冻结/skip-EOI 阻塞证明/IF 证据对（handler 当前
   RFLAGS.IF=0 + 被中断帧 IF=0x200）/校准带内/final 恰 10 tick。退出时
   timer 屏蔽、IF=0、irq_test_ticks=10、mask=0，冻结供 gdbstub 门禁。
+  （ticks=10 为 IRQ-v1 退出口径；IRQ-v2 input 补证腿后全程终值为 11，
+  见 §8.7。末腿 mask 的运行时证据缺口当时未闭合，后由 IRQ-v2
+  masked-oneshot 腿补证，见 §8.7。IRQ-v2 延续本纪律：input 模块零
+  STI，窗口全走 irq_sti_wait。）
 - **变更理由**：有界窗口使中断行为完全可断言；IF 证据对证明中断门
   语义（handler 内 IF=0）与窗口上下文（IF=1）同时成立。
 - **证据文件**：`kolibrios64/kernel/irq/selftest.inc`、
@@ -606,15 +617,16 @@
 
 ### 6.7 验证口径更新（本次撰写时本地重跑实测，全部 0 失败）
 
-- **门禁计数**：stage2-cpu 524、stage2-mm 1688、stage2-irq 295、
+- **门禁计数**：stage2-cpu 524、stage2-mm 1688、stage2-irq 295
+  （时为 IRQ-v1 计数；IRQ-v2 扩至 317，见 §8.9）、
   stage2-fb 430（时为 GUI 轨独立交付计数，不在 IRQ-v1 提交内；该轨
   现已集成收口并扩至 449，见 §7.8）；check-boot-contract
   106 项 PASS；其负向变异测试 62/62 夹具 + 57/57 寄存器模型查询 +
   2/2 清理检查。
 - **冒烟口径**：7 标记按序各恰一次（新增 K64-IRQ-OK），passed=0x5FF，
   五计数器（新增 irq_mask=0、irq_test_ticks=10，经 gdbstub 读取）。
-  （此为 IRQ-v1 收口时口径；GUI-G1 起为 8 标记/六计数器，见
-  §5.3/§7.8。）
+  （此为 IRQ-v1 收口时口径；GUI-G1 起为 8 标记/六计数器，IRQ-v2
+  起为 9 标记/十计数器，见 §5.3/§7.8/§8.9。）
 - **收口审查修复记录**：① ISR 降序冲刷（§6.1）；② GOP 命中标记守卫
   （§6.5）；③ BootInfo 8 对齐回归——GOP 字段填值不得破坏 208 字节
   布局的 8 字节对齐，`bootinfo.inc` 的 `sizeof mod 8` 汇编期断言守住。
@@ -627,7 +639,8 @@
 
 ## 7. GUI-G1：图形输出闭环（提交 `7b2c4b7`）
 
-> 状态：已通过独立验证与收口审查（2 必改 + 3 建议全采纳），即将提交。
+> 状态：已通过独立验证与收口审查（2 必改 + 3 建议全采纳），已随
+> 提交 `7b2c4b7` 入库。
 > 提交范围：kernel/video 新模块、core 集成（contracts.inc /
 > foundation.inc / kernel64.asm include 顺序）、tools/run-qemu-debug.py
 > 冒烟判定扩展、tests/stage2-fb（含 check-gui-judge.py）及本文档。
@@ -779,14 +792,17 @@
 - **宿主静态门禁**（原生 arm64 python3，不执行 guest 机器码）：
   check-boot-contract FAILURES 0；其负向变异测试 62/62 夹具 +
   2/2 清理检查 + 57/57 寄存器模型查询；stage2-cpu 524、stage2-mm
-  1688、stage2-irq 295、stage2-fb 449（11 负向夹具全部被抓，含
+  1688、stage2-irq 295（时为 GUI-G1 时计数；IRQ-v2 扩至 317，见
+  §8.9）、stage2-fb 449（11 负向夹具全部被抓，含
   size-wrap-unguarded / blit-src-stride / map-fail-passthrough）；
-  check-gui-judge 21（judge 纯函数正基线 + 12 负向变异全部被抓）。
+  check-gui-judge 21（时为 GUI-G1 计数，judge 纯函数正基线 + 12
+  负向变异全部被抓；IRQ-v2 扩至 35，见 §8.9）。
 - **QEMU TCG 冒烟**（唯一真实执行环境，禁 Rosetta 口径延续 §5.4）：
   128/256 MiB 多轮；8 串口标记按序各恰一次（K64-GUI-OK 位于 IRQ 与
   FOUNDATION 之间）；passed=0x5FF；6 计数器经 gdbstub 读取全为冻结
   值（mm_mask=0、hook_hits=3、core_mask=0、irq_mask=0、ticks=10、
-  video_selftest_mask=0）；screendump 1024x768，28 探针全绿。
+  video_selftest_mask=0；ticks=10 为 GUI-G1 时口径，IRQ-v2 起为 11，
+  见 §8.7）；screendump 1024x768，28 探针全绿。
 - **--gui-skip 回退场景**（GOP_MAX_MODES=0 加载器）：保留固件 live
   mode 800x600，`K64-GUI-SKIP` + `K64-FOUNDATION-OK`，无 panic、
   无像素断言。
@@ -809,11 +825,263 @@
 - draw-only 自检的数据变异（如颜色常量漂移）依赖外部 screendump
   探针检测——这是**能力边界而非漏检**：串口/计数器无法区分「画对」
   与「画错」，口径已在 §7.6 显式写明。
-- 末腿 timer mask 的运行时证据缺口仍留 IRQ-v2（见 §6.6）。
+- 末腿 timer mask 的运行时证据缺口当时留待 IRQ-v2；现已由 IRQ-v2
+  masked-oneshot 腿补证收口（见 §8.7）。
 
 ---
 
-## 8. 进行中（占位，待验证通过后补录）
+## 8. IRQ-v2：输入闭环（本次提交，哈希待提交后补入锚点表）
+
+> 状态：已通过独立验证（8/8）与复验（6/6），收口审查（1 必改 +
+> 5 建议全采纳）完成，即将提交。提交范围：kernel/input 新模块、
+> irq dispatch 纯增量与向量契约、mm IOAPIC VA 契约、core 集成
+> （contracts.inc / foundation.inc / kernel64.asm include 顺序）、
+> tools/run-qemu-debug.py 注入编排与判定扩展、tests/stage2-input
+> 新门禁及 stage2-irq / fb-judge 扩展、本文档。
+
+### 8.1 32 位基线对照：保留语义、丢弃实现
+
+- **32 位做法**：PIC+APIC 双轨（`kernel.asm` 顺序 PIC_init→PIT_init→
+  APIC_init，irq_mode 切换，见 §6.1）；56 槽 irqh_tab handler 链表
+  （§6.3）；键盘 `hid/keyboard.inc` 以 set1 keymap（`data32.inc`
+  keymap/keymap_shift 行）+ 修饰键状态机解码；鼠标
+  `drivers/mouse/ps2mouse4d` 走 0xA8 启鼠标口→0xFF 复位→0xF4 启报告
+  序列，支持 3/4 字节包（滚轮）；`hid/mousedrv.inc` 做光标
+  save/restore；事件经 EVENT_KEY=0x02 / EVENT_MOUSE=0x20 掩码
+  （`const.inc`）送达 top-window 进程。
+- **64 位做法**：保留语义——set1（translated）keymap 索引、修饰键 +
+  break 0x80 + 0xE0 前缀、3 字节包 bit3 sync 校验 + 符号扩展；丢弃
+  实现——OS_BASE 绝对布局（高半区契约取代）、多键盘链表/mutex（单
+  键盘单回调）、locale/hotkey（冻结 en_US 双 map）、滚轮/加速度
+  （首版仅 3 字节包）、用户态事件投递（首版事件留在内核态缓冲，
+  桌面壳里程碑再消费）。
+- **变更理由**：语义对齐使 32 位 keymap 行可直接对照复核，丢弃的
+  都是多任务/多设备/本地化设施——单核首阶段没有它们的宿主，提前
+  搬运会引入无法验证的复杂度。
+- **证据文件**：`kolibrios/kernel/trunk/kernel.asm`（PIC_init/PIT_init/
+  APIC_init）、`core/irq.inc`、`hid/keyboard.inc`、`data32.inc`、
+  `hid/mousedrv.inc`、`const.inc`（EVENT_KEY/EVENT_MOUSE）、
+  `drivers/mouse/ps2mouse4d/ps2mouse.asm`（0xA8/0xFF/0xF4）；
+  `kolibrios64/kernel/input/keyboard.inc`（keymap 语义对照注释）、
+  `mouse.inc`。
+
+### 8.2 IOAPIC bring-up：间接窗口 + 派生 RTE 索引（含规格笔误纠错）
+
+- **32 位做法**：APIC_init 只管 LAPIC，外部中断走 PIC 兜底，无
+  IOAPIC RTE 管理（§6.1）。
+- **64 位做法**：IOAPIC PA 0xFEC00000 经 `vmm_map_mmio` 映射到 VA
+  0xFFFFC00003000000——严格高于 LAPIC VA、间距 16 MiB（同时越过
+  整个 FB 窗口）、2 MiB 对齐、同 PML4 slot 384，全部汇编期断言
+  （mm/api.inc），**零 MM API 改动**；IOREGSEL/IOWIN 间接读写叶子；
+  VER 寄存器实测 sanity（version ≥ 0x10 且 ≠ 0xFF、项数 ≥ 13，
+  实测值记入证据而不硬编码假设）；RTE pin1 向量 0x21、pin12 向量
+  0x2C，索引按 **0x10+2n 汇编期派生**（0x12/0x13、0x28/0x29）；
+  Fixed/Physical/active-high/edge，先写高 dword（dest 0）后写低
+  dword，bringup 一律 mask=1（0x10021/0x1002C），四个 dword 全部
+  读回精确比对；8259 保持全屏蔽（§6.1 口径延续）防双中断。
+- **规格笔误纠错（如实记录）**：规格曾把鼠标 RTE 索引写成
+  0x38/0x39——按派生公式 0x10+2n 这对应 **pin 20** 而非 pin 12。
+  实施期以派生公式修正为 0x28/0x29，api.inc 汇编期断言「RTE 索引
+  必须从引脚号派生」+ 负向夹具 mouse-rte-index-drift（变异回 0x38
+  必须汇编失败）双重钉死。
+- **变更理由**：派生公式 + 断言使「索引对不上引脚」这类规格/实现
+  漂移在汇编期即失败；bringup mask=1 防止固件噪声在配置完成前
+  竞态触发；VER sanity 用实测下限而非硬编码版本，换 QEMU 版本不
+  静默失效。
+- **证据文件**：`kolibrios64/kernel/input/ioapic.inc`、`api.inc`
+  （派生断言）、`kernel/mm/api.inc`（MM_MMIO_IOAPIC_VA 六条断言）、
+  `kernel/core/contracts.inc`（K64_*/MM_*/INPUT_* 三副本比对）、
+  `tests/stage2-input/check.py`（ioapic-rte-mask-removed /
+  mouse-rte-index-drift 夹具）。
+
+### 8.3 8042 bring-up：冻结序列 + 全有界 + 致命失败语义
+
+- **32 位做法**：ps2mouse4d 驱动内直接操作端口，无统一有界原语层，
+  失败语义不分级。
+- **64 位做法**：冻结序列——禁双口（0xAD/0xA7）→ flush（上界 64，
+  返回 drain 数）→ 读 CCB（0x20）确认 **translation bit6=1**（SET
+  0x43 / CLEAR 0x30，CPU 侧见 set1，与 32 位 keymap 语义对齐）→
+  KIE/MIE → 启双口（0xAE/0xA8）→ 0xD4 前缀 + 0xFF 复位（ACK 0xFA +
+  0xAA + ID 必须 0x00）→ 0xF6 默认参数 → 0xF4 启报告 → 尾 flush。
+  一切等待有界；0xFE 重发 ≤ 5 次；**零预算立即失败**（防 dec/jnz
+  回绕成 2^32 次自旋）。初始化失败 = 致命 panic：IOAPIC/8042 是
+  强制平台设备，**没有 skip**（区别于 GUI 的 ENOTSUP 可跳过，
+  §7.4）。
+- **变更理由**：translation 位决定 CPU 看到的码制，不确认就复用
+  set1 keymap 是静默错译；有界 + 重发上限 + 零预算兜底使 bring-up
+  在设备缺席/异常时确定性失败而非挂死；强制设备失败若可跳过，
+  后续自检会在无输入硬件的假环境上「通过」。
+- **证据文件**：`kolibrios64/kernel/input/ps2.inc`（原语与序列注释）、
+  `input.asm`（input_init）、`kernel/core/foundation.inc`（panic
+  分支）；`kolibrios/drivers/mouse/ps2mouse4d/ps2mouse.asm`
+  （32 位对照）。
+
+### 8.4 dispatch 纯增量与 bit5 来源过滤（收口审查必改）
+
+- **32 位做法**：irq 链表逐槽 ack 认领（§6.3），无来源过滤概念。
+- **64 位做法**：单回调契约不变；`.keyboard`/`.mouse` 分支放在
+  leave/ret **之后**纯增量——timer/spurious 的冻结字节序列不动
+  （门禁断言单 ret、恰两个 EOI 写点、`.input_eoi` 直跳回 `.done`）；
+  EOI 归 dispatch（`.input_eoi`），handler 是 IF=0 叶子（无 heap、
+  无串口、无 EOI、无无界等待）。**bit5（AUX）来源过滤**：键盘叶子
+  不消费鼠标字节（bit5 置位即返回），鼠标叶子不消费键盘字节
+  （bit5 清零即返回），均不读 0x60 不动计数；未消费字节保持 OBF
+  满 → 8042 保持另一口 IRQ 线 asserted（masked RTE 在 IOAPIC IRR
+  锁存边沿），由对方叶子在自己的交付中消费——防双流互吞，此为
+  收口审查**必改修复**。两个守卫极性相反（键盘 jnz / 鼠标 jz），
+  各以独立负向夹具钉死（keyboard-aux-check-removed /
+  mouse-aux-check-removed），共享钉桩无法证明两侧。
+- **变更理由**：冻结字节不动使 IRQ-v1 的全部门禁断言原样回归；
+  来源过滤把「谁消费哪个字节」变成硬件状态位裁决而非时序假设，
+  双流同时 live 时计数仍精确。
+- **证据文件**：`kolibrios64/kernel/irq/dispatch.inc`、`api.inc`
+  （IRQ_VEC_KEYBOARD/MOUSE 冻结 + 排序断言）、
+  `kernel/input/keyboard.inc`、`mouse.inc`（来源过滤注释）、
+  `tests/stage2-irq/check.py`（two_eoi_sites / input_eoi_jmps_to_done
+  等）、`tests/stage2-input/check.py`。
+
+### 8.5 键盘解码与缓冲：set1 语义对齐 + 消费字节数口径
+
+- **32 位做法**：`hid/keyboard.inc` set1 解码 + `data32.inc` keymap，
+  多键盘链表/mutex、locale/hotkey 设施。
+- **64 位做法**：en_US set1 双 keymap 各 128 字节（语义跟随
+  data32.inc keymap/keymap_shift 行，汇编期长度断言）；修饰键状态机
+  （LShift/RShift/Ctrl/Alt set-clear，Caps 仅 make 翻转且只翻字母）；
+  0xE0 前缀（扩展键 raw|0x100、ascii 0）；**0xE1 Pause 吞掉两个
+  payload**（否则 E1 1D 会污染 CTRL，负向夹具
+  pause-e1-guard-disarmed）；break 0x80 保留 raw、ascii 0；空 OBF
+  的 phantom 交付忽略（masked RTE 残留边沿无害化）。缓冲
+  **120 × 16B**（ascii + raw 双存），KBD_BUF 数据区偏移 **168**
+  （汇编期断言）；满则丢弃计数，绝不覆盖。**计数口径**：
+  input_test_kbd_count 为「消费字节数」——含 E1 吞码、E0 前缀、
+  修饰键与 break（信息性口径，api.inc 明示），不是「按键事件数」。
+- **变更理由**：keymap 语义对齐使 32 位基线可逐行对照；吞码/前缀
+  状态机保证修饰键状态不被控制序列污染；双存缓冲让桌面壳既能拿
+  ascii 也能拿原始码；口径明示防止把字节数误读成事件数。
+- **证据文件**：`kolibrios64/kernel/input/keyboard.inc`、`api.inc`、
+  `data.inc`（偏移断言）、`tests/stage2-input/check.py`；
+  `kolibrios/kernel/trunk/hid/keyboard.inc`、`data32.inc`
+  （32 位对照）。
+
+### 8.6 鼠标包状态机：sync 强制 + 溢出整包丢弃
+
+- **32 位做法**：ps2mouse4d 支持 3/4 字节包（滚轮），mousedrv.inc
+  做光标 save/restore 与加速度。
+- **64 位做法**：3 字节包状态机，一次交付最多消费一字节；byte1
+  **bit3 sync 强制**（缺失即坏包：丢弃、计数、状态机复位）；
+  **bit6/7 溢出标志任一置位 → 整包丢弃**（移动计数器饱和，delta
+  不可信，负向夹具 mouse-overflow-check-removed）；bit4/5 符号扩展
+  （delta = byte - 256）；按键位 OR 累积；坐标屏幕空间 x += dx、
+  **y -= dy**（PS/2 Y 向上为正），clamp 到冻结 1024x768 几何；
+  完整有效包才进计数。此处不绘制——光标绘制属桌面壳里程碑。
+- **变更理由**：sync/溢出裁决使坏包不可能污染坐标与计数；符号
+  扩展与 Y 轴翻转是 PS/2 协议语义，显式注释防「修反」。
+- **证据文件**：`kolibrios64/kernel/input/mouse.inc`、`api.inc`
+  （SYNC/SIGN/OVERFLOW/clamp 常量）、`tests/stage2-input/check.py`
+  （packet-bit3-check-removed 等夹具）；
+  `kolibrios/drivers/mouse/ps2mouse4d/`、`kernel/trunk/hid/mousedrv.inc`
+  （32 位对照）。
+
+### 8.7 timer mask 补证：IRQ-v1 遗留缺口收口，ticks 10→11
+
+- **遗留背景**：IRQ-v1 末腿 mask 窗口只证明「屏蔽期间无 tick」，
+  无法区分「mask 生效」与「到期恰好没来」（§6.6/§7.9 记录的运行时
+  证据缺口）。
+- **64 位做法**：input 自检 leg5 **masked-oneshot**：masked LVT 下
+  arm one-shot，IF=1 窗口内若到 tick 即失败；unmask + re-arm 恰交付
+  1 tick。**ticks 终值 10→11 是确定性推导而非观测**：IRQ-v1 退出值
+  10 + 补证腿恰 1；两种 QEMU masked-expiry 行为下均确定——(a) 到期
+  丢弃 → re-arm 交付 1 tick；(b) 到期锁存 IRR → unmask 交付 phantom
+  为 tick 11，mode-0 等待数条指令内退出并 mask LVT，远早于 re-arm
+  的 10 ms 倒计时可能交付第 12 个。one-shot 每次 arm 至多 fires 一次，
+  不依赖任何时序窗口。**变量分离**同 leg2 键盘 masked 腿：以 drain
+  计数 ≥ 2（make+break 均被抽出）作到达证据，证明 kbd_count=0 是
+  mask 生效而非按键缺席。**四处同步冻结**：input/api.inc
+  （INPUT_IRQ_TICKS_FINAL = BASE + 1）、contracts.inc
+  （K64_INPUT_TICKS_FINAL = 11 含推导注释）、run-qemu-debug.py
+  （EXPECTED_COUNTERS ticks=11）、check-gui-judge.py（期望 11 +
+  ticks 漂移负向夹具）；负向夹具 timer-final-drift（BASE+2 必须
+  汇编失败）。
+- **变更理由**：把「mask 生效」从缺席证据升级为到达证据 + 确定性
+  计数推导，缺口在两种模拟行为下都闭合，不靠运气。
+- **证据文件**：`kolibrios64/kernel/input/selftest.inc`（leg5 论证
+  注释）、`api.inc`、`kernel/core/contracts.inc`、
+  `tools/run-qemu-debug.py`、`tests/stage2-fb/check-gui-judge.py`、
+  `tests/stage2-input/check.py`（timer-final-drift）。
+
+### 8.8 宿主注入编排：gdbstub 握手 + HMP 注入
+
+- **32 位做法**：无对应机制（runtests.py 不驱动 guest 输入）。
+- **64 位做法**：guest 发布 `input_test_stage`（0..6），host 在
+  K64-IRQ-OK 之后经 gdbstub 轮询（不干扰 OVMF 与早期内核阶段），
+  按 stage 经 QEMU monitor 注入：sendkey b（masked 腿）→ sendkey a
+  （live 腿）→ mouse_move 5 3 → mouse_button 1（press）；**release
+  仅在 mouse_count ≥ 2 后发送**，QEMU 不可能把 press+release 合并成
+  一包。超时 = 腿失败 panic，绝不静默通过。inject 识别 monitor
+  Error/unknown 回复记 FAILED 并在后续轮次重试，不记假 sent；
+  gdb_read_mem **每条退出路径都发 detach（finally）**——E 错误回复
+  后裸关 socket 会把 VM 永久挂起（input 早期 stage 的 VA 可能尚未
+  映射，此路径真实存在）。QEMU 11.1.3 `-display none` 下 PS/2 鼠标
+  实测在（mouse_move/mouse_button 有效）。input 计数失配时杀 QEMU
+  前经 gdbstub 读 7 个取证符号（原始包/坐标/状态机）留诊断。
+- **变更理由**：握手把「宿主注入」与「guest 消费」变成双向可断言
+  协议；press/release 分离与 Error 重试消除 QEMU 合并/拒收两类
+  假失败；detach 修复的是编排自身挂起 VM 的真实缺陷。
+- **证据文件**：`kolibrios64/tools/run-qemu-debug.py`
+  （INPUT_STAGE_INJECT / inject / gdb_read_mem）、
+  `kernel/input/selftest.inc`（握手注释）、`api.inc`（stage 常量）。
+
+### 8.9 集成与验证证据（实测，全部 0 失败）
+
+- **foundation 顺序**：core_selftest 之后插入 input 阶段（IRQ 与 GUI
+  之间）：input_init → vmm_boot_protect（input 数据区 RW/NX）→
+  input_selftest → `K64-INPUT-OK`。leg7 表页核算 **3/3/3 不变**：
+  IOAPIC 映射在核算基线之后，仅新增 PT 页（与 GUI 同一手法，§7.8）。
+- **宿主静态门禁**：check-boot-contract FAILURES 0；其检查器自测
+  62/62 夹具 + 2/2 清理检查 + 57/57 寄存器模型查询；stage2-cpu 524、
+  stage2-mm 1688、**stage2-irq 317**（12 负向夹具：新增
+  dispatch-kbd-branch-removed / dispatch-input-eoi-removed /
+  keyboard-vector-drift，原 dispatch-eoi-removed 以 jne .done 上下文
+  钉住受守卫的 timer 写点）、stage2-fb 449、**stage2-input 402**
+  （13 负向夹具全部被抓）、**check-gui-judge 35**（新增 INPUT 标记
+  3 负向 + 5 计数器漂移负向 + 结构钉）。
+- **QEMU TCG 冒烟**（唯一真实执行环境，禁 Rosetta 口径延续 §5.4）：
+  128/256 MiB 多轮；**9 串口标记**按序各恰一次（K64-INPUT-OK 位于
+  IRQ 与 GUI 之间）；passed=0x5FF；**10 计数器**经 gdbstub 读取全为
+  冻结值：mm_mask=0、hook_hits=3、core_mask=0、irq_mask=0、
+  **ticks=0xb**、input mask=0、**kbd=2、mouse=3、stage=6**、
+  video_selftest_mask=0；GUI 28 探针全绿。
+- **-d int 向量计数口径**：v21=2 / v2c=9 / v20=36，五轮运行
+  （128/256 MiB）跨运行一致。**口径注释**：irq_test_ticks 为
+  per-leg 计数（每腿复位），36 为全程总交付（IRQ-v1 各腿 + input
+  补证腿），两种口径不矛盾。
+- **panic profile 双证据**：BIN 变异（直接改产物字节）与源码变异
+  （改 ps2.inc 重建）均触发 K64-CPU-PANIC，冒烟 judge 均 FAIL——
+  证明失败路径与判定器两侧都有效。
+- **独立验证与复验**：独立验证 8/8、复验 6/6（复验产物：4 负向夹具
+  + 128/256 MiB 冒烟各一轮，全 PASS/全被抓）。
+- **收口审查**：1 必改（bit5 来源过滤，§8.4）+ 5 建议，全部修复。
+- **证据文件**：`kolibrios64/kernel/core/foundation.inc`、
+  `contracts.inc`、`kernel/input/`、`tests/stage2-input/`、
+  `tests/stage2-irq/`、`tests/stage2-fb/check-gui-judge.py`、
+  `tools/run-qemu-debug.py`、`tools/check-boot-contract.py`、
+  `tools/test-boot-contract-checker.py`；实测数字来自本轮 build/
+  产物（qa95 门禁与冒烟日志、irq2-t94-128/256、irq2-smoke-*、
+  qa90 panic 双证据等，不入库）。
+
+### 8.10 已知遗留与推迟（如实记录，不粉饰）
+
+- judge 的 -d int 向量计数断言（v21/v2c/v20）**推迟到桌面壳**里程碑
+  与双流常驻一并落地；本轮仅以跨运行一致性记录（§8.9）。
+- 右 Ctrl/Alt（E0+break）**不跟踪**：已文档化的简化（E0 扩展键直接
+  入缓冲不进修饰键状态机），桌面壳按需扩展。
+- `draw.inc` 文件尾换行仍缺（GUI-G1 遗留卫生项，§7.9）。
+- `build/ps2.inc.panic-backup` 为实现者遗留备份（gitignored，
+  非交付物）。
+
+---
+
+## 9. 进行中（占位，待验证通过后补录）
 
 ### IRQ-v1：LAPIC 定时器闭环 —— 已完成
 
@@ -821,13 +1089,17 @@
 
 ### GUI-G1：图形输出闭环 —— 已完成
 
-- 已收口并补录为 §7；提交哈希待产生后补入锚点表（本次不写未产生
-  的哈希）。
+- 已收口并补录为 §7；提交 `7b2c4b7` 已入里程碑锚点表。
 
-### IRQ-v2 —— 待启动
+### IRQ-v2：输入闭环 —— 已完成
 
-- 已知缺口：末腿 timer mask 的运行时证据（见 §6.6/§7.9）；范围待
-  该里程碑启动时冻结。
+- 已收口并补录为 §8；提交哈希待产生后补入锚点表（本次不写未产生
+  的哈希）。IRQ-v1 遗留的 timer mask 运行时证据缺口已在 §8.7 补证。
+
+### 最小桌面壳 —— 待启动
+
+- 已知推迟项：judge 向量计数断言（与双流常驻一并落地）、右
+  Ctrl/Alt 跟踪（见 §8.10）；范围待该里程碑启动时冻结。
 
 ---
 
@@ -851,5 +1123,6 @@
 
 *首版撰写于里程碑 553a031（CPU+MM 集成）收口之后；IRQ-v1 章节补录于
 其收口审查通过之后（已随提交 983111c 入库）；GUI-G1 章节补录于其收口
-审查通过之后（已随提交 7b2c4b7 入库）。后续每个里程碑收口时，由变更史官
-增补对应小节并更新提交锚点表。*
+审查通过之后（已随提交 7b2c4b7 入库）；IRQ-v2 章节补录于其独立验证与
+收口审查通过之后（提交哈希待产生后补入锚点表）。后续每个里程碑收口时，
+由变更史官增补对应小节并更新提交锚点表。*

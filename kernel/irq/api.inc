@@ -74,6 +74,12 @@ IRQ_PUTHEX_DIGITS   = 16
 IRQ_VEC_TIMER       = 0x20
 IRQ_VEC_SPURIOUS    = 0xFF
 
+; IRQ-v2: the IOAPIC delivers the PS/2 keyboard on pin 1 and the PS/2
+; mouse on pin 12 through these frozen vectors; the input module owns
+; the handlers, irq_dispatch only routes and sends the EOI.
+IRQ_VEC_KEYBOARD    = 0x21
+IRQ_VEC_MOUSE       = 0x2C
+
 IRQ_LAPIC_PA        = 0xFEE00000
 IRQ_LAPIC_VA        = 0xFFFFC00002000000
 
@@ -305,6 +311,12 @@ end if
 
 if IRQ_VEC_TIMER <> 0x20 | IRQ_VEC_SPURIOUS <> 0xFF
         err 'the IRQ vectors are frozen at 0x20 and 0xFF'
+end if
+if IRQ_VEC_KEYBOARD <> 0x21 | IRQ_VEC_MOUSE <> 0x2C
+        err 'the input vectors are frozen at 0x21 and 0x2C'
+end if
+if IRQ_VEC_KEYBOARD <= IRQ_VEC_TIMER | IRQ_VEC_MOUSE <= IRQ_VEC_KEYBOARD | IRQ_VEC_MOUSE >= IRQ_VEC_SPURIOUS
+        err 'the input vectors must stay ordered inside the device range'
 end if
 if IRQ_SVR_VALUE <> (IRQ_SVR_ENABLE or IRQ_VEC_SPURIOUS)
         err 'SVR must enable the APIC with the spurious vector 0xFF'

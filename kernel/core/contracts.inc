@@ -721,3 +721,227 @@ end if
 if K64_VIDEO_ST_RECT_X <> (K64_VIDEO_ST_WIDTH - K64_VIDEO_ST_RECT_W) / 2 | K64_VIDEO_ST_RECT_Y <> (K64_VIDEO_ST_HEIGHT - K64_VIDEO_ST_RECT_H) / 2
         err 'the pattern rectangle must stay centered'
 end if
+
+; ------------------------------------------------------------------
+; IRQ-v2: the shared K64_* spelling of the input layer contract and
+; the three copy comparison against the private IRQ_*/INPUT_*/MM_*
+; values. Appended by task 89; every assertion above stays untouched.
+; Pure constant math, zero bytes emitted.
+;
+; The input stage runs AFTER core_selftest (like the GUI stage), so
+; the IOAPIC page table never enters the leg 7 baseline and
+; K64_CORE_ACCOUNT_TABLES stays frozen at three.
+;
+; Handler contract: irq_dispatch calls input_keyboard_irq /
+; input_mouse_irq with RCX = frame; both are leaves (IF = 0, caller
+; saved registers only, no heap, no serial, no unbounded wait) and
+; never write the LAPIC EOI: the dispatch .input_eoi site owns it.
+; The input module contains zero STI instructions; its self test
+; windows go through the exported irq_sti_wait.
+; ------------------------------------------------------------------
+
+K64_IRQ_VEC_KEYBOARD = 0x21
+K64_IRQ_VEC_MOUSE    = 0x2C
+K64_MMIO_IOAPIC_VA   = 0xFFFFC00003000000
+K64_IOAPIC_PA        = 0xFEC00000
+
+K64_INPUT_RTE_KBD_MASKED   = 0x10021
+K64_INPUT_RTE_MOUSE_MASKED = 0x1002C
+K64_INPUT_IOAPIC_IDX_KBD_LO   = 0x10 + 2 * 1
+K64_INPUT_IOAPIC_IDX_KBD_HI   = 0x10 + 2 * 1 + 1
+K64_INPUT_IOAPIC_IDX_MOUSE_LO = 0x10 + 2 * 12
+K64_INPUT_IOAPIC_IDX_MOUSE_HI = 0x10 + 2 * 12 + 1
+K64_INPUT_CCB_SET          = 0x43
+K64_INPUT_CCB_CLEAR        = 0x30
+K64_INPUT_KBD_CAP          = 120
+K64_INPUT_ACK_RETRY        = 5
+K64_INPUT_STAGE_DONE       = 6
+K64_INPUT_ST_KBD_FINAL     = 2
+K64_INPUT_ST_MOUSE_FINAL   = 3
+; ticks final is DETERMINISTIC, not observed: the IRQ-v1 exit value 10
+; plus exactly one tick of the masked-oneshot leg. Under either QEMU
+; masked-expiry behavior the count is exact: (a) expiry discarded ->
+; unmask + re-arm delivers one tick; (b) expiry latched in IRR -> the
+; unmask delivers the phantom as tick 11, the mode-0 wait exits within
+; a few instructions and masks the LVT long before the re-armed 10 ms
+; countdown could deliver a 12th. kbd = 2 is the make+break of sendkey
+; a (sendkey b is fully drained under the mask); mouse = 3 is move +
+; press + release with the release gated on mouse_count >= 2 so QEMU
+; cannot coalesce press+release.
+K64_INPUT_TICKS_BASE       = 10
+K64_INPUT_TICKS_FINAL      = 11
+
+; the mouse packet facts and the DERIVED move byte 1: sync plus the
+; sign bit of every negative delta (QEMU sets bit 5 for the negative
+; PS/2 Y, measured 0x28 for mouse_move 5 3 in the task 89 experiment)
+K64_INPUT_MOUSE_SYNC   = 0x08
+K64_INPUT_MOUSE_SIGN_X = 0x10
+K64_INPUT_MOUSE_SIGN_Y = 0x20
+K64_INPUT_ST_MOUSE_DX  = 5
+K64_INPUT_ST_MOUSE_DY  = -3
+K64_INPUT_ST_MOUSE_B1 = K64_INPUT_MOUSE_SYNC
+if K64_INPUT_ST_MOUSE_DX < 0
+        K64_INPUT_ST_MOUSE_B1 = K64_INPUT_ST_MOUSE_B1 or K64_INPUT_MOUSE_SIGN_X
+end if
+if K64_INPUT_ST_MOUSE_DY < 0
+        K64_INPUT_ST_MOUSE_B1 = K64_INPUT_ST_MOUSE_B1 or K64_INPUT_MOUSE_SIGN_Y
+end if
+
+; frozen release-packet verdict semantics: the last-packet assertion
+; masks the two byte-1 sign bits out (0xFFFFCF keeps sync/buttons and
+; both delta bytes exact). A sign bit on a zero delta carries no
+; information and must not fail the leg; the mask must never be
+; widened, dropping sync/button/delta bits would weaken the gate.
+K64_INPUT_MOUSE_B1_MASK = 0xFF and not (K64_INPUT_MOUSE_SIGN_X or K64_INPUT_MOUSE_SIGN_Y)
+K64_INPUT_ST_MOUSE_LAST_MASK = (0xFF shl 16) or (0xFF shl 8) or K64_INPUT_MOUSE_B1_MASK
+
+if K64_IRQ_VEC_KEYBOARD <> IRQ_VEC_KEYBOARD | K64_IRQ_VEC_KEYBOARD <> INPUT_VEC_KEYBOARD
+        err 'keyboard vector disagrees with the IRQ/INPUT copies'
+end if
+if K64_IRQ_VEC_MOUSE <> IRQ_VEC_MOUSE | K64_IRQ_VEC_MOUSE <> INPUT_VEC_MOUSE
+        err 'mouse vector disagrees with the IRQ/INPUT copies'
+end if
+if K64_MMIO_IOAPIC_VA <> MM_MMIO_IOAPIC_VA | K64_MMIO_IOAPIC_VA <> INPUT_IOAPIC_VA
+        err 'IOAPIC MMIO VA disagrees with the MM/INPUT copies'
+end if
+if K64_IOAPIC_PA <> INPUT_IOAPIC_PA
+        err 'IOAPIC physical base disagrees with the INPUT copy'
+end if
+if K64_INPUT_RTE_KBD_MASKED <> INPUT_RTE_KBD_MASKED | K64_INPUT_RTE_MOUSE_MASKED <> INPUT_RTE_MOUSE_MASKED
+        err 'masked RTE values disagree with the INPUT copy'
+end if
+if K64_INPUT_RTE_KBD_MASKED <> (K64_IRQ_LVT_MASK or K64_IRQ_VEC_KEYBOARD)
+        err 'the keyboard RTE is the shared mask bit plus the frozen vector'
+end if
+if K64_INPUT_RTE_MOUSE_MASKED <> (K64_IRQ_LVT_MASK or K64_IRQ_VEC_MOUSE)
+        err 'the mouse RTE is the shared mask bit plus the frozen vector'
+end if
+if K64_INPUT_IOAPIC_IDX_KBD_LO <> INPUT_IOAPIC_IDX_KBD_LO | K64_INPUT_IOAPIC_IDX_KBD_HI <> INPUT_IOAPIC_IDX_KBD_HI
+        err 'pin 1 RTE indices disagree with the INPUT copy'
+end if
+if K64_INPUT_IOAPIC_IDX_MOUSE_LO <> INPUT_IOAPIC_IDX_MOUSE_LO | K64_INPUT_IOAPIC_IDX_MOUSE_HI <> INPUT_IOAPIC_IDX_MOUSE_HI
+        err 'pin 12 RTE indices disagree with the INPUT copy'
+end if
+if K64_INPUT_IOAPIC_IDX_KBD_LO <> 0x12 | K64_INPUT_IOAPIC_IDX_MOUSE_LO <> 0x28
+        err 'the RTE indices derive from the pins: 0x10+2*1 and 0x10+2*12'
+end if
+if K64_INPUT_CCB_SET <> INPUT_CCB_SET | K64_INPUT_CCB_CLEAR <> INPUT_CCB_CLEAR
+        err 'CCB bring-up bits disagree with the INPUT copy'
+end if
+if K64_INPUT_KBD_CAP <> INPUT_KBD_CAP | K64_INPUT_ACK_RETRY <> INPUT_ACK_RETRY
+        err 'buffer cap / resend cap disagree with the INPUT copy'
+end if
+if K64_INPUT_STAGE_DONE <> INPUT_STAGE_DONE
+        err 'handshake end stage disagrees with the INPUT copy'
+end if
+if K64_INPUT_ST_KBD_FINAL <> INPUT_ST_KBD_FINAL | K64_INPUT_ST_MOUSE_FINAL <> INPUT_ST_MOUSE_FINAL
+        err 'frozen final counts disagree with the INPUT copy'
+end if
+if K64_INPUT_MOUSE_SYNC <> INPUT_MOUSE_SYNC | K64_INPUT_MOUSE_SIGN_X <> INPUT_MOUSE_SIGN_X | K64_INPUT_MOUSE_SIGN_Y <> INPUT_MOUSE_SIGN_Y
+        err 'mouse packet bit facts disagree with the INPUT copy'
+end if
+if K64_INPUT_ST_MOUSE_DX <> INPUT_ST_MOUSE_DX | K64_INPUT_ST_MOUSE_DY <> INPUT_ST_MOUSE_DY
+        err 'the frozen injection deltas disagree with the INPUT copy'
+end if
+if K64_INPUT_ST_MOUSE_B1 <> INPUT_ST_MOUSE_B1
+        err 'the derived move byte 1 disagrees with the INPUT copy'
+end if
+if K64_INPUT_ST_MOUSE_B1 <> 0x28
+        err 'the derived move byte 1 must match the measured QEMU packet'
+end if
+if K64_INPUT_MOUSE_B1_MASK <> INPUT_MOUSE_B1_MASK | K64_INPUT_ST_MOUSE_LAST_MASK <> INPUT_ST_MOUSE_LAST_MASK
+        err 'the release packet masks disagree with the INPUT copy'
+end if
+if K64_INPUT_MOUSE_B1_MASK <> 0xCF | K64_INPUT_ST_MOUSE_LAST_MASK <> 0xFFFFCF
+        err 'the release mask keeps sync/buttons/deltas, drops only the sign bits'
+end if
+if K64_INPUT_TICKS_BASE <> IRQ_ST_FINAL_N | K64_INPUT_TICKS_BASE <> INPUT_IRQ_TICKS_BASE
+        err 'the input timer leg starts from the frozen IRQ-v1 exit count'
+end if
+if K64_INPUT_TICKS_FINAL <> INPUT_IRQ_TICKS_FINAL | K64_INPUT_TICKS_FINAL <> K64_INPUT_TICKS_BASE + 1
+        err 'the input timer leg adds exactly one tick'
+end if
+
+; the input status codes are the shared ones, a vmm_map_mmio failure
+; propagates through input_init without translation
+if K64_OK <> INPUT_OK | K64_EINVAL <> INPUT_EINVAL | K64_EPERM <> INPUT_EPERM
+        err 'input status codes disagree with the shared copy'
+end if
+if K64_EALREADY <> INPUT_EALREADY | K64_EIO <> INPUT_EIO | K64_ENOTSUP <> INPUT_ENOTSUP
+        err 'input status codes disagree with the shared copy'
+end if
+if INPUT_PAGE_SIZE <> K64_PAGE_SIZE | INPUT_DATA_ALIGN <> K64_DATA_ALIGN
+        err 'input geometry disagrees with the shared copy'
+end if
+if INPUT_PUTS_MAX <> CPU_PUTS_MAX | INPUT_PUTHEX_DIGITS <> CPU_PUTHEX_DIGITS
+        err 'input console caps disagree with the CPU copy'
+end if
+if INPUT_VEC_KEYBOARD < CPU_IRQ_VECTOR_MIN | INPUT_VEC_MOUSE < CPU_IRQ_VECTOR_MIN
+        err 'the input vectors must sit inside the CPU asynchronous window'
+end if
+if INPUT_LAPIC_VA <> K64_MMIO_LAPIC_VA | INPUT_LAPIC_LVT_TIMER <> K64_LAPIC_LVT_TIMER
+        err 'the input private LAPIC copies disagree with the shared contract'
+end if
+if INPUT_LAPIC_INIT_COUNT <> K64_LAPIC_INIT_COUNT | INPUT_LAPIC_DIVIDE <> K64_LAPIC_DIVIDE
+        err 'the input private timer count/divide copies disagree'
+end if
+if INPUT_LVT_MASK <> K64_IRQ_LVT_MASK | INPUT_DIVIDE_16 <> K64_IRQ_DIVIDE_16
+        err 'the input private mask/divide copies disagree'
+end if
+if INPUT_VEC_TIMER <> K64_IRQ_VEC_TIMER | INPUT_TICK_HZ <> IRQ_TICK_HZ
+        err 'the input private timer vector/tick copies disagree'
+end if
+
+; the counter layout the gdbstub smoke reads: the input mask, the two
+; event counters and the handshake stage are qwords at frozen offsets
+K64_INPUT_DATA_OFF_TEST_MASK  = 8
+K64_INPUT_DATA_OFF_TEST_KBD   = 16
+K64_INPUT_DATA_OFF_TEST_MOUSE = 24
+K64_INPUT_DATA_OFF_TEST_STAGE = 32
+
+if K64_INPUT_DATA_OFF_TEST_MASK <> INPUT_DATA_OFF_TEST_MASK
+        err 'input selftest mask offset disagrees with the INPUT copy'
+end if
+if K64_INPUT_DATA_OFF_TEST_KBD <> INPUT_DATA_OFF_TEST_KBD
+        err 'input keyboard count offset disagrees with the INPUT copy'
+end if
+if K64_INPUT_DATA_OFF_TEST_MOUSE <> INPUT_DATA_OFF_TEST_MOUSE
+        err 'input mouse count offset disagrees with the INPUT copy'
+end if
+if K64_INPUT_DATA_OFF_TEST_STAGE <> INPUT_DATA_OFF_TEST_STAGE
+        err 'input handshake stage offset disagrees with the INPUT copy'
+end if
+
+; IOAPIC window placement premises: above the heap, 2 MiB aligned,
+; under the window base PML4 slot, never under the core test slot,
+; strictly above the LAPIC page (16 MiB above it, clear of the whole
+; FB window whose limit is the LAPIC VA); it shares the heap PDPT
+; entry but owns a page table of its own (one new PT at input_init
+; time, after the leg 7 baseline, so the frozen delta stays three)
+if K64_MMIO_IOAPIC_VA < K64_VMM_WINDOW_BASE | K64_MMIO_IOAPIC_VA >= K64_VMM_WINDOW_LIMIT
+        err 'the IOAPIC MMIO VA must stay inside the mapping window'
+end if
+if K64_MMIO_IOAPIC_VA < K64_HEAP_LIMIT
+        err 'the IOAPIC MMIO VA must sit above the heap limit'
+end if
+if K64_MMIO_IOAPIC_VA mod K64_LARGE_PAGE_SIZE
+        err 'the IOAPIC MMIO VA must be 2 MiB aligned'
+end if
+if ((K64_MMIO_IOAPIC_VA shr 39) and 0x1FF) <> ((K64_VMM_WINDOW_BASE shr 39) and 0x1FF)
+        err 'the IOAPIC MMIO VA must share the window base PML4 slot'
+end if
+if ((K64_MMIO_IOAPIC_VA shr 39) and 0x1FF) = K64_CORE_TEST_SLOT
+        err 'the IOAPIC MMIO VA must not use the core test PML4 slot'
+end if
+if K64_MMIO_IOAPIC_VA <= K64_MMIO_LAPIC_VA
+        err 'the IOAPIC page must sit strictly above the LAPIC page'
+end if
+if (K64_MMIO_IOAPIC_VA shr 30) <> (K64_HEAP_BASE shr 30)
+        err 'the IOAPIC page must share the heap PDPT entry'
+end if
+if (K64_MMIO_IOAPIC_VA shr 21) = (K64_HEAP_BASE shr 21) | (K64_MMIO_IOAPIC_VA shr 21) = (K64_MMIO_LAPIC_VA shr 21)
+        err 'the IOAPIC page must own a page table of its own'
+end if
+if K64_CORE_ACCOUNT_TABLES <> 3
+        err 'the leg7 accounting stays frozen at three tables'
+end if

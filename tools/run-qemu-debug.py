@@ -13,27 +13,33 @@ Modes:
                  continue. Ctrl-C stops QEMU and cleans up.
   --no-freeze    smoke mode: no -S, bounded by --timeout; waits for a
                  TERMINAL marker (K64-FOUNDATION-OK or K64-CPU-PANIC),
-                 not the first K64-BOOT-OK. PASS requires all eight OK
-                 markers (BOOT/CPU/PMM/VMM/HEAP/IRQ/GUI/FOUNDATION) exactly
-                 once and in order, no K64-CPU-PANIC / K64-BOOT-FAIL, no
-                 triple fault or unexpected reset, and the frozen task-60
+                 not the first K64-BOOT-OK. PASS requires all nine OK
+                 markers (BOOT/CPU/PMM/VMM/HEAP/IRQ/INPUT/GUI/FOUNDATION)
+                 exactly once and in order, no K64-CPU-PANIC / K64-BOOT-FAIL,
+                 no triple fault or unexpected reset, and the frozen task-60
                  verdict values: CPU selftest passed = 0x5FF (parsed from
                  the serial report line) plus mm_mask = 0, hook_hits = 3,
-                 core_mask = 0, the frozen IRQ-v1 verdict values
-                 irq_mask = 0, ticks = 10, and the GUI-G1 verdict value
-                 video_selftest_mask = 0. The kernel never prints those
-                 counters on the success path, so they are read from
-                 guest memory through the gdbstub after the terminal
-                 marker (task 60 used the same channel). After the
-                 terminal marker a monitor screendump is captured to
+                 core_mask = 0, the IRQ-v2 verdict values irq_mask = 0,
+                 ticks = 11 (the input timer leg adds one to the IRQ-v1
+                 exit value 10), the input verdict values input mask = 0,
+                 kbd_count = 2, mouse_count = 3, stage = 6, and the GUI-G1
+                 verdict value video_selftest_mask = 0. The kernel never
+                 prints those counters on the success path, so they are
+                 read from guest memory through the gdbstub after the
+                 terminal marker (task 60 used the same channel). While
+                 waiting, the smoke loop drives the IRQ-v2 input self test
+                 handshake: it polls input_test_stage through the gdbstub
+                 and injects sendkey / mouse_move / mouse_button through
+                 the monitor socket, once per stage, all bounded. After
+                 the terminal marker a monitor screendump is captured to
                  screen.ppm and judged in pure Python against the frozen
                  28-probe pattern spec (1024x768, eight bars, border,
                  gray rectangle, text glyphs). Any parse/read failure,
                  or a timeout without a terminal marker, is a FAIL with
                  the reason printed.
-  --gui-skip     expect the non-fatal GUI skip path instead: the seven
+  --gui-skip     expect the non-fatal GUI skip path instead: the eight
                  non-GUI OK markers plus exactly one K64-GUI-SKIP between
-                 IRQ and FOUNDATION, no K64-GUI-OK, no pixel assertions;
+                 INPUT and FOUNDATION, no K64-GUI-OK, no pixel assertions;
                  video_fb_state is read through the gdbstub as geometry
                  evidence. Used with a loader built with GOP_MAX_MODES=0.
 
@@ -69,10 +75,12 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# the eight milestone markers, in their fixed emission order; GUI-G1 sits
-# between IRQ and FOUNDATION (foundation.inc emits it after core_selftest)
+# the nine milestone markers, in their fixed emission order; IRQ-v2
+# INPUT sits between IRQ and GUI, GUI-G1 between INPUT and FOUNDATION
+# (foundation.inc emits them after core_selftest)
 MARKERS = ("K64-BOOT-OK", "K64-CPU-OK", "K64-PMM-OK", "K64-VMM-OK",
-           "K64-HEAP-OK", "K64-IRQ-OK", "K64-GUI-OK", "K64-FOUNDATION-OK")
+           "K64-HEAP-OK", "K64-IRQ-OK", "K64-INPUT-OK", "K64-GUI-OK",
+           "K64-FOUNDATION-OK")
 GUI_OK_MARKER = "K64-GUI-OK"
 GUI_SKIP_MARKER = "K64-GUI-SKIP"
 TERMINAL_MARKERS = ("K64-FOUNDATION-OK", "K64-CPU-PANIC")
@@ -104,13 +112,35 @@ PPM_PROBES = (
 COUNTER_SYMBOLS = (("mm_test_selftest_mask", 8), ("mm_test_fail_hits", 4),
                    ("core_selftest_mask", 8),
                    ("irq_test_selftest_mask", 8), ("irq_test_ticks", 8),
+                   ("input_test_selftest_mask", 8),
+                   ("input_test_kbd_count", 8),
+                   ("input_test_mouse_count", 8),
+                   ("input_test_stage", 8),
                    ("video_selftest_mask", 8))
 EXPECTED_PASSED = 0x5FF
 EXPECTED_COUNTERS = {"mm_test_selftest_mask": 0, "mm_test_fail_hits": 3,
                      "core_selftest_mask": 0,
-                     "irq_test_selftest_mask": 0, "irq_test_ticks": 10,
+                     "irq_test_selftest_mask": 0, "irq_test_ticks": 11,
+                     "input_test_selftest_mask": 0,
+                     "input_test_kbd_count": 2,
+                     "input_test_mouse_count": 3,
+                     "input_test_stage": 6,
                      "video_selftest_mask": 0}
 PASSED_RE = re.compile(r"K64-CPU-SELFTEST passed = (0x[0-9A-Fa-f]+)")
+
+# the IRQ-v2 host injection script, one monitor command per handshake
+# stage (input/api.inc INPUT_STAGE_*). Stage 4 is special: the press is
+# sent first, the release only after the guest consumed the press packet
+# (mouse_count >= 2), so QEMU can never coalesce press+release into one
+# packet. Stage 5 (timer) and 6 (done) need no host action.
+INPUT_STAGE_INJECT = {1: "sendkey b", 2: "sendkey a", 3: "mouse_move 5 3"}
+
+# forensic evidence for a failed input handshake: the raw mouse packet
+# state, read through the gdbstub while the panicked kernel still lives
+INPUT_FORENSIC_SYMBOLS = (("input_test_mouse_last", 8),
+                          ("input_mouse_x", 8), ("input_mouse_y", 8),
+                          ("input_mouse_bad", 8), ("input_mouse_state", 8),
+                          ("input_mouse_b1", 8), ("input_mouse_b2", 8))
 
 _qemu_proc = None
 
@@ -276,41 +306,48 @@ def gdb_read_mem(port, addr, size, timeout=5.0):
     Connecting pauses the VM; after a terminal marker the kernel sits in
     cli/hlt, so the counters are stable. Stop replies ('T'/'S') and console
     ('O') packets may precede the read reply and are skipped. A detach
-    ('D') resumes the guest before the socket closes.
+    ('D') resumes the guest; it is sent on EVERY exit path, because a
+    bare socket close after an 'E' error reply would leave the VM paused
+    forever (the early-boot stage polling hits unmapped addresses).
     """
     with socket.create_connection(("127.0.0.1", port), timeout=timeout) as s:
         s.settimeout(timeout)
-        body = ("m%x,%x" % (addr, size)).encode()
-        s.sendall(b"$" + body + b"#%02x" % (sum(body) & 0xFF))
-        buf = b""
-        deadline = time.monotonic() + timeout
-        value = None
-        while time.monotonic() < deadline:
-            chunk = s.recv(4096)
-            if not chunk:
-                break
-            buf += chunk
-            while True:
-                m = re.search(rb"\$([^#]*)#([0-9a-fA-F]{2})", buf)
-                if not m:
+        try:
+            body = ("m%x,%x" % (addr, size)).encode()
+            s.sendall(b"$" + body + b"#%02x" % (sum(body) & 0xFF))
+            buf = b""
+            deadline = time.monotonic() + timeout
+            value = None
+            while time.monotonic() < deadline:
+                chunk = s.recv(4096)
+                if not chunk:
                     break
-                payload = m.group(1)
-                buf = buf[m.end():]
-                if (len(payload) == 2 * size
-                        and re.fullmatch(rb"[0-9a-fA-F]+", payload)):
-                    value = int.from_bytes(bytes.fromhex(payload.decode()),
-                                           "little")
+                buf += chunk
+                while True:
+                    m = re.search(rb"\$([^#]*)#([0-9a-fA-F]{2})", buf)
+                    if not m:
+                        break
+                    payload = m.group(1)
+                    buf = buf[m.end():]
+                    if (len(payload) == 2 * size
+                            and re.fullmatch(rb"[0-9a-fA-F]+", payload)):
+                        value = int.from_bytes(bytes.fromhex(payload.decode()),
+                                               "little")
+                        break
+                    if payload[:1] == b"E":
+                        raise OSError(f"gdbstub error reply {payload.decode()!r} "
+                                      f"for m{addr:x},{size:x}")
+                if value is not None:
                     break
-                if payload[:1] == b"E":
-                    raise OSError(f"gdbstub error reply {payload.decode()!r} "
-                                  f"for m{addr:x},{size:x}")
-            if value is not None:
-                break
-        if value is None:
-            raise OSError(f"gdbstub read m{addr:x},{size:x}: no reply "
-                          "before timeout")
-        s.sendall(b"$D#44")
-        return value
+            if value is None:
+                raise OSError(f"gdbstub read m{addr:x},{size:x}: no reply "
+                              "before timeout")
+            return value
+        finally:
+            try:
+                s.sendall(b"$D#44")
+            except OSError:
+                pass
 
 
 def read_counters(port, addrs):
@@ -361,6 +398,38 @@ def screendump(art, timeout=15.0):
         return f.read()
 
 
+def monitor_command(art, cmd, timeout=10.0):
+    """Send one HMP command through the unix-socket monitor, bounded.
+
+    Same prompt discipline as screendump(): the greeting prompt is
+    consumed first, the command has completed when the next (qemu)
+    prompt arrives. Returns the raw reply text as injection evidence.
+    """
+    sock_path = os.path.join(art, "monitor.sock")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        s.connect(sock_path)
+        buf = b""
+
+        def wait_prompt():
+            nonlocal buf
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if b"(qemu)" in buf:
+                    return
+                chunk = s.recv(4096)
+                if not chunk:
+                    raise OSError("monitor socket closed before prompt")
+                buf += chunk
+            raise OSError("no (qemu) prompt before timeout")
+
+        wait_prompt()
+        buf = b""
+        s.sendall((cmd + "\n").encode())
+        wait_prompt()
+    return buf.decode(errors="replace").strip()
+
+
 def parse_ppm(data):
     """Pure-Python PPM P6 parser -> (width, height, rgb bytes).
 
@@ -405,9 +474,9 @@ def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None):
     decision can be exercised unit-style against mutated serial/debug
     fixtures (the task-67 sensitivity evidence).
 
-    gui_mode="ok"   the default eight-marker PASS path plus the frozen
+    gui_mode="ok"   the default nine-marker PASS path plus the frozen
                     28-probe PPM pixel assertions on `ppm` (raw bytes).
-    gui_mode="skip" the non-fatal GOP fallback path: seven OK markers,
+    gui_mode="skip" the non-fatal GOP fallback path: eight OK markers,
                     exactly one K64-GUI-SKIP between IRQ and FOUNDATION,
                     no K64-GUI-OK, no pixel assertions. Never mixed into
                     the default PASS path.
@@ -485,11 +554,11 @@ def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None):
             "no K64-GUI-OK in serial (skip mode)")
         n = serial.count(GUI_SKIP_MARKER)
         req(n == 1, f"{GUI_SKIP_MARKER} count = {n} (need exactly 1)")
-        p_irq = serial.find("K64-IRQ-OK")
+        p_input = serial.find("K64-INPUT-OK")
         p_skip = serial.find(GUI_SKIP_MARKER)
         p_found = serial.find("K64-FOUNDATION-OK")
-        req(p_irq >= 0 and p_skip > p_irq and p_found > p_skip,
-            "K64-GUI-SKIP sits between K64-IRQ-OK and K64-FOUNDATION-OK")
+        req(p_input >= 0 and p_skip > p_input and p_found > p_skip,
+            "K64-GUI-SKIP sits between K64-INPUT-OK and K64-FOUNDATION-OK")
     return ok, lines
 
 
@@ -573,15 +642,67 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
     deadline = time.monotonic() + args.timeout
     early_exit = False
     terminal_seen = False
+    # IRQ-v2 injection handshake: poll input_test_stage through the
+    # gdbstub, send one monitor command per stage, all bounded by the
+    # smoke deadline. Stage 4 splits press/release: the release is only
+    # sent after the guest consumed the press packet (mouse_count >= 2)
+    # so QEMU can never coalesce press+release into a single packet.
+    injected = set()
+    press_sent = False
+    release_sent = False
+    inject_log = []
+
+    def inject(cmd, label):
+        # a monitor reply starting with Error/unknown means the command
+        # was rejected: log FAILED and return False so the handshake
+        # retries it on a later poll round, never record a fake 'sent'
+        try:
+            reply = monitor_command(art, cmd)
+        except OSError as e:
+            inject_log.append(f"{label}: {cmd!r} FAILED: {e}")
+            return False
+        low = reply.lower()
+        if low.startswith("error") or low.startswith("unknown"):
+            inject_log.append(f"{label}: {cmd!r} FAILED: {reply!r}")
+            return False
+        inject_log.append(f"{label}: {cmd!r} sent")
+        return True
+
+    stage_addr = counter_addrs.get("input_test_stage")
+    mouse_addr = counter_addrs.get("input_test_mouse_count")
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             early_exit = True  # QEMU died on its own, e.g. -no-reboot on fault
             break
         # wait for the TERMINAL marker, not the first K64-BOOT-OK: the
         # whole foundation chain must have run before judging
-        if any(t in read_log(serial_path) for t in TERMINAL_MARKERS):
+        serial_now = read_log(serial_path)
+        if any(t in serial_now for t in TERMINAL_MARKERS):
             terminal_seen = True
             break
+        # drive the handshake only after the IRQ stage: no gdbstub
+        # interference with OVMF or the earlier kernel stages. Early in
+        # the input stage the data VA may still be unmapped: the gdbstub
+        # answers 'E' and the read raises OSError -> skip this round
+        if stage_addr is not None and "K64-IRQ-OK" in serial_now:
+            try:
+                stage = gdb_read_mem(args.port, stage_addr, 8)
+            except OSError:
+                stage = None
+            if stage in INPUT_STAGE_INJECT and stage not in injected:
+                if inject(INPUT_STAGE_INJECT[stage], f"stage {stage}"):
+                    injected.add(stage)
+            elif stage == 4 and mouse_addr is not None:
+                if not press_sent:
+                    press_sent = inject("mouse_button 1", "stage 4 press")
+                elif not release_sent:
+                    try:
+                        n = gdb_read_mem(args.port, mouse_addr, 8)
+                    except OSError:
+                        n = 0
+                    if n >= 2:
+                        release_sent = inject("mouse_button 0",
+                                              "stage 4 release")
         time.sleep(0.5)
     # give the kernel a moment to finish its report, then read the
     # memory-only counters while QEMU (and the halted kernel) still lives
@@ -595,6 +716,21 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
     elif not terminal_seen:
         read_errors.append("counters not read: no terminal marker "
                            "before timeout")
+    # forensic evidence: on any input counter mismatch, dump the raw
+    # mouse packet state before killing QEMU
+    forensic = []
+    if proc.poll() is None and any(
+            counters.get(n) != EXPECTED_COUNTERS[n]
+            for n in ("input_test_selftest_mask", "input_test_kbd_count",
+                      "input_test_mouse_count", "input_test_stage")):
+        for name, size in INPUT_FORENSIC_SYMBOLS:
+            if name not in counter_addrs:
+                continue
+            try:
+                v = gdb_read_mem(args.port, counter_addrs[name], size)
+                forensic.append(f"{name} = {v:#x}")
+            except OSError as e:
+                forensic.append(f"{name}: {e}")
     # capture the screen before killing QEMU; screen.ppm stays in the
     # artifact directory as forensic evidence in both GUI modes
     ppm = None
@@ -631,6 +767,16 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
         print(line)
     for e in read_errors:
         print("  counter read: " + e)
+    print("  input injection log:")
+    if inject_log:
+        for entry in inject_log:
+            print("    " + entry)
+    else:
+        print("    (none)")
+    if forensic:
+        print("  input forensic state:")
+        for entry in forensic:
+            print("    " + entry)
     print(f"  terminal marker before timeout : {terminal_seen}")
     print(f"  screendump PPM : {ppm_path} "
           f"({'captured' if ppm is not None else 'MISSING'})")
@@ -656,8 +802,8 @@ def main():
                     help="guest RAM in MiB (default 128)")
     ap.add_argument("--port", type=int, default=1234,
                     help="gdbstub port on 127.0.0.1 (default 1234)")
-    ap.add_argument("--timeout", type=float, default=90.0,
-                    help="smoke mode budget in seconds (default 90)")
+    ap.add_argument("--timeout", type=float, default=120.0,
+                    help="smoke mode budget in seconds (default 120)")
     ap.add_argument("--art-dir",
                     help="artifact directory (default: "
                          "build/qemu-debug/<timestamp>-<pid>)")
@@ -689,7 +835,9 @@ def main():
     elf = gen_symbols(art, bin_dir)
     counter_addrs, counter_errors = {}, []
     if args.no_freeze:
-        extra = (("video_fb_state", 64),) if args.gui_skip else ()
+        extra = INPUT_FORENSIC_SYMBOLS
+        if args.gui_skip:
+            extra += (("video_fb_state", 64),)
         counter_addrs, counter_errors = counter_addresses(art, extra)
         for e in counter_errors:
             print("run-qemu-debug: WARNING: " + e, file=sys.stderr)

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Stage 2 IRQ module checks, task 70, contract IRQ-v1. No machine is started.
+"""Stage 2 IRQ module checks, task 70, contract IRQ-v1, extended by
+task 89 for the IRQ-v2 input dispatch branches. No machine is started.
 
 Everything here is measured, nothing is taken from a comment. The probe
 tests/stage2-irq/layout.asm assembles kernel/irq/irq.asm exactly as the kernel
@@ -49,6 +50,9 @@ KERNEL_BASE = 0xFFFFFFFF80000000
 
 VEC_TIMER = 0x20
 VEC_SPURIOUS = 0xFF
+# IRQ-v2: the input vectors, frozen between the timer and the spurious
+VEC_KEYBOARD = 0x21
+VEC_MOUSE = 0x2C
 SVR_VALUE = 0x1FF
 SVR_ENABLE = 0x100
 LAPIC_PA = 0xFEE00000
@@ -162,6 +166,7 @@ M = [
     'cpu_com1_puts', 'cpu_com1_puthex',
     'off_test_ticks', 'off_test_mask', 'off_skip_eoi', 'off_if_value',
     'off_frame_if', 'off_isr_seen', 'off_isr_after', 'off_messages',
+    'input_kbd_stub', 'input_mouse_stub', 'vec_keyboard', 'vec_mouse',
 ]
 
 # label name -> frozen offset inside the data region
@@ -178,6 +183,7 @@ DATA_LABELS = {
 # manifest constants that must not drift from the copies above
 CONSTANTS = {
     'vec_timer': VEC_TIMER, 'vec_spurious': VEC_SPURIOUS,
+    'vec_keyboard': VEC_KEYBOARD, 'vec_mouse': VEC_MOUSE,
     'svr_value': SVR_VALUE, 'lapic_pa': LAPIC_PA, 'lapic_va': LAPIC_VA,
     'lvt_mask': LVT_MASK, 'lvt_periodic': LVT_PERIODIC,
     'divide_16': DIVIDE_16, 'tick_hz': TICK_HZ,
@@ -456,6 +462,13 @@ def check_manifest(rep, img):
                  'cpu_halt_forever', 'cpu_com1_puts', 'cpu_com1_puthex'):
         rep.check('layout.%s_before_module' % name, 0 < img[name] < lo,
                   '%#x' % img[name])
+    # IRQ-v2: the input leaf stubs sit between mm.asm and irq.asm, and
+    # each is a single ret byte
+    for name in ('input_kbd_stub', 'input_mouse_stub'):
+        rep.check('layout.%s_before_module' % name, 0 < img[name] < lo,
+                  '%#x' % img[name])
+        rep.check('layout.%s_is_ret' % name,
+                  img.data[img.at(name):img.at(name) + 1] == b'\xC3')
 
 
 def check_data(rep, img):
@@ -632,6 +645,35 @@ def check_dispatch(rep, img):
     rep.check('dispatch.spurious_vector_compare',
               d.find(b'\x48\x3D\xFF\x00\x00\x00', at, end) >= 0)
 
+    # IRQ-v2: the keyboard and mouse vector compares, in the frozen
+    # order after the spurious compare and before the unknown-vector
+    # panic; the branch bodies live after the ret so the timer and
+    # spurious byte sequences stay untouched
+    kbd_cmp = d.find(b'\x48\x83\xF8' + bytes((VEC_KEYBOARD,)), at, end)
+    mouse_cmp = d.find(b'\x48\x83\xF8' + bytes((VEC_MOUSE,)), at, end)
+    sp_cmp = d.find(b'\x48\x3D\xFF\x00\x00\x00', at, end)
+    rets = find_all(d[at:end], b'\xC3')
+    rep.check('dispatch.keyboard_vector_compare', kbd_cmp >= 0)
+    rep.check('dispatch.mouse_vector_compare', mouse_cmp >= 0)
+    rep.check('dispatch.input_compares_after_spurious',
+              sp_cmp < kbd_cmp < mouse_cmp)
+    frame_loads = find_all(d[at:end], b'\x48\x8B\x4D\xF8')
+    rep.equal('dispatch.input_rcx_frame_loads', len(frame_loads), 2)
+    kbd_calls = [s for s, t in call_sites(img, at, end)
+                 if t == img.at('input_kbd_stub')]
+    mouse_calls = [s for s, t in call_sites(img, at, end)
+                   if t == img.at('input_mouse_stub')]
+    rep.equal('dispatch.calls_keyboard_leaf_once', len(kbd_calls), 1)
+    rep.equal('dispatch.calls_mouse_leaf_once', len(mouse_calls), 1)
+    if kbd_calls and mouse_calls and frame_loads and rets:
+        rep.check('dispatch.input_bodies_after_return',
+                  kbd_calls[0] > at + rets[0])
+        rep.check('dispatch.keyboard_frame_load_before_call',
+                  any(at + f < kbd_calls[0] for f in frame_loads))
+        rep.check('dispatch.mouse_frame_load_before_call',
+                  any(kbd_calls[0] < at + f < mouse_calls[0]
+                      for f in frame_loads))
+
     # the unknown vector path panics inside the handler, before .timer
     panic = [s for s, t in call_sites(img, at, end) if t == img.at('cpu_panic')]
     rep.equal('dispatch.unknown_vector_panics', len(panic), 1)
@@ -672,13 +714,30 @@ def check_dispatch(rep, img):
     rep.equal('dispatch.isr_seen_store', len(seen), 1)
     rep.equal('dispatch.isr_after_store', len(after), 1)
 
-    # the leg 5 switch guards exactly the one EOI write
+    # the leg 5 switch guards exactly the timer EOI write; IRQ-v2 adds
+    # the second, unguarded .input_eoi site after the ret: the input
+    # branches always EOI, the skip switch never touches them
     guard = rip_refs(img, at, end, b'\x48\x83', 0x3D, 1, 'skip_eoi')
     rep.equal('dispatch.skip_eoi_guard', len(guard), 1)
     eoi = find_all(d[at:end], lapic_write(LAPIC_EOI, 0))
-    rep.equal('dispatch.one_eoi_site', len(eoi), 1)
-    rets = find_all(d[at:end], b'\xC3')
+    rep.equal('dispatch.two_eoi_sites', len(eoi), 2)
     rep.equal('dispatch.single_return', len(rets), 1)
+    if len(eoi) == 2 and rets:
+        rep.check('dispatch.input_eoi_after_return',
+                  at + eoi[1] > at + rets[0],
+                  'the .input_eoi site lives after the leave/ret')
+        # the jmp back to .done may be short (EB) or near (E9); either
+        # way it must land exactly on the leave of the single exit
+        j = at + eoi[1] + 10
+        done = at + rets[0] - 1
+        if d[j] == 0xEB:
+            tgt = j + 2 + struct.unpack_from('<b', d, j + 1)[0]
+        elif d[j] == 0xE9:
+            tgt = j + 5 + struct.unpack_from('<i', d, j + 1)[0]
+        else:
+            tgt = -1
+        rep.check('dispatch.input_eoi_jmps_to_done', tgt == done,
+                  'the input EOI write jumps straight to the leave/ret')
     if guard and eoi and rets:
         g, e, r = guard[0], at + eoi[0], at + rets[0]
         rep.check('dispatch.guard_before_eoi', g < e)
@@ -1040,9 +1099,26 @@ def check_position_independence(rep, asm_, root, out, low):
 # ----------------------------------------------------------------------
 
 FIXTURES = [
-    # the timer path must EOI before it returns, or the second tick never comes
+    # the timer path must EOI before it returns, or the second tick never
+    # comes (the jne .done context pins the guarded timer site, IRQ-v2
+    # added a second EOI write at .input_eoi)
     ('dispatch-eoi-removed', 'kernel/irq/dispatch.inc',
-     '        mov     dword [rsi + IRQ_LAPIC_EOI], 0\n', '', 'check'),
+     '        jne     .done\n'
+     '        mov     dword [rsi + IRQ_LAPIC_EOI], 0\n',
+     '        jne     .done\n', 'check'),
+    # IRQ-v2: the keyboard dispatch branch may not disappear
+    ('dispatch-kbd-branch-removed', 'kernel/irq/dispatch.inc',
+     '        cmp     rax, IRQ_VEC_KEYBOARD\n'
+     '        je      .keyboard\n', '', 'check'),
+    # IRQ-v2: the input EOI site may not disappear either
+    ('dispatch-input-eoi-removed', 'kernel/irq/dispatch.inc',
+     '.input_eoi:\n'
+     '        mov     dword [rsi + IRQ_LAPIC_EOI], 0\n',
+     '.input_eoi:\n', 'check'),
+    # IRQ-v2: the frozen keyboard vector may not drift, the private
+    # assertion fires
+    ('keyboard-vector-drift', 'kernel/irq/api.inc',
+     'IRQ_VEC_KEYBOARD    = 0x21', 'IRQ_VEC_KEYBOARD    = 0x22', 'assemble'),
     # the bring-up must start with the timer masked
     ('bringup-mask-removed', 'kernel/irq/lapic.inc',
      '        mov     dword [rsi + IRQ_LAPIC_LVT_TIMER], IRQ_LVT_MASK\n',

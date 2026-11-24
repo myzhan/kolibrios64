@@ -356,6 +356,13 @@ include 'mm/mm.asm'
 
 include 'irq/irq.asm'
 
+; IRQ-v2: the input module calls vmm_map_mmio of MM and irq_sti_wait of
+; IRQ; its handlers are called by irq_dispatch. INPUT_HOSTED keeps
+; input.asm from emitting its standalone format/org pair. Its data
+; region is protected RW/NX by the foundation input stage.
+INPUT_HOSTED = 1
+include 'input/input.asm'
+
 ; GUI-G1: the framebuffer module calls vmm_map_mmio of MM and nothing
 ; else outside its own files. VIDEO_HOSTED keeps video.asm from emitting
 ; its standalone format/org pair, exactly like MM_HOSTED above. Its data

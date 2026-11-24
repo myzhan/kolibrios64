@@ -5,7 +5,8 @@
 ;;                                                              ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;
-;; Layout probe for the stage 2 IRQ module, task 70, contract IRQ-v1.
+;; Layout probe for the stage 2 IRQ module, task 70, contract IRQ-v1,
+;; extended by task 89 for the IRQ-v2 dispatch branches.
 ;;
 ;; This file is a test harness, not part of the kernel. It assembles
 ;; kernel/irq/irq.asm exactly as the kernel will include it, behind the
@@ -13,6 +14,12 @@
 ;; and the console, mm.asm for vmm_map_mmio), appends a manifest of label
 ;; addresses, and lets tests/stage2-irq/check.py verify the emitted bytes.
 ;; Nothing here is executed and no machine is started.
+;;
+;; IRQ-v2: irq_dispatch now calls input_keyboard_irq / input_mouse_irq.
+;; This gate isolates the IRQ module, so the two input leaves are ret
+;; stubs here; their real bodies are gated by tests/stage2-input. The
+;; stub addresses join the manifest so check.py can prove the dispatch
+;; branches call exactly them with RCX = frame.
 ;;
 ;; IRQ_PROBE_ORG selects the link base; check.py assembles the probe twice,
 ;; once at 0 for byte offsets and once at the kernel base to prove that the
@@ -36,6 +43,12 @@ include '../../kernel/cpu/cpu.asm'
 
 MM_HOSTED = 1
 include '../../kernel/mm/mm.asm'
+
+; IRQ-v2 input leaf stubs: the dispatch branches must call exactly these
+input_keyboard_irq:
+        ret
+input_mouse_irq:
+        ret
 
 include '../../kernel/irq/irq.asm'
 
@@ -107,8 +120,12 @@ irq_probe:
         dq      IRQ_DATA_OFF_ISR_SEEN
         dq      IRQ_DATA_OFF_ISR_AFTER
         dq      IRQ_DATA_OFF_MESSAGES
+        dq      input_keyboard_irq
+        dq      input_mouse_irq
+        dq      IRQ_VEC_KEYBOARD
+        dq      IRQ_VEC_MOUSE
 irq_probe_end:
 
-if (irq_probe_end - irq_probe) <> 62 * 8
+if (irq_probe_end - irq_probe) <> 66 * 8
         err 'the manifest must keep its fixed entry count'
 end if

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""GUI-G1 integration judge fixtures (task 78, decision 5).
+"""GUI-G1 integration judge fixtures (task 78, decision 5), extended
+by task 89 for the IRQ-v2 INPUT marker and counters.
 
 Proves the extended tools/run-qemu-debug.py judge() catches integration
 defects, in the same negative-fixture spirit as tests/stage2-fb/check.py:
@@ -78,7 +79,7 @@ def serial_ok():
         'K64-BOOT-OK', 'K64-CPU-OK',
         'K64-CPU-SELFTEST passed = 0x5FF',
         'K64-PMM-OK', 'K64-VMM-OK', 'K64-HEAP-OK', 'K64-IRQ-OK',
-        'K64-GUI-OK', 'K64-FOUNDATION-OK', ''])
+        'K64-INPUT-OK', 'K64-GUI-OK', 'K64-FOUNDATION-OK', ''])
 
 
 def serial_skip():
@@ -99,14 +100,32 @@ def main():
     counters = dict(rq.EXPECTED_COUNTERS)
 
     # structural pins of the extension itself
-    check('eight markers', len(rq.MARKERS) == 8)
-    check('GUI marker between IRQ and FOUNDATION',
-          rq.MARKERS.index('K64-GUI-OK') == rq.MARKERS.index('K64-IRQ-OK') + 1
+    check('nine markers', len(rq.MARKERS) == 9)
+    check('INPUT marker between IRQ and GUI',
+          rq.MARKERS.index('K64-INPUT-OK') == rq.MARKERS.index('K64-IRQ-OK') + 1
+          and rq.MARKERS.index('K64-GUI-OK')
+          == rq.MARKERS.index('K64-INPUT-OK') + 1)
+    check('GUI marker between INPUT and FOUNDATION',
+          rq.MARKERS.index('K64-GUI-OK') == rq.MARKERS.index('K64-INPUT-OK') + 1
           and rq.MARKERS.index('K64-FOUNDATION-OK')
           == rq.MARKERS.index('K64-GUI-OK') + 1)
     check('28 frozen probes', len(rq.PPM_PROBES) == 28)
     check('video_selftest_mask expected 0',
           rq.EXPECTED_COUNTERS.get('video_selftest_mask') == 0)
+    # the IRQ-v2 final counts, derived from the injection sequence:
+    # kbd 2 (masked leg drains both bytes of sendkey b), mouse 3 (move +
+    # press + gated release), ticks 11 (IRQ-v1 exit 10 + exactly one
+    # masked-oneshot tick), stage 6, mask 0
+    check('input_test_selftest_mask expected 0',
+          rq.EXPECTED_COUNTERS.get('input_test_selftest_mask') == 0)
+    check('input_test_kbd_count expected 2',
+          rq.EXPECTED_COUNTERS.get('input_test_kbd_count') == 2)
+    check('input_test_mouse_count expected 3',
+          rq.EXPECTED_COUNTERS.get('input_test_mouse_count') == 3)
+    check('input_test_stage expected 6',
+          rq.EXPECTED_COUNTERS.get('input_test_stage') == 6)
+    check('irq_test_ticks expected 11',
+          rq.EXPECTED_COUNTERS.get('irq_test_ticks') == 11)
     check('the spec model satisfies every probe',
           all(frame[y][x] == want for x, y, want in rq.PPM_PROBES))
 
@@ -128,9 +147,9 @@ def main():
     s = serial_ok().replace('K64-GUI-OK\r\n', '')
     negatives.append(('GUI-OK marker removed', s, DEBUG, counters, 'ok', ppm))
 
-    s = serial_ok().replace('K64-IRQ-OK\r\nK64-GUI-OK',
-                            'K64-GUI-OK\r\nK64-IRQ-OK')
-    negatives.append(('GUI-OK emitted before IRQ', s, DEBUG, counters,
+    s = serial_ok().replace('K64-INPUT-OK\r\nK64-GUI-OK',
+                            'K64-GUI-OK\r\nK64-INPUT-OK')
+    negatives.append(('GUI-OK emitted before INPUT', s, DEBUG, counters,
                       'ok', ppm))
 
     s = serial_ok().replace('K64-GUI-OK', 'K64-GUI-OK\r\nK64-GUI-OK')
@@ -157,9 +176,9 @@ def main():
     negatives.append(('ok serial judged in skip mode', serial_ok(), DEBUG,
                       counters, 'skip', None))
 
-    s = serial_skip().replace('K64-IRQ-OK\r\nK64-GUI-SKIP',
-                              'K64-GUI-SKIP\r\nK64-IRQ-OK')
-    negatives.append(('GUI-SKIP before IRQ', s, DEBUG, counters, 'skip', None))
+    s = serial_skip().replace('K64-INPUT-OK\r\nK64-GUI-SKIP',
+                              'K64-GUI-SKIP\r\nK64-INPUT-OK')
+    negatives.append(('GUI-SKIP before INPUT', s, DEBUG, counters, 'skip', None))
 
     s = serial_skip().replace('K64-GUI-SKIP',
                               'K64-GUI-SKIP\r\nK64-GUI-SKIP')
@@ -168,6 +187,28 @@ def main():
 
     s = serial_ok() + 'K64-CPU-PANIC\r\n'
     negatives.append(('panic after FOUNDATION', s, DEBUG, counters, 'ok', ppm))
+
+    # IRQ-v2 negatives: the INPUT marker and the derived final counts
+    s = serial_ok().replace('K64-INPUT-OK\r\n', '')
+    negatives.append(('INPUT-OK marker removed', s, DEBUG, counters, 'ok', ppm))
+
+    s = serial_ok().replace('K64-IRQ-OK\r\nK64-INPUT-OK',
+                            'K64-INPUT-OK\r\nK64-IRQ-OK')
+    negatives.append(('INPUT-OK emitted before IRQ', s, DEBUG, counters,
+                      'ok', ppm))
+
+    s = serial_ok().replace('K64-INPUT-OK', 'K64-INPUT-OK\r\nK64-INPUT-OK')
+    negatives.append(('INPUT-OK duplicated', s, DEBUG, counters, 'ok', ppm))
+
+    for name, value in (('input_test_selftest_mask', 0x10),
+                        ('input_test_kbd_count', 3),
+                        ('input_test_mouse_count', 2),
+                        ('input_test_stage', 5),
+                        ('irq_test_ticks', 10)):
+        bad_counters = dict(counters)
+        bad_counters[name] = value
+        negatives.append(('%s drifted to %d' % (name, value), serial_ok(),
+                          DEBUG, bad_counters, 'ok', ppm))
 
     for name, s, d, c, mode, p in negatives:
         ok, lines = rq.judge(s, d, c, False, gui_mode=mode, ppm=p)

@@ -139,6 +139,7 @@ MM_VQ_NX      = MM_PTE_NX
 ; argument, and the core test PML4 slot stays off limits.
 
 MM_MMIO_LAPIC_VA  = 0xFFFFC00002000000
+MM_MMIO_IOAPIC_VA = 0xFFFFC00003000000
 MM_MMIO_FLAGS     = MM_PTE_PCD or MM_PTE_RW or MM_PTE_NX
 MM_CORE_TEST_SLOT = 386         ; PML4 slot of the core test region
 
@@ -164,6 +165,35 @@ if ((MM_MMIO_LAPIC_VA shr 39) and 0x1FF) = MM_CORE_TEST_SLOT
 end if
 if MM_MMIO_FLAGS <> 0x8000000000000012
         display "MMIO flags must be exactly PCD|RW|NX", 13, 10
+        err
+end if
+
+; the IOAPIC page follows the same rules as the LAPIC page: inside the
+; window, above the heap, 2 MiB aligned, same PML4 slot, never the core
+; test slot; it sits strictly above the LAPIC mapping (16 MiB above it,
+; so it also clears the whole FB window whose limit is the LAPIC VA)
+if MM_MMIO_IOAPIC_VA < MM_WINDOW_BASE | MM_MMIO_IOAPIC_VA >= MM_WINDOW_LIMIT
+        display "IOAPIC MMIO VA must stay inside the mapping window", 13, 10
+        err
+end if
+if MM_MMIO_IOAPIC_VA < MM_HEAP_LIMIT
+        display "IOAPIC MMIO VA must sit above the heap limit", 13, 10
+        err
+end if
+if MM_MMIO_IOAPIC_VA mod 0x200000
+        display "IOAPIC MMIO VA must be 2 MiB aligned", 13, 10
+        err
+end if
+if ((MM_MMIO_IOAPIC_VA shr 39) and 0x1FF) <> ((MM_WINDOW_BASE shr 39) and 0x1FF)
+        display "IOAPIC MMIO VA must share the window base PML4 slot", 13, 10
+        err
+end if
+if ((MM_MMIO_IOAPIC_VA shr 39) and 0x1FF) = MM_CORE_TEST_SLOT
+        display "IOAPIC MMIO VA must not use the core test slot", 13, 10
+        err
+end if
+if MM_MMIO_IOAPIC_VA <= MM_MMIO_LAPIC_VA
+        display "IOAPIC MMIO VA must sit strictly above the LAPIC VA", 13, 10
         err
 end if
 

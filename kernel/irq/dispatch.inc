@@ -16,6 +16,8 @@
 ;;                EOI of the ticks that arrive while it is set; it defaults
 ;;                to zero and only the self test ever touches it.
 ;;   vector 0xFF  increment the spurious count, never an EOI.
+;;   vector 0x21  call input_keyboard_irq with RCX = frame, then EOI.
+;;   vector 0x2C  call input_mouse_irq with RCX = frame, then EOI.
 ;;   anything else  cpu_panic inside the handler: the CPU dispatcher
 ;;                iretqs as soon as this function returns, so an unknown
 ;;                vector must never reach that return.
@@ -36,6 +38,10 @@ irq_dispatch:
         je      .timer
         cmp     rax, IRQ_VEC_SPURIOUS
         je      .spurious
+        cmp     rax, IRQ_VEC_KEYBOARD
+        je      .keyboard
+        cmp     rax, IRQ_VEC_MOUSE
+        je      .mouse
         ; unknown vector: panic here, returning would iretq into the wild
         mov     rcx, msg_irq_unknown
         mov     rdx, [rbp-8]
@@ -77,3 +83,17 @@ irq_dispatch:
 .done:
         leave
         ret
+; IRQ-v2 input branches live after the ret so the frozen timer and
+; spurious byte sequences stay untouched. Both handlers are leaves of
+; the input module (IF = 0, no heap, no serial, no EOI of their own);
+; this layer sends the single LAPIC EOI after the handler returns.
+.keyboard:
+        mov     rcx, [rbp-8]
+        call    input_keyboard_irq
+        jmp     .input_eoi
+.mouse:
+        mov     rcx, [rbp-8]
+        call    input_mouse_irq
+.input_eoi:
+        mov     dword [rsi + IRQ_LAPIC_EOI], 0
+        jmp     .done
