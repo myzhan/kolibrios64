@@ -5,7 +5,8 @@
 ;;                                                              ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;
-;; Layout probe for the stage 2 CPU module, task 27, task 38 and task 43.
+;; Layout probe for the stage 2 CPU module, task 27, task 38, task 43 and
+;; task 69.
 ;;
 ;; This file is a test harness, not part of the kernel. It assembles
 ;; kernel/cpu/cpu.asm exactly as the kernel will include it, appends a manifest
@@ -38,7 +39,7 @@ include '../../kernel/cpu/cpu.asm'
 align 8
 cpu_probe:
         dq      'K64CPUP1'                  ; magic
-        dq      3                           ; manifest version
+        dq      4                           ; manifest version
         dq      cpu_gdt
         dq      cpu_gdt_end - cpu_gdt
         dq      cpu_gdt_null
@@ -108,8 +109,11 @@ cpu_probe:
         dq      cpu_selftest_out
         dq      CPU_TSS_DESC_TYPE
         dq      CPU_TSS_DESC_TYPE_BUSY
+        dq      cpu_irq_set_handler
+        dq      cpu_irq_handler
+        dq      CPU_IRQ_VECTOR_MIN
 cpu_probe_end:
 
-if (cpu_probe_end - cpu_probe) <> 71 * 8
+if (cpu_probe_end - cpu_probe) <> 74 * 8
         err 'the manifest must keep its fixed entry count'
 end if

@@ -59,6 +59,13 @@ MEMORY_MAP_MAX_PAGES     = 64
 ; how many times ExitBootServices may be retried with a fresh memory map
 EXIT_BOOT_SERVICES_RETRIES = 4
 
+; GOP handover: the loader looks for this exact mode and keeps the current
+; one when the firmware does not offer it. The mode walk is bounded twice,
+; by MaxMode and by GOP_MAX_MODES, so a lying MaxMode cannot spin forever.
+GOP_TARGET_WIDTH  = 1024
+GOP_TARGET_HEIGHT = 768
+GOP_MAX_MODES     = 64
+
 ; COM1 is the only console that survives ExitBootServices, so the loader
 ; drives the UART itself once the first exit attempt was made. Every wait is
 ; bounded: a missing UART must not hang a machine that has no firmware left.
@@ -677,6 +684,177 @@ proc store_bootinfo_memmap
 endp
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; stage the GOP framebuffer description for the kernel
+; out
+; gop_valid = 1 with gop_fb_* filled, or 0 with everything left zero
+; graphics is optional: every failure leaves the staging area zero and the
+; FRAMEBUFFER flag clear, nothing here ever panics. The GOP Mode and Info
+; structures are EfiBootServicesData, so this must run before
+; ExitBootServices; the values are copied into BootInfo afterwards.
+proc gop_handover uses rbx r12 r13
+        mov     [gop_valid], 0
+        mov     [gop_interface], 0
+        mov     [gop_match], 0
+
+        ; the only GOP instance the firmware offers, through the same boot
+        ; services pointer path every other firmware call uses
+        mov     [gop_query_info], 0
+        mov     [gop_query_size], 0
+        mov     r10, [efi_table]
+        mov     r10, qword [r10 + EFI_SYSTEM_TABLE.BootServices]
+        fstcall qword [r10 + EFI_BOOT_SERVICES.LocateProtocol], gop_guid, 0, gop_interface
+        test    rax, rax
+        jz      .located
+        fstcall efi_puts, msg_gop_absent
+        fstcall efi_puts, msg_newline
+        ret
+.located:
+        mov     r10, [gop_interface]
+        test    r10, r10
+        jz      .no_framebuffer
+        mov     r11, qword [r10 + EFI_GRAPHICS_OUTPUT_PROTOCOL.Mode]
+        test    r11, r11
+        jz      .no_framebuffer
+
+        ; walk the mode table from mode 0 looking for the exact target size;
+        ; the first failure ends the walk and keeps the current mode
+        xor     r12d, r12d    ; candidate mode number
+        mov     ebx, GOP_MAX_MODES
+        mov     eax, dword [r11 + EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE.MaxMode]
+        cmp     rbx, rax
+        jbe     .bound_ok
+        mov     ebx, eax      ; never walk past the modes the firmware has
+.bound_ok:
+.scan:
+        test    rbx, rbx
+        jz      .scan_done
+        mov     r10, [gop_interface]
+        fstcall qword [r10 + EFI_GRAPHICS_OUTPUT_PROTOCOL.QueryMode], \
+                r10, r12, gop_query_size, gop_query_info
+        test    rax, rax
+        jnz     .scan_done
+        mov     r10, [gop_query_info]
+        test    r10, r10
+        jz      .scan_done
+        mov     eax, dword [r10 + EFI_GRAPHICS_OUTPUT_MODE_INFORMATION.HorizontalResolution]
+        cmp     eax, GOP_TARGET_WIDTH
+        jne     .next_mode
+        mov     eax, dword [r10 + EFI_GRAPHICS_OUTPUT_MODE_INFORMATION.VerticalResolution]
+        cmp     eax, GOP_TARGET_HEIGHT
+        jne     .next_mode
+        mov     [gop_match], 1 ; only this path validates r12 as a mode number
+        jmp     .scan_done    ; exact match, r12 carries the mode number
+.next_mode:
+        inc     r12
+        dec     rbx
+        jmp     .scan
+.scan_done:
+
+        ; only a validated exact match may switch modes: the miss paths
+        ; (budget spent, QueryMode failure, empty Info) arrive here with
+        ; gop_match clear and keep the current mode; a failed SetMode keeps
+        ; it too, and the handover still reports the live mode truthfully
+        cmp     [gop_match], 0
+        je      .mode_ready
+        mov     r10, [gop_interface]
+        mov     r11, qword [r10 + EFI_GRAPHICS_OUTPUT_PROTOCOL.Mode]
+        mov     eax, dword [r11 + EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE.Mode]
+        cmp     eax, r12d
+        je      .mode_ready
+        fstcall qword [r10 + EFI_GRAPHICS_OUTPUT_PROTOCOL.SetMode], r10, r12
+        test    rax, rax
+        jz      .mode_ready
+        fstcall efi_puts, msg_gop_setmode_failed
+        fstcall efi_puts, msg_newline
+.mode_ready:
+
+        ; copy the live Mode/Info description before boot services die
+        mov     r10, [gop_interface]
+        mov     r11, qword [r10 + EFI_GRAPHICS_OUTPUT_PROTOCOL.Mode]
+        mov     r13, qword [r11 + EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE.Info]
+        test    r13, r13
+        jz      .no_framebuffer
+        mov     rax, qword [r11 + EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE.FrameBufferBase]
+        test    rax, rax
+        jz      .no_framebuffer
+        mov     rdx, qword [r11 + EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE.FrameBufferSize]
+        test    rdx, rdx
+        jz      .no_framebuffer
+        ; BltOnly has no linear framebuffer at all, and the kernel reaches
+        ; the memory through the identity map: both cases leave zeros
+        mov     ecx, dword [r13 + EFI_GRAPHICS_OUTPUT_MODE_INFORMATION.PixelFormat]
+        cmp     ecx, EFI_GRAPHICS_PIXEL_FORMAT.PixelBltOnly
+        je      .no_framebuffer
+        add     rax, rdx
+        jc      .no_framebuffer
+        mov     rcx, IDENTITY_MAP_LIMIT
+        cmp     rax, rcx
+        ja      .no_framebuffer
+
+        mov     rax, qword [r11 + EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE.FrameBufferBase]
+        mov     [gop_fb_addr], rax
+        mov     rax, qword [r11 + EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE.FrameBufferSize]
+        mov     [gop_fb_size], rax
+        mov     eax, dword [r13 + EFI_GRAPHICS_OUTPUT_MODE_INFORMATION.HorizontalResolution]
+        mov     [gop_width], eax
+        mov     eax, dword [r13 + EFI_GRAPHICS_OUTPUT_MODE_INFORMATION.VerticalResolution]
+        mov     [gop_height], eax
+        mov     eax, dword [r13 + EFI_GRAPHICS_OUTPUT_MODE_INFORMATION.PixelFormat]
+        mov     [gop_format], eax
+        mov     eax, dword [r13 + EFI_GRAPHICS_OUTPUT_MODE_INFORMATION.PixelsPerScanLine]
+        mov     [gop_ppl], eax
+        mov     [gop_valid], 1
+.mode_ready_diag:
+        fstcall efi_puts, msg_gop_mode
+        mov     r10, [gop_interface]
+        mov     r11, qword [r10 + EFI_GRAPHICS_OUTPUT_PROTOCOL.Mode]
+        mov     eax, dword [r11 + EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE.Mode]
+        fstcall efi_print_hex_no_lz, rax
+        fstcall efi_puts, msg_gop_res
+        mov     eax, [gop_width]
+        fstcall efi_print_hex_no_lz, rax
+        fstcall efi_puts, msg_gop_x
+        mov     eax, [gop_height]
+        fstcall efi_print_hex_no_lz, rax
+        fstcall efi_puts, msg_gop_format
+        mov     eax, [gop_format]
+        fstcall efi_print_hex_no_lz, rax
+        fstcall efi_puts, msg_gop_fb
+        fstcall efi_print_hex_fixed, [gop_fb_addr]
+        fstcall efi_puts, msg_newline
+        ret
+.no_framebuffer:
+        mov     [gop_valid], 0
+        fstcall efi_puts, msg_gop_no_fb
+        fstcall efi_puts, msg_newline
+        ret
+endp
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; publish the staged GOP description to the kernel
+; the flag is only set when the staging area really holds a framebuffer, so
+; a failed handover can never advertise one
+proc store_bootinfo_gop
+        cmp     [gop_valid], 0
+        je      .done
+        mov     rax, [gop_fb_addr]
+        mov     qword [bootinfo + K64BOOTINFO.gop_framebuffer_addr], rax
+        mov     rax, [gop_fb_size]
+        mov     qword [bootinfo + K64BOOTINFO.gop_framebuffer_size], rax
+        mov     eax, [gop_width]
+        mov     dword [bootinfo + K64BOOTINFO.gop_width], eax
+        mov     eax, [gop_height]
+        mov     dword [bootinfo + K64BOOTINFO.gop_height], eax
+        mov     eax, [gop_format]
+        mov     dword [bootinfo + K64BOOTINFO.gop_pixel_format], eax
+        mov     eax, [gop_ppl]
+        mov     dword [bootinfo + K64BOOTINFO.gop_pixels_per_line], eax
+        or      qword [bootinfo + K64BOOTINFO.flags], K64BOOTINFO_FLAG_FRAMEBUFFER
+.done:
+        ret
+endp
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; build the page tables used from the CR3 switch on
 ; in
 ; rcx = physical base of the kernel image
@@ -1056,6 +1234,10 @@ proc main _efi_handle, _efi_table
         mov     rdx, [kernel_total_pages]
         fstcall build_page_tables, rcx, rdx
 
+;;;;;;;;;;;;;;;;; stage the GOP handover while boot services still run;
+;;;;;;;;;;;;;;;;; SetMode may allocate, so this stays before the map fetch
+        fstcall gop_handover
+
 ;;;;;;;;;;;;;;;;; keep a copy of the memory map for the kernel
         fstcall get_memory_map
         test    rax, rax
@@ -1106,8 +1288,11 @@ proc main _efi_handle, _efi_table
         mov     rax, [kernel_phys_end]
         mov     qword [bootinfo + K64BOOTINFO.stack_phys_end], rax
 
-        ; GOP, RSDP and initramfs stay zero: the matching flags are clear and
-        ; the kernel must not expect any of them in version 1
+        ; RSDP and initramfs stay zero: the matching flags are clear and the
+        ; kernel must not expect them in version 1. The GOP field group is
+        ; published from the staging area, zeros with a clear flag when the
+        ; handover failed or the firmware has no usable framebuffer.
+        fstcall store_bootinfo_gop
         fstcall efi_puts, msg_bootinfo
         lea     rax, [bootinfo]
         fstcall efi_print_hex_fixed, rax
@@ -1171,6 +1356,15 @@ msg_memory_map_desc du ", descriptor size ", 0
 msg_bootinfo du "BootInfo: ", 0
 msg_comma du ", ", 0
 
+msg_gop_absent du "GOP: no graphics output protocol, framebuffer handover skipped", 0
+msg_gop_setmode_failed du "GOP: SetMode failed, keeping the current mode", 0
+msg_gop_no_fb du "GOP: no usable linear framebuffer, handover skipped", 0
+msg_gop_mode du "GOP: mode ", 0
+msg_gop_res du ", ", 0
+msg_gop_x du "x", 0
+msg_gop_format du ", format ", 0
+msg_gop_fb du ", fb ", 0
+
 msg_error_prefix du "ERROR: ", 0
 msg_status du " status=", 0
 msg_newline du 13, 10, 0
@@ -1232,6 +1426,24 @@ file_handle             dq ? ; for load_file, get_file_size
 info_ptr                dq ? ; for get_file_size
 info_size               dq ? ; for get_file_size
 
+; GOP handover staging: filled before ExitBootServices because the Mode and
+; Info structures are EfiBootServicesData, published to BootInfo afterwards
+gop_interface           dq ? ; the located EFI_GRAPHICS_OUTPUT_PROTOCOL
+gop_query_size          dq ? ; QueryMode: size of the returned Info
+gop_query_info          dq ? ; QueryMode: the returned Info pointer
+gop_valid               dq ? ; 1 when the staging area holds a framebuffer
+gop_fb_addr             dq ?
+gop_fb_size             dq ?
+gop_width               dd ?
+gop_height              dd ?
+gop_format              dd ?
+gop_ppl                 dd ?
+gop_match               db ? ; 1 only after the exact target mode was found
+
+; the staging byte above must not drag the 8 byte aligned variables that
+; follow it (lf_*, kernel_*, and especially bootinfo, whose physical address
+; the kernel validates) off their natural alignment
+align 8
 lf_root                 dq ?
 lf_name                 dq ?
 lf_buffer               dq ?
@@ -1251,6 +1463,9 @@ kernel_entry_offset      dq ?
 pt_phys                  dq ? ; build_page_tables: physical base of the image
 pt_pages                 dq ? ; build_page_tables: image + stack pages
 
+; the kernel validates the physical address of BootInfo is 8 byte aligned,
+; so the alignment is asserted here rather than inherited from the layout
+align 8
 bootinfo                 K64BOOTINFO
 
 align PAGE_SIZE

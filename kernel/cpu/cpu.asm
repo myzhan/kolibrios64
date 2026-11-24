@@ -10,7 +10,8 @@
 ;; Contents, in this order:
 ;;   api.inc         constants, packed structure assertions, vector helper
 ;;   gdt_tss.inc     cpu_gdt_init, cpu_set_rsp0
-;;   idt_traps.inc   256 stubs, cpu_trap_expect, cpu_trap_finish, dispatch
+;;   idt_traps.inc   256 stubs, cpu_trap_expect, cpu_trap_finish, dispatch,
+;;                   cpu_irq_set_handler
 ;;   panic.inc       bounded COM1 output, cpu_panic, halt
 ;;   selftest.inc    cpu_selftest
 ;;   this file       cpu_init

@@ -354,6 +354,8 @@ include 'cpu/cpu.asm'
 MM_HOSTED = 1
 include 'mm/mm.asm'
 
+include 'irq/irq.asm'
+
 include 'core/contracts.inc'
 include 'core/foundation.inc'
 include 'core/selftest.inc'

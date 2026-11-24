@@ -13,10 +13,13 @@
 ;;   fill K64_INIT_PARAMS -> cpu_init (GDT -> RSP0 -> IDT, no output in
 ;;   between) -> K64-CPU-OK -> pmm_init -> K64-PMM-OK -> vmm_init ->
 ;;   vmm_boot_protect over the CPU/MM/core data regions (RW/NX) ->
-;;   K64-VMM-OK -> heap_init -> K64-HEAP-OK -> core_selftest ->
-;;   K64-FOUNDATION-OK -> halt.
+;;   K64-VMM-OK -> heap_init -> K64-HEAP-OK -> irq_init ->
+;;   vmm_boot_protect over the IRQ data region -> irq_selftest ->
+;;   K64-IRQ-OK -> core_selftest -> K64-FOUNDATION-OK -> halt.
 ;;
-;; Nothing here ever executes STI and nothing calls back into UEFI. Every
+;; Nothing here ever executes STI itself; the only STI windows of the
+;; whole kernel belong to irq_selftest, which always returns with the
+;; timer masked and IF = 0. Nothing calls back into UEFI. Every
 ;; failure goes through cpu_panic, which reports on COM1 within a bound
 ;; and halts on its own stack. All console output uses the new ABI CPU
 ;; module functions, never the first stage com1_* helpers.
@@ -133,6 +136,31 @@ k64_foundation_init:
         jnz     .fail
 
         k64_report kmsg_heap_ok, .fail
+
+        ; ---------------- the IRQ layer ----------------
+        mov     qword [rbp-16], kmsg_fail_irq
+        call    irq_init
+        test    eax, eax
+        jnz     .fail
+
+        ; the IRQ data region becomes RW/NX like the other module blocks
+        mov     qword [rbp-16], kmsg_fail_protect
+        mov     rcx, irq_data_start
+        mov     rdx, (irq_data_end - irq_data_start) / K64_PAGE_SIZE
+        mov     r8, MM_MAP_RW or MM_MAP_NX
+        call    vmm_boot_protect
+        test    eax, eax
+        jnz     .fail
+
+        ; the IRQ self test owns the only STI windows of the kernel; on
+        ; failure it has already printed its leg mask, the foundation
+        ; takes the standard fatal path
+        mov     qword [rbp-16], kmsg_fail_irq
+        call    irq_selftest
+        test    eax, eax
+        jnz     .fail
+
+        k64_report kmsg_irq_ok, .fail
 
         ; ---------------- the cross module core self test ----------------
         call    core_selftest

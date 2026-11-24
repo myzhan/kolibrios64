@@ -133,6 +133,41 @@ MM_VQ_US      = MM_PTE_US
 MM_VQ_NX      = MM_PTE_NX
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; MMIO mapping contract: device registers live above the heap in their
+; own 2 MiB region under the same PML4 slot as the window base.
+; vmm_map_mmio fixes the leaf flags to PCD|RW|NX, there is no flags
+; argument, and the core test PML4 slot stays off limits.
+
+MM_MMIO_LAPIC_VA  = 0xFFFFC00002000000
+MM_MMIO_FLAGS     = MM_PTE_PCD or MM_PTE_RW or MM_PTE_NX
+MM_CORE_TEST_SLOT = 386         ; PML4 slot of the core test region
+
+if MM_MMIO_LAPIC_VA < MM_WINDOW_BASE | MM_MMIO_LAPIC_VA >= MM_WINDOW_LIMIT
+        display "LAPIC MMIO VA must stay inside the mapping window", 13, 10
+        err
+end if
+if MM_MMIO_LAPIC_VA < MM_HEAP_LIMIT
+        display "LAPIC MMIO VA must sit above the heap limit", 13, 10
+        err
+end if
+if MM_MMIO_LAPIC_VA mod 0x200000
+        display "LAPIC MMIO VA must be 2 MiB aligned", 13, 10
+        err
+end if
+if ((MM_MMIO_LAPIC_VA shr 39) and 0x1FF) <> ((MM_WINDOW_BASE shr 39) and 0x1FF)
+        display "LAPIC MMIO VA must share the window base PML4 slot", 13, 10
+        err
+end if
+if ((MM_MMIO_LAPIC_VA shr 39) and 0x1FF) = MM_CORE_TEST_SLOT
+        display "LAPIC MMIO VA must not use the core test slot", 13, 10
+        err
+end if
+if MM_MMIO_FLAGS <> 0x8000000000000012
+        display "MMIO flags must be exactly PCD|RW|NX", 13, 10
+        err
+end if
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; UEFI memory map constants needed by the BootInfo parser
 
 MM_EFI_CONVENTIONAL_MEMORY = 7
@@ -165,7 +200,28 @@ MM_BOOTINFO_SIGNATURE = 'K64BOOTI'
 MM_BOOTINFO_VERSION   = 1
 MM_BOOTINFO_SIZE      = 208
 MM_BOOTINFO_FLAG_MAP  = 1
+MM_BOOTINFO_FLAG_FRAMEBUFFER = 2
+MM_BOOTINFO_FLAG_RSDP        = 4
+MM_BOOTINFO_FLAG_INITRAMFS   = 8
+MM_BOOTINFO_FLAG_KNOWN       = 0x0F
 MM_BOOTINFO_RESERVED_QWORDS = 8
+
+; GOP pixel formats of the framebuffer handover: RGBX8888, BGRX8888 and
+; BitMask carry a linear framebuffer, BltOnly does not and is refused.
+MM_GOP_PIXEL_RGBX8888     = 0
+MM_GOP_PIXEL_BGRX8888     = 1
+MM_GOP_PIXEL_BITMASK      = 2
+MM_GOP_PIXEL_BLT_ONLY     = 3
+MM_GOP_PIXEL_FORMAT_MAX   = MM_GOP_PIXEL_BITMASK
+
+if MM_BOOTINFO_FLAG_KNOWN <> (MM_BOOTINFO_FLAG_MAP or MM_BOOTINFO_FLAG_FRAMEBUFFER or MM_BOOTINFO_FLAG_RSDP or MM_BOOTINFO_FLAG_INITRAMFS)
+        display "known BootInfo flags must cover exactly the four features", 13, 10
+        err
+end if
+if MM_GOP_PIXEL_FORMAT_MAX <> 2 | MM_GOP_PIXEL_BLT_ONLY <> 3
+        display "GOP pixel formats must stay RGBX/BGRX/BitMask, BltOnly refused", 13, 10
+        err
+end if
 
 MM_BOOTINFO.signature            = 0
 MM_BOOTINFO.version              = 8
@@ -197,6 +253,14 @@ if MM_BOOTINFO.reserved + MM_BOOTINFO_RESERVED_QWORDS * 8 <> MM_BOOTINFO_SIZE
 end if
 if MM_BOOTINFO.memmap_desc_size <> 40
         display "memmap descriptor size offset changed", 13, 10
+        err
+end if
+if MM_BOOTINFO.gop_width <> 104 | MM_BOOTINFO.gop_height <> 108
+        display "GOP geometry fields must stay dwords at 104 and 108", 13, 10
+        err
+end if
+if MM_BOOTINFO.gop_pixel_format <> 112 | MM_BOOTINFO.gop_pixels_per_line <> 116
+        display "GOP format and pitch must stay dwords at 112 and 116", 13, 10
         err
 end if
 

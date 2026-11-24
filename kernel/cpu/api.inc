@@ -171,6 +171,10 @@ CPU_VEC_MC          = 18
 CPU_VEC_TEST        = 0xF0
 CPU_VEC_IST_TEST    = 0xF1
 
+; the asynchronous window the IRQ layer may own: vectors below this stay
+; architectural, the dispatcher never hands them to a registered handler
+CPU_IRQ_VECTOR_MIN  = 0x20
+
 CPU_IDT_IST_DF      = 1
 CPU_IDT_IST_NMI     = 2
 CPU_IDT_IST_MC      = 3
@@ -249,6 +253,24 @@ CPU_EXPECT_OFF_CR2_VALUE   = 24
 ;     handler frame address. With an armed trap that never fired the arming
 ;     is cleared and EAX = EFAULT. With neither, EAX = ENOTREADY. A result
 ;     can be consumed exactly once.
+; ------------------------------------------------------------------
+
+; ------------------------------------------------------------------
+; the asynchronous IRQ hook, contract IRQ-v1
+;
+;   cpu_irq_set_handler(rcx = handler VA or 0)
+;     ring 0 and IF = 0 only, otherwise EPERM. A non zero handler must be
+;     canonical in the kernel half, with the same check the trap API applies
+;     to its addresses; EINVAL otherwise. Registering while a non zero
+;     handler is already registered is EALREADY. Zero unregisters, and a
+;     later call may register again.
+;
+;   a trap that matches no armed expectation and carries a vector of
+;   CPU_IRQ_VECTOR_MIN or above goes to the registered handler with
+;   RCX = the stub frame, under the MS x64 ABI; the handler returns through
+;   the stub's normal restore and iretq. The EOI belongs to the IRQ layer,
+;   the dispatcher never sends one. Without a registered handler such a
+;   trap still panics, exactly like any other unexpected vector.
 ; ------------------------------------------------------------------
 
 ; ------------------------------------------------------------------
@@ -586,4 +608,10 @@ if (CPU_TSS_DESC_TYPE and 0x0F) <> 9
 end if
 if CPU_IST_COUNT <> 5
         err 'stage 2 expects five 16 KiB stacks'
+end if
+if CPU_IRQ_VECTOR_MIN <> 0x20
+        err 'the IRQ window must start at vector 0x20'
+end if
+if CPU_IRQ_VECTOR_MIN >= CPU_IDT_VECTORS
+        err 'the IRQ window must fit inside the IDT'
 end if

@@ -271,23 +271,26 @@ core_pf_tlb_resume:
         ; ---------------- leg 7: reserved accounting ----------------
         ; the first TEST_BASE mapping built the PDPT, PD and PT of PML4
         ; slot 386: three table pages, allocated then pinned, so they
-        ; count as reserved; all four test pages share the one PT
+        ; count as reserved; all four test pages share the one PT.
+        ; The LAPIC PT that irq_init built under the window slot is
+        ; already part of the leg 2 baseline (irq_init runs before this
+        ; test), so the frozen delta stays K64_CORE_ACCOUNT_TABLES.
         mov     rcx, core_stats_after
         call    pmm_get_stats
         test    eax, eax
         jnz     core_st_fail_account
         mov     rax, [core_stats_after + MM_PMM_STATS.reserved]
         sub     rax, [core_stats_before + MM_PMM_STATS.reserved]
-        cmp     rax, 3
+        cmp     rax, K64_CORE_ACCOUNT_TABLES
         jne     core_st_fail_account
         mov     rax, [mm_vmm_state + MM_VMM_STATE.table_allocs]
         sub     rax, [core_tables_before]
-        cmp     rax, 3
+        cmp     rax, K64_CORE_ACCOUNT_TABLES
         jne     core_st_fail_account
         ; the three data pages are still held at this point
         mov     rax, [core_stats_after + MM_PMM_STATS.allocated]
         sub     rax, [core_stats_before + MM_PMM_STATS.allocated]
-        cmp     rax, 3
+        cmp     rax, K64_CORE_ACCOUNT_TABLES
         jne     core_st_fail_account
 
         ; give every data page back, the pinned table pages stay
@@ -300,7 +303,7 @@ core_pf_tlb_resume:
         ; are not: free stays three below the baseline, reserved three
         ; above it, allocated and total are unchanged
         mov     rax, [core_stats_final + MM_PMM_STATS.free]
-        add     rax, 3
+        add     rax, K64_CORE_ACCOUNT_TABLES
         cmp     rax, [core_stats_before + MM_PMM_STATS.free]
         jne     core_st_fail_account
         mov     rax, [core_stats_final + MM_PMM_STATS.allocated]
@@ -311,7 +314,7 @@ core_pf_tlb_resume:
         jne     core_st_fail_account
         mov     rax, [core_stats_final + MM_PMM_STATS.reserved]
         sub     rax, [core_stats_before + MM_PMM_STATS.reserved]
-        cmp     rax, 3
+        cmp     rax, K64_CORE_ACCOUNT_TABLES
         jne     core_st_fail_account
 
         mov     [core_selftest_mask], r12
@@ -430,6 +433,7 @@ kmsg_cpu_ok           db 'K64-CPU-OK', 13, 10, 0
 kmsg_pmm_ok           db 'K64-PMM-OK', 13, 10, 0
 kmsg_vmm_ok           db 'K64-VMM-OK', 13, 10, 0
 kmsg_heap_ok          db 'K64-HEAP-OK', 13, 10, 0
+kmsg_irq_ok           db 'K64-IRQ-OK', 13, 10, 0
 kmsg_foundation_ok    db 'K64-FOUNDATION-OK', 13, 10, 0
 
 ; failure messages, none of them contains a milestone marker
@@ -439,6 +443,7 @@ kmsg_fail_pmm         db 'foundation: pmm_init failed', 0
 kmsg_fail_vmm         db 'foundation: vmm_init failed', 0
 kmsg_fail_protect     db 'foundation: vmm_boot_protect failed', 0
 kmsg_fail_heap        db 'foundation: heap_init failed', 0
+kmsg_fail_irq         db 'foundation: irq bring-up failed', 0
 kmsg_fail_selftest    db 'foundation: core self test failed', 0
 kmsg_selftest_mask    db 'core self test failed legs = ', 0
 kmsg_core_nl          db 13, 10, 0

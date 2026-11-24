@@ -6,3 +6,4 @@ image/
 *.bin
 */*.bin
 build/
+__pycache__/

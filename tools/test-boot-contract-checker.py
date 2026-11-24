@@ -84,6 +84,21 @@ and the task 41 models:
   the mov copy chain                 the same chain built from the real mov
                                     keeps the proof and passes
 
+and the task 76 GOP handover fixtures:
+
+  handover after the exit call       staging must precede ExitBootServices
+  unbounded mode walk                GOP_MAX_MODES has to bound the scan
+  fatal GOP failure                  a missing GOP must never call boot_fail
+  BltOnly accepted                   the BltOnly refusal must stay in place
+  flag without data                  all six BootInfo fields are published
+  unprovable LocateProtocol base     the GOP locate uses the proven path
+
+and the task 81 SetMode guard fixtures:
+
+  SetMode without a match            the miss paths must never reach SetMode
+  match marker never raised          the hit path must still reach SetMode
+  match marker raised early          only the exact match may raise it
+
 Two more checks run the checker itself: a full pass must leave no scratch
 directory behind, and a failing run must clean up just as well.
 
@@ -213,6 +228,20 @@ LOAD_BOOT_SERVICES = "        mov     r10, qword [r10 + EFI_SYSTEM_TABLE.BootSer
 # above the call; task 41 swaps only the load and/or the dispatch base.
 ALLOC_BLOCK = ("        mov     r10, [efi_table]\n" + LOAD_BOOT_SERVICES +
                "\n" + ALLOC_CALL)
+
+# task 76: the GOP handover call site in main and the LocateProtocol setup
+# in gop_handover, unique because of the dispatch that follows the loads.
+GOP_CALL = "        fstcall gop_handover"
+GOP_LOCATE_BLOCK = ("        mov     r10, [efi_table]\n" + LOAD_BOOT_SERVICES +
+                    "\n        fstcall qword [r10 + "
+                    "EFI_BOOT_SERVICES.LocateProtocol], gop_guid, 0, gop_interface")
+
+# task 81: the match marker guard in front of the mode switch and the two
+# marker writes, each unique because no other line touches gop_match this way.
+GOP_MATCH_GUARD = ("        cmp     [gop_match], 0\n"
+                   "        je      .mode_ready")
+GOP_MATCH_RAISE = "        mov     [gop_match], 1"
+GOP_MATCH_INIT = "        mov     [gop_match], 0"
 
 
 def alloc_load(load):
@@ -725,6 +754,84 @@ FIXTURES = [
         "edits": [alloc_copy_chain(LOAD_BOOT_SERVICES)],
         "needle": "PASS  every firmware call after the first exit attempt is "
                   "a legal retry",
+    },
+    # ------------------------------------------------------------------
+    # task 76: the GOP handover is staged before ExitBootServices and is
+    # optional, bounded and truthful
+    {
+        "name": "the pristine GOP handover passes its contract",
+        "expect": 0,
+        "edits": [],
+        "needle": "PASS  main stages the GOP handover before the "
+                  "ExitBootServices call",
+    },
+    {
+        "name": "the GOP handover after the exit call fails",
+        "expect": 1,
+        "edits": [(BOOT, GOP_CALL, "        nop"),
+                  (BOOT, EXIT_CALL, EXIT_CALL + "\n" + GOP_CALL)],
+        "needle": "main stages the GOP handover before the ExitBootServices call",
+    },
+    {
+        "name": "an unbounded GOP mode walk fails",
+        "expect": 1,
+        "edits": [(BOOT, "        mov     ebx, GOP_MAX_MODES", "        nop")],
+        "needle": "the mode walk is bounded by GOP_MAX_MODES",
+    },
+    {
+        "name": "a fatal GOP failure path fails",
+        "expect": 1,
+        "edits": [(BOOT, "        fstcall efi_puts, msg_gop_absent",
+                   "        fstcall boot_fail, msg_gop_absent\n"
+                   "        fstcall efi_puts, msg_gop_absent")],
+        "needle": "a missing or failing GOP is never fatal",
+    },
+    {
+        "name": "accepting BltOnly fails",
+        "expect": 1,
+        "edits": [(BOOT,
+                   "        cmp     ecx, EFI_GRAPHICS_PIXEL_FORMAT.PixelBltOnly",
+                   "        nop")],
+        "needle": "BltOnly is refused",
+    },
+    {
+        "name": "the FRAMEBUFFER flag without all six fields fails",
+        "expect": 1,
+        "edits": [(BOOT,
+                   "        mov     dword [bootinfo + K64BOOTINFO.gop_pixel_format], eax",
+                   "        nop")],
+        "needle": "store_bootinfo_gop writes gop_pixel_format",
+    },
+    {
+        "name": "a lea LocateProtocol base is not a pointer load",
+        "expect": 1,
+        "edits": [(BOOT, GOP_LOCATE_BLOCK,
+                   GOP_LOCATE_BLOCK.replace(
+                       LOAD_BOOT_SERVICES,
+                       "        lea     r10, [r10 + EFI_SYSTEM_TABLE.BootServices]"))],
+        "needle": "the LocateProtocol base comes from "
+                  "EFI_SYSTEM_TABLE.BootServices",
+    },
+    # ------------------------------------------------------------------
+    # task 81: the scan miss paths share .scan_done with the hit path, so
+    # SetMode must be provably unreachable without a validated exact match
+    {
+        "name": "a SetMode reachable without a match fails",
+        "expect": 1,
+        "edits": [(BOOT, GOP_MATCH_GUARD, "        nop\n        nop")],
+        "needle": "FAIL  SetMode is unreachable without a validated exact match",
+    },
+    {
+        "name": "a match marker that is never raised fails",
+        "expect": 1,
+        "edits": [(BOOT, GOP_MATCH_RAISE, "        nop")],
+        "needle": "FAIL  the validated match path still reaches SetMode",
+    },
+    {
+        "name": "a match marker raised before the scan fails",
+        "expect": 1,
+        "edits": [(BOOT, GOP_MATCH_INIT, "        mov     [gop_match], 1")],
+        "needle": "FAIL  exactly one site raises the GOP match marker",
     },
 ]
 

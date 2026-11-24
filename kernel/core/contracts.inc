@@ -345,3 +345,236 @@ end if
 if VIRT_KERNEL_BASE <> MM_KERNEL_BASE
         err 'the kernel virtual base disagrees with the MM copy'
 end if
+
+; ------------------------------------------------------------------
+; MMIO mapping contract (vmm_map_mmio), shared copies and the placement
+; premises of the LAPIC window: above the heap, 2 MiB aligned, under the
+; window base PML4 slot and never under the core test slot. Pure
+; constant math, zero bytes emitted.
+; ------------------------------------------------------------------
+
+K64_MMIO_LAPIC_VA  = 0xFFFFC00002000000
+K64_MMIO_FLAGS     = K64_PTE_PCD or K64_PTE_RW or K64_PTE_NX
+K64_CORE_TEST_SLOT = 386
+
+if K64_MMIO_LAPIC_VA <> MM_MMIO_LAPIC_VA
+        err 'LAPIC MMIO VA disagrees with the MM copy'
+end if
+if K64_MMIO_FLAGS <> MM_MMIO_FLAGS
+        err 'MMIO flags disagree with the MM copy'
+end if
+if K64_CORE_TEST_SLOT <> MM_CORE_TEST_SLOT
+        err 'core test PML4 slot disagrees with the MM copy'
+end if
+if K64_MMIO_LAPIC_VA < K64_VMM_WINDOW_BASE | K64_MMIO_LAPIC_VA >= K64_VMM_WINDOW_LIMIT
+        err 'the LAPIC MMIO VA must stay inside the mapping window'
+end if
+if K64_MMIO_LAPIC_VA < K64_HEAP_LIMIT
+        err 'the LAPIC MMIO VA must sit above the heap limit'
+end if
+if K64_MMIO_LAPIC_VA mod K64_LARGE_PAGE_SIZE
+        err 'the LAPIC MMIO VA must be 2 MiB aligned'
+end if
+if ((K64_MMIO_LAPIC_VA shr 39) and 0x1FF) <> ((K64_VMM_WINDOW_BASE shr 39) and 0x1FF)
+        err 'the LAPIC MMIO VA must share the window base PML4 slot'
+end if
+if ((K64_MMIO_LAPIC_VA shr 39) and 0x1FF) = ((K64_VMM_TEST_BASE shr 39) and 0x1FF)
+        err 'the LAPIC MMIO VA must not use the core test PML4 slot'
+end if
+if K64_CORE_TEST_SLOT <> ((K64_VMM_TEST_BASE shr 39) and 0x1FF)
+        err 'the core test slot constant must match the test region placement'
+end if
+if K64_MMIO_FLAGS <> 0x8000000000000012
+        err 'the MMIO flags must be exactly PCD|RW|NX'
+end if
+
+; ------------------------------------------------------------------
+; BootInfo feature flags: the loader copy (boot/bootinfo.inc) and the
+; private MM copy must agree, the known mask covers exactly the four
+; features, and the GOP format ceiling stays below BltOnly. Pure
+; constant math, zero bytes emitted.
+; ------------------------------------------------------------------
+
+if K64BOOTINFO_FLAG_MEMORY_MAP <> MM_BOOTINFO_FLAG_MAP
+        err 'BootInfo MEMORY_MAP flag disagrees with the MM copy'
+end if
+if K64BOOTINFO_FLAG_FRAMEBUFFER <> MM_BOOTINFO_FLAG_FRAMEBUFFER
+        err 'BootInfo FRAMEBUFFER flag disagrees with the MM copy'
+end if
+if K64BOOTINFO_FLAG_RSDP <> MM_BOOTINFO_FLAG_RSDP
+        err 'BootInfo RSDP flag disagrees with the MM copy'
+end if
+if K64BOOTINFO_FLAG_INITRAMFS <> MM_BOOTINFO_FLAG_INITRAMFS
+        err 'BootInfo INITRAMFS flag disagrees with the MM copy'
+end if
+if K64BOOTINFO_FLAG_KNOWN <> MM_BOOTINFO_FLAG_KNOWN
+        err 'BootInfo known flag mask disagrees with the MM copy'
+end if
+if K64BOOTINFO_FLAG_KNOWN <> (K64BOOTINFO_FLAG_MEMORY_MAP or K64BOOTINFO_FLAG_FRAMEBUFFER or K64BOOTINFO_FLAG_RSDP or K64BOOTINFO_FLAG_INITRAMFS)
+        err 'the known flag mask must cover exactly the four features'
+end if
+if K64BOOTINFO.gop_width <> MM_BOOTINFO.gop_width | K64BOOTINFO.gop_height <> MM_BOOTINFO.gop_height
+        err 'GOP geometry offsets disagree with the MM copy'
+end if
+if K64BOOTINFO.gop_pixel_format <> MM_BOOTINFO.gop_pixel_format | K64BOOTINFO.gop_pixels_per_line <> MM_BOOTINFO.gop_pixels_per_line
+        err 'GOP format and pitch offsets disagree with the MM copy'
+end if
+if MM_GOP_PIXEL_FORMAT_MAX >= MM_GOP_PIXEL_BLT_ONLY
+        err 'the GOP format ceiling must refuse BltOnly'
+end if
+
+; ------------------------------------------------------------------
+; IRQ-v1: the shared K64_* spelling of the IRQ layer contract and the
+; three copy comparison against the private IRQ_* values. Appended by
+; task 70; every assertion above stays untouched. Pure constant math,
+; zero bytes emitted.
+; ------------------------------------------------------------------
+
+K64_IRQ_VEC_TIMER    = 0x20
+K64_IRQ_VEC_SPURIOUS = 0xFF
+K64_IRQ_SVR_VALUE    = 0x1FF
+K64_IRQ_LVT_MASK     = 0x10000
+K64_IRQ_LVT_PERIODIC = 0x20000
+K64_IRQ_DIVIDE_16    = 0x3
+K64_IRQ_LAPIC_PA     = 0xFEE00000
+
+K64_LAPIC_ID         = 0x020
+K64_LAPIC_VER        = 0x030
+K64_LAPIC_TPR        = 0x080
+K64_LAPIC_EOI        = 0x0B0
+K64_LAPIC_SVR        = 0x0F0
+K64_LAPIC_ISR        = 0x100
+K64_LAPIC_ISR_LAST   = 0x170
+K64_LAPIC_ESR        = 0x280
+K64_LAPIC_LVT_TIMER  = 0x320
+K64_LAPIC_LVT_LINT0  = 0x350
+K64_LAPIC_LVT_LINT1  = 0x360
+K64_LAPIC_LVT_ERROR  = 0x370
+K64_LAPIC_INIT_COUNT = 0x380
+K64_LAPIC_CUR_COUNT  = 0x390
+K64_LAPIC_DIVIDE     = 0x3E0
+
+; the leg 7 accounting expectation, frozen: irq_init builds exactly one
+; new table page (the PT of the LAPIC 2 MiB range; PDPT and PD are shared
+; with the heap), and it runs BEFORE the core self test takes its leg 2
+; baseline, so the leg 7 delta stays the three slot 386 tables.
+K64_CORE_ACCOUNT_TABLES = 3
+
+if K64_IRQ_VEC_TIMER <> IRQ_VEC_TIMER
+        err 'timer vector disagrees with the IRQ copy'
+end if
+if K64_IRQ_VEC_SPURIOUS <> IRQ_VEC_SPURIOUS
+        err 'spurious vector disagrees with the IRQ copy'
+end if
+if K64_IRQ_SVR_VALUE <> IRQ_SVR_VALUE
+        err 'SVR value disagrees with the IRQ copy'
+end if
+if K64_IRQ_LVT_MASK <> IRQ_LVT_MASK | K64_IRQ_LVT_PERIODIC <> IRQ_LVT_PERIODIC
+        err 'LVT mask/mode bits disagree with the IRQ copy'
+end if
+if K64_IRQ_DIVIDE_16 <> IRQ_DIVIDE_16
+        err 'divide encoding disagrees with the IRQ copy'
+end if
+if K64_IRQ_LAPIC_PA <> IRQ_LAPIC_PA | K64_IRQ_LAPIC_PA <> IRQ_APIC_BASE_PA
+        err 'LAPIC physical base disagrees with the IRQ copy'
+end if
+if IRQ_LAPIC_VA <> K64_MMIO_LAPIC_VA | IRQ_LAPIC_VA <> MM_MMIO_LAPIC_VA
+        err 'LAPIC MMIO VA disagrees with the IRQ/MM copies'
+end if
+
+if K64_LAPIC_ID <> IRQ_LAPIC_ID | K64_LAPIC_VER <> IRQ_LAPIC_VER
+        err 'LAPIC ID/VER offsets disagree with the IRQ copy'
+end if
+if K64_LAPIC_TPR <> IRQ_LAPIC_TPR | K64_LAPIC_EOI <> IRQ_LAPIC_EOI
+        err 'LAPIC TPR/EOI offsets disagree with the IRQ copy'
+end if
+if K64_LAPIC_SVR <> IRQ_LAPIC_SVR | K64_LAPIC_ESR <> IRQ_LAPIC_ESR
+        err 'LAPIC SVR/ESR offsets disagree with the IRQ copy'
+end if
+if K64_LAPIC_ISR <> IRQ_LAPIC_ISR | K64_LAPIC_ISR_LAST <> IRQ_LAPIC_ISR_LAST
+        err 'LAPIC ISR span disagrees with the IRQ copy'
+end if
+if K64_LAPIC_LVT_TIMER <> IRQ_LAPIC_LVT_TIMER | K64_LAPIC_LVT_LINT0 <> IRQ_LAPIC_LVT_LINT0
+        err 'LAPIC timer/LINT0 LVT offsets disagree with the IRQ copy'
+end if
+if K64_LAPIC_LVT_LINT1 <> IRQ_LAPIC_LVT_LINT1 | K64_LAPIC_LVT_ERROR <> IRQ_LAPIC_LVT_ERROR
+        err 'LAPIC LINT1/error LVT offsets disagree with the IRQ copy'
+end if
+if K64_LAPIC_INIT_COUNT <> IRQ_LAPIC_INIT_COUNT | K64_LAPIC_CUR_COUNT <> IRQ_LAPIC_CUR_COUNT
+        err 'LAPIC count offsets disagree with the IRQ copy'
+end if
+if K64_LAPIC_DIVIDE <> IRQ_LAPIC_DIVIDE
+        err 'LAPIC divide offset disagrees with the IRQ copy'
+end if
+
+if K64_OK <> IRQ_OK | K64_EINVAL <> IRQ_EINVAL | K64_ENOMEM <> IRQ_ENOMEM
+        err 'IRQ status codes disagree with the shared copy'
+end if
+if K64_ENOENT <> IRQ_ENOENT | K64_EEXIST <> IRQ_EEXIST | K64_EPERM <> IRQ_EPERM
+        err 'IRQ status codes disagree with the shared copy'
+end if
+if K64_ENOTSUP <> IRQ_ENOTSUP | K64_ENOTREADY <> IRQ_ENOTREADY
+        err 'IRQ status codes disagree with the shared copy'
+end if
+if K64_EALREADY <> IRQ_EALREADY | K64_EIO <> IRQ_EIO | K64_EOVERFLOW <> IRQ_EOVERFLOW
+        err 'IRQ status codes disagree with the shared copy'
+end if
+if K64_EFAULT <> IRQ_EFAULT | K64_EBUSY <> IRQ_EBUSY
+        err 'IRQ status codes disagree with the shared copy'
+end if
+
+if IRQ_FRAME_VECTOR <> CPU_FRAME_VECTOR | IRQ_FRAME_RFLAGS <> CPU_FRAME_RFLAGS
+        err 'IRQ frame offsets disagree with the CPU copy'
+end if
+if IRQ_RFLAGS_IF <> CPU_RFLAGS_IF
+        err 'IRQ IF bit disagrees with the CPU copy'
+end if
+if IRQ_VEC_TIMER < CPU_IRQ_VECTOR_MIN
+        err 'the timer vector must sit inside the CPU asynchronous window'
+end if
+if IRQ_PUTS_MAX <> CPU_PUTS_MAX | IRQ_PUTHEX_DIGITS <> CPU_PUTHEX_DIGITS
+        err 'IRQ console caps disagree with the CPU copy'
+end if
+if IRQ_PAGE_SIZE <> K64_PAGE_SIZE | IRQ_DATA_ALIGN <> K64_DATA_ALIGN
+        err 'IRQ geometry disagrees with the shared copy'
+end if
+if IRQ_STACK_FRAME <> K64_STACK_FRAME
+        err 'IRQ stack frame disagrees with the shared copy'
+end if
+
+; the counter layout the gdbstub smoke reads: test ticks and the self
+; test mask are qwords at their frozen offsets, the leg 5 switch defaults
+; to zero and sits at its own frozen offset
+K64_IRQ_DATA_OFF_TEST_TICKS = 24
+K64_IRQ_DATA_OFF_TEST_MASK  = 32
+K64_IRQ_DATA_OFF_SKIP_EOI   = 64
+K64_IRQ_DATA_OFF_FRAME_IF   = 104
+
+if K64_IRQ_DATA_OFF_TEST_TICKS <> IRQ_DATA_OFF_TEST_TICKS
+        err 'test tick offset disagrees with the IRQ copy'
+end if
+if K64_IRQ_DATA_OFF_TEST_MASK <> IRQ_DATA_OFF_TEST_MASK
+        err 'selftest mask offset disagrees with the IRQ copy'
+end if
+if K64_IRQ_DATA_OFF_SKIP_EOI <> IRQ_DATA_OFF_SKIP_EOI
+        err 'leg5 switch offset disagrees with the IRQ copy'
+end if
+if K64_IRQ_DATA_OFF_FRAME_IF <> IRQ_DATA_OFF_FRAME_IF
+        err 'interrupted-frame IF evidence offset disagrees with the IRQ copy'
+end if
+if IRQ_ST_FINAL_N <> 10
+        err 'the frozen exit state counts exactly ten ticks'
+end if
+
+; leg 7 premises: the LAPIC page shares the heap PDPT entry and PD page
+; (one new PT only), and the frozen delta stays three because irq_init
+; precedes the baseline. Verified against the real boot in the smoke.
+if (K64_MMIO_LAPIC_VA shr 30) <> (K64_HEAP_BASE shr 30)
+        err 'the LAPIC page must share the heap PDPT entry'
+end if
+if (K64_MMIO_LAPIC_VA shr 21) = (K64_HEAP_BASE shr 21)
+        err 'the LAPIC page must own a page table of its own'
+end if
+if K64_CORE_ACCOUNT_TABLES <> 3
+        err 'the leg7 accounting expectation is frozen at three tables'
+end if

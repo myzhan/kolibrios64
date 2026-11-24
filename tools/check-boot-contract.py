@@ -11,6 +11,11 @@ artifact, none of them trusts a comment:
   3. no failure path after the first ExitBootServices call can reach the UEFI
      console, and the COM1 path really exists in the built image
   4. the fasm2 bootstrap gets its own OUTDIR, never the kernel build one
+  5. the GOP handover is staged before ExitBootServices through a provable
+     LocateProtocol, its mode walk is bounded, a missing GOP is never fatal,
+     BltOnly is refused, SetMode is only reachable behind a validated exact
+     match, and BootInfo gains the FRAMEBUFFER flag only together with all
+     six framebuffer fields
 
 The source checks walk the include graph of kernel/boot/bootx64.asm, resolving
 every include against the directory of the file that spells it out, and build
@@ -770,6 +775,16 @@ REQUIRED_INCLUDES = {"uefi_prints.inc"}
 BOOTINFO_MEMMAP_FIELDS = ("memmap_addr", "memmap_size", "memmap_desc_size",
                           "memmap_desc_version", "memmap_desc_count")
 
+# The GOP handover contract: staging happens while boot services still run,
+# the protocol pointer comes from LocateProtocol through the proven boot
+# services path, and the flag is only published together with the data.
+GOP_HANDOVER_ROUTINE = "gop_handover"
+GOP_PUBLISH_ROUTINE = "store_bootinfo_gop"
+GOP_STRUCT = "EFI_GRAPHICS_OUTPUT_PROTOCOL"
+BOOTINFO_GOP_FIELDS = ("gop_framebuffer_addr", "gop_framebuffer_size",
+                       "gop_width", "gop_height", "gop_pixel_format",
+                       "gop_pixels_per_line")
+
 # The routine that makes the first attempt, and the entry points that may still
 # be dispatched to afterwards. ExitBootServices itself is the attempt, the
 # other three are only legal inside the EFI_INVALID_PARAMETER retry arm, where
@@ -1303,6 +1318,205 @@ def check_exit_retry(bodies):
           "check_memory_map_range also checks the allocated size")
 
 
+def local_flow(body):
+    """Line index CFG of one routine restricted to its local labels.
+
+    Returns (labels, edges, problems): labels maps ".name" to its label line,
+    edges maps every line to its successors (a jcc owns both arms, a ret
+    none, everything else falls through). A branch the local model cannot
+    place is a problem, so the caller fails closed instead of guessing.
+    """
+    labels = {}
+    for i, line in enumerate(body):
+        if is_label_line(line) and line.startswith("."):
+            labels[line[:-1]] = i
+    edges = {}
+    problems = []
+    for i, line in enumerate(body):
+        kind = control_kind(line)
+        if kind == "return":
+            edges[i] = []
+        elif kind == "branch":
+            mnemonic, operands = instruction_head(line)
+            target = first_operand(operands)
+            if target not in labels:
+                problems.append(line)
+                edges[i] = []
+            elif mnemonic == "jmp":
+                edges[i] = [labels[target]]
+            else:
+                edges[i] = [labels[target]]
+                if i + 1 < len(body):
+                    edges[i].append(i + 1)
+        else:
+            edges[i] = [i + 1] if i + 1 < len(body) else []
+    return labels, edges, problems
+
+
+def local_dominators(edges, count):
+    """Dominator sets of the line CFG rooted at line 0, unreachable lines
+    excluded. A node dominates another when every path from the entry to it
+    passes through the first one."""
+    reach = set()
+    work = [0]
+    while work:
+        i = work.pop()
+        if i in reach or i >= count:
+            continue
+        reach.add(i)
+        work.extend(edges.get(i, []))
+    preds = {i: [] for i in reach}
+    for i in reach:
+        for j in edges.get(i, []):
+            preds[j].append(i)
+    dom = {i: set(reach) for i in reach}
+    dom[0] = {0}
+    changed = True
+    while changed:
+        changed = False
+        for i in sorted(reach - {0}):
+            new = {i}
+            if preds[i]:
+                new |= set.intersection(*(dom[p] for p in preds[i]))
+            if new != dom[i]:
+                dom[i] = new
+                changed = True
+    return dom
+
+
+def check_gop_handover(model):
+    print("--- 5. GOP handover before ExitBootServices ---")
+    bodies = model.bodies
+    body = bodies.get(GOP_HANDOVER_ROUTINE)
+    check(body is not None, "%s exists" % GOP_HANDOVER_ROUTINE)
+    main = bodies.get(KERNEL_ENTRY_ROUTINE) or []
+    call = find(main, r"fstcall\s+%s\b" % GOP_HANDOVER_ROUTINE)
+    exit_call = find(main, r"fstcall\s+%s\b" % SHUTDOWN_ROUTINE)
+    check(call is not None and exit_call is not None and call < exit_call,
+          "main stages the GOP handover before the ExitBootServices call")
+    if body is None:
+        return
+
+    # the protocol pointer must come from LocateProtocol(gop_guid, ...), and
+    # the dispatch base must be provable from EFI_SYSTEM_TABLE.BootServices
+    locate = None
+    locate_target = None
+    for index, _, target, kind in call_sites(body):
+        entry = firmware_entry(target)
+        if entry == (FIRMWARE_STRUCT, "LocateProtocol"):
+            locate = index
+            locate_target = target
+            break
+    check(locate is not None, "the handover locates the GOP through LocateProtocol")
+    if locate is not None:
+        check("gop_guid" in body[locate],
+              "LocateProtocol is given the GOP GUID")
+        kind, payload = parse_dispatch(locate_target)
+        base = payload[1] if kind == "field" else ""
+        check(operand_provenance(model, body, locate, base) == "boot_services",
+              "the LocateProtocol base comes from EFI_SYSTEM_TABLE.BootServices")
+
+    check(find(body, GOP_STRUCT + r"\.QueryMode") is not None,
+          "the mode table is walked through QueryMode")
+    check(find(body, GOP_STRUCT + r"\.SetMode") is not None,
+          "a matching mode is switched to through SetMode")
+    check(find(body, r"GOP_MAX_MODES") is not None,
+          "the mode walk is bounded by GOP_MAX_MODES")
+    check(find(body, r"EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE\.MaxMode") is not None,
+          "the mode walk also respects the firmware MaxMode")
+    check(find(body, r"EFI_GRAPHICS_PIXEL_FORMAT\.PixelBltOnly") is not None,
+          "BltOnly is refused: it has no linear framebuffer")
+
+    # SetMode may only run behind a validated exact match. The scan has
+    # three miss paths (budget spent, QueryMode failure, empty Info) that
+    # share .scan_done with the hit path, so a textual check is not enough:
+    # walk the local flow with the gop_match staging byte as a two valued
+    # abstract state and prove the switch is unreachable with the marker
+    # clear. Anything the little model cannot decode fails closed.
+    setmode = find(body, GOP_STRUCT + r"\.SetMode")
+    labels, edges, problems = local_flow(body)
+    check(not problems,
+          "every gop_handover branch stays inside the routine (%s)" % problems)
+    unknown = [body[i] for i in find_all(body, r"\bgop_match\b")
+               if not re.match(r"mov\s+\[gop_match\],\s*[01]$", body[i])
+               and not re.match(r"cmp\s+\[gop_match\],\s*0$", body[i])]
+    guards = find_all(body, r"cmp\s+\[gop_match\],\s*0$")
+    for g in guards:
+        nxt = body[g + 1] if g + 1 < len(body) else ""
+        m = BRANCH_RE.match(nxt)
+        if not (m and m.group(1) in ("je", "jz", "jne", "jnz")
+                and first_operand(m.group(2)) in labels):
+            unknown.append("unmodelled guard behind: " + body[g])
+    check(guards and not unknown,
+          "the mode switch is guarded by a decodable match marker test (%s)"
+          % unknown)
+    raised = find_all(body, r"mov\s+\[gop_match\],\s*1$")
+    check(len(raised) == 1,
+          "exactly one site raises the GOP match marker (%d)" % len(raised))
+    width_cmp = find(body, r"cmp\s+eax,\s*GOP_TARGET_WIDTH")
+    height_cmp = find(body, r"cmp\s+eax,\s*GOP_TARGET_HEIGHT")
+    dom = local_dominators(edges, len(body))
+    check(len(raised) == 1 and width_cmp is not None
+          and height_cmp is not None
+          and width_cmp in dom.get(raised[0], set())
+          and height_cmp in dom.get(raised[0], set()),
+          "the match marker is only raised behind both resolution comparisons")
+    states = set()
+    work = [(0, 0)]
+    while work:
+        i, flag = work.pop()
+        if (i, flag) in states or i >= len(body):
+            continue
+        states.add((i, flag))
+        m = re.match(r"mov\s+\[gop_match\],\s*([01])$", body[i])
+        if m:
+            work.append((i + 1, int(m.group(1))))
+            continue
+        mnemonic, operands = instruction_head(body[i])
+        if mnemonic in ("je", "jz", "jne", "jnz") and i > 0 and \
+                re.match(r"cmp\s+\[gop_match\],\s*0$", body[i - 1]):
+            target = labels.get(first_operand(operands))
+            if target is not None:
+                taken = (flag == 0) if mnemonic in ("je", "jz") else (flag == 1)
+                work.append((target if taken else i + 1, flag))
+                continue
+        for j in edges.get(i, []):
+            work.append((j, flag))
+    check(setmode is not None and (setmode, 0) not in states,
+          "SetMode is unreachable without a validated exact match")
+    check(setmode is not None and (setmode, 1) in states,
+          "the validated match path still reaches SetMode")
+
+    # graphics is optional: no failure path of the handover may be fatal
+    fatal = sorted(set(callees(body)) & (PRE_EXIT_ONLY | {"halt_forever"}))
+    check(not fatal, "a missing or failing GOP is never fatal (%s)" % fatal)
+
+    publish = bodies.get(GOP_PUBLISH_ROUTINE)
+    check(publish is not None, "%s exists" % GOP_PUBLISH_ROUTINE)
+    if publish is None:
+        return
+    for field in BOOTINFO_GOP_FIELDS:
+        pattern = r"\[bootinfo \+ K64BOOTINFO\.%s\]" % field
+        check(any(re.search(pattern, line) for line in publish),
+              "%s writes %s" % (GOP_PUBLISH_ROUTINE, field))
+    check(find(publish, r"K64BOOTINFO_FLAG_FRAMEBUFFER") is not None,
+          "%s sets FLAG_FRAMEBUFFER" % GOP_PUBLISH_ROUTINE)
+    guard = find(publish, r"\[gop_valid\]")
+    flag = find(publish, r"K64BOOTINFO_FLAG_FRAMEBUFFER")
+    check(guard is not None and flag is not None and guard < flag,
+          "the FRAMEBUFFER flag is guarded by the staging validity")
+    # the flag must not be set anywhere else, e.g. unconditionally in main
+    writers = [name for name, lines in bodies.items()
+               if name != GOP_PUBLISH_ROUTINE
+               and find(lines, r"K64BOOTINFO_FLAG_FRAMEBUFFER") is not None]
+    check(not writers,
+          "no other routine touches FLAG_FRAMEBUFFER (%s)" % writers)
+    publish_call = find(main, r"fstcall\s+%s\b" % GOP_PUBLISH_ROUTINE)
+    check(publish_call is not None and exit_call is not None
+          and publish_call < exit_call,
+          "main publishes the GOP fields before the ExitBootServices call")
+
+
 def check_console_boundary(model):
     print("--- 3. no UEFI console after the first exit attempt ---")
     bodies = model.bodies
@@ -1607,6 +1821,7 @@ def main(argv=None):
     check_include_graph(model)
     check_growth(model.bodies)
     check_exit_retry(model.bodies)
+    check_gop_handover(model)
     check_console_boundary(model)
     check_post_exit_control(model)
     if not options["source_only"]:

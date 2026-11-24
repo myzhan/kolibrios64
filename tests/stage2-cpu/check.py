@@ -103,6 +103,9 @@ EXPECT_CR2_MASK = 16
 EXPECT_CR2_VALUE = 24
 VECTOR_ALLOWED = (0, 3, 6, 14, 0xF0, 0xF1)
 
+# the asynchronous window the IRQ layer may own, contract IRQ-v1
+IRQ_VECTOR_MIN = 0x20
+
 # opcodes whose mod=00 rm=101 form is followed by an immediate, and how many
 # bytes it takes; without this an operand would be decoded one instruction too
 # early and point at the wrong variable
@@ -110,7 +113,9 @@ REX_TAIL = {0x80: 1, 0xC6: 1, 0xC7: 4}
 
 # the status codes the trap API uses, EAX
 EINVAL = -1
+EPERM = -5
 ENOTREADY = -7
+EALREADY = -8
 EIO = -9
 EFAULT = -11
 EBUSY = -12
@@ -120,7 +125,7 @@ SHADOW_SPACE = 32
 STUB_ALIGN = 16
 
 MAGIC = b'K64CPUP1'
-MANIFEST_VERSION = 3
+MANIFEST_VERSION = 4
 
 # manifest names that differ from the label the source exports
 ALIASES = {'cpu_trap_dispatch': 'dispatch'}
@@ -150,6 +155,7 @@ M = [
     'trap_handler_frame', 'trap_result',
     'selftest_expect', 'selftest_out',
     'tss_desc_type', 'tss_desc_type_busy',
+    'cpu_irq_set_handler', 'irq_handler', 'irq_vector_min',
 ]
 
 # the trap state variables, in the order the module declares them; the
@@ -166,6 +172,7 @@ TRAP_STATE = (
 FUNCTIONS = [
     'cpu_gdt_init', 'cpu_set_rsp0',
     'cpu_trap_expect', 'cpu_trap_finish', 'cpu_trap_dispatch',
+    'cpu_irq_set_handler',
     'cpu_com1_init', 'cpu_com1_putc', 'cpu_com1_puts', 'cpu_com1_puthex',
     'cpu_halt_forever', 'cpu_panic', 'cpu_selftest',
     'cpu_init', 'cpu_idt_init',
@@ -494,7 +501,7 @@ def check_manifest(rep, img):
                   ('trap_expect_rip', 'trap_resume_rip', 'trap_err_mask',
                    'trap_err_value', 'trap_cr2_mask', 'trap_cr2_value',
                    'trap_handler_frame', 'trap_result', 'selftest_expect',
-                   'selftest_out')),
+                   'selftest_out', 'irq_handler')),
               'the dispatcher reads these as qwords')
     rep.check('expect.result_buffers_are_one_frame_each',
               img['selftest_out'] >= img['trap_result'] + FRAME_SIZE,
@@ -511,7 +518,7 @@ def check_manifest(rep, img):
     for name in ('gdt', 'tss', 'idt', 'gdtr', 'idtr', 'data_start', 'data_end',
                  'ist1', 'ist2', 'ist3', 'ist4', 'panic_stack', 'stubs_start',
                  'stubs_end', 'dispatch', 'trap_result', 'selftest_out',
-                 'selftest_expect'):
+                 'selftest_expect', 'irq_handler'):
         value = img[name]
         rep.check('layout.%s_inside_image' % name, 0 < value <= len(d),
                   '%#x of %#x' % (value, len(d)))
@@ -751,7 +758,8 @@ REGION_END = {
     'cpu_set_rsp0': 'stubs_start',
     'cpu_trap_expect': 'cpu_trap_finish',
     'cpu_trap_finish': 'cpu_trap_dispatch',
-    'cpu_trap_dispatch': 'cpu_com1_init',
+    'cpu_trap_dispatch': 'cpu_irq_set_handler',
+    'cpu_irq_set_handler': 'cpu_com1_init',
     'cpu_com1_init': 'cpu_com1_putc',
     'cpu_com1_putc': 'cpu_com1_puts',
     'cpu_com1_puts': 'cpu_com1_puthex',
@@ -1007,7 +1015,7 @@ def check_trap_api(rep, img):
     d = img.data
     expect_at, expect_end = img.at('cpu_trap_expect'), img.at('cpu_trap_finish')
     finish_at, finish_end = img.at('cpu_trap_finish'), img.at('cpu_trap_dispatch')
-    dispatch_at, dispatch_end = img.at('cpu_trap_dispatch'), img.at('cpu_com1_init')
+    dispatch_at, dispatch_end = img.at('cpu_trap_dispatch'), img.at('cpu_irq_set_handler')
     expect = d[expect_at:expect_end]
     finish = d[finish_at:finish_end]
     dispatch = d[dispatch_at:dispatch_end]
@@ -1172,13 +1180,129 @@ def check_trap_api(rep, img):
               'handler %s, copy %s, rip write %s'
               % (handler[0] if handler else -1, copy_at, rip_at))
 
-    touched = {n for n in rip_state_refs(img, dispatch_at, dispatch_end, TRAP_STATE)}
-    rep.check('dispatch.touches_only_the_trap_state', touched == set(TRAP_STATE),
+    touched = {n for n in rip_state_refs(img, dispatch_at, dispatch_end,
+                                         TRAP_STATE + ('irq_handler',))}
+    rep.check('dispatch.touches_only_the_declared_state',
+              touched == set(TRAP_STATE) | {'irq_handler'},
               ' '.join(sorted(touched)))
 
     targets = [t for _, t in call_sites(img, dispatch_at, dispatch_end)]
     rep.equal('dispatch.panic_sites', targets.count(img['cpu_panic']), 2)
     rep.equal('dispatch.single_accepting_exit', dispatch.count(EPILOGUE), 1)
+
+
+def check_irq_api(rep, img):
+    """The asynchronous IRQ hook: registration contract and dispatch branch.
+
+    The expect path of the dispatcher is locked byte by byte in
+    check_trap_api; here the asynchronous branch is proven to exist, to sit
+    behind the expect path, to bound the vector, to consult the registered
+    handler and to call it with the frame under the same uniform frame that
+    provides the shadow space. No EOI may appear in the dispatcher.
+    """
+    d = img.data
+    at, end = img.at('cpu_irq_set_handler'), img.at('cpu_com1_init')
+    body = d[at:end]
+    handler = img.at('irq_handler')
+
+    # ---------------- cpu_irq_set_handler: the registration contract ----
+    rep.check('irq_set_handler.checks_cpl',
+              bytes.fromhex('66 8C C8 A8 03') in body, 'mov ax, cs; test al, 3')
+    rep.check('irq_set_handler.checks_if',
+              bytes.fromhex('9C 58 A9 00 02 00 00') in body,
+              'pushfq; pop rax; test eax, RFLAGS.IF')
+    rep.check('irq_set_handler.reports_eperm', mov_eax(EPERM) in body,
+              'a call with IF set or from ring 3 is EPERM')
+    rep.check('irq_set_handler.reports_einval', mov_eax(EINVAL) in body)
+    rep.check('irq_set_handler.reports_ealready', mov_eax(EALREADY) in body)
+    rep.equal('irq_set_handler.canonical_check_once',
+              len(find_all(body, bytes.fromhex('48 C1 E8 2F'))), 1)
+    rep.equal('irq_set_handler.canonical_limit_is_the_kernel_top',
+              len(find_all(body, bytes.fromhex('48 3D') +
+                           struct.pack('<I', KERNEL_TOP))), 1)
+    rep.check('irq_set_handler.zero_selects_unregister',
+              bytes.fromhex('48 85 C9') in body, 'test rcx, rcx')
+    stored = [t for t, _ in rip_targets(img, at, end, b'\x48\x89\x0D')]
+    rep.check('irq_set_handler.stores_the_handler', stored == [handler],
+              'mov [rip+cpu_irq_handler], rcx')
+    cleared = [(t, p) for t, p in rip_targets(img, at, end, b'\x48\xC7\x05', 4)
+               if t == handler]
+    rep.check('irq_set_handler.clears_with_zero',
+              len(cleared) == 1 and
+              struct.unpack_from('<i', d, cleared[0][1] + 7)[0] == 0,
+              'mov qword [rip+cpu_irq_handler], 0')
+    guard = [t for t, _ in rip_targets(img, at, end, b'\x48\x83\x3D', 1)]
+    rep.check('irq_set_handler.ealready_guard', guard == [handler],
+              'cmp qword [rip+cpu_irq_handler], 0')
+    touched = {n for n in rip_state_refs(img, at, end,
+                                         TRAP_STATE + ('irq_handler',))}
+    rep.check('irq_set_handler.touches_only_the_handler_slot',
+              touched == {'irq_handler'}, ' '.join(sorted(touched)))
+    rep.check('irq_set_handler.success_zeroes_rdx',
+              bytes.fromhex('31 C0 31 D2') in body, 'xor eax, eax; xor edx, edx')
+    rep.check('irq_set_handler.slot_starts_empty', u64(d, handler) == 0,
+              'no handler until one is registered')
+    rep.check('irq_set_handler.slot_inside_data',
+              img['data_start'] <= img['irq_handler'] < img['data_end'])
+
+    # ---------------- the asynchronous dispatch branch ------------------
+    dispatch_at, dispatch_end = img.at('cpu_trap_dispatch'), at
+    dispatch = d[dispatch_at:dispatch_end]
+    rep.equal('manifest.irq_vector_min', img['irq_vector_min'], IRQ_VECTOR_MIN)
+    floor = b'\x48\x83\xFA' + bytes((IRQ_VECTOR_MIN,))
+    floor_p = find_one(dispatch, floor)
+    rep.check('dispatch.async_vector_floor', floor_p >= 0,
+              'cmp rdx, %#x' % IRQ_VECTOR_MIN)
+    rep.check('dispatch.async_vector_ceiling',
+              (b'\x48\x81\xFA' + struct.pack('<I', IDT_VECTORS)) in dispatch,
+              'cmp rdx, %d' % IDT_VECTORS)
+    loads = [t for t, _ in rip_targets(img, dispatch_at, dispatch_end,
+                                       b'\x48\x8B\x05')]
+    rep.check('dispatch.async_loads_the_handler',
+              loads == [img.at('trap_resume_rip'), handler],
+              'mov rax, [rip+cpu_irq_handler] after the resume RIP load')
+    rep.check('dispatch.async_null_check',
+              bytes.fromhex('48 85 C0') in dispatch,
+              'test rax, rax before the call')
+    calls = find_all(dispatch, b'\xFF\xD0')
+    rep.equal('dispatch.async_one_indirect_call', len(calls), 1)
+    if calls:
+        call_p = calls[0]
+        rep.check('dispatch.async_passes_the_frame',
+                  dispatch[call_p - 4:call_p] == bytes.fromhex('48 8B 4D F8'),
+                  'mov rcx, [rbp-8] right before call rax')
+        # the uniform frame is never readjusted: RSP stays 16 byte aligned
+        # and the low 32 bytes of the frame are the callee's shadow space
+        rep.check('dispatch.async_call_keeps_the_uniform_frame',
+                  dispatch.count(bytes.fromhex('48 81 EC')) == 1 and
+                  bytes.fromhex('48 83 EC') not in dispatch and
+                  bytes.fromhex('48 83 C4') not in dispatch,
+                  'only the prologue touches RSP, shadow space intact')
+        # the expect path comes first: the arming guard and both flag stores
+        # precede the vector floor, the indirect call sits behind the floor
+        guard_p = find_one(dispatch, b'\x80\x3D')
+        flags_p = [p - dispatch_at for _, p in
+                   rip_targets(img, dispatch_at, dispatch_end, b'\xC6\x05', 1)]
+        rep.check('dispatch.async_behind_the_expect_path',
+                  -1 < guard_p < floor_p and
+                  all(p < floor_p for p in flags_p) and floor_p < call_p,
+                  'guard %d, flags %s, floor %d, call %d'
+                  % (guard_p, flags_p, floor_p, call_p))
+        # the callback returns into the one shared accepting exit: a jmp to
+        # the xor eax, eax that sits right before the single leave/ret
+        exit_p = find_one(dispatch, EPILOGUE)
+        jump_ok = False
+        if dispatch[call_p + 2] == 0xEB:
+            rel = struct.unpack_from('<b', dispatch, call_p + 3)[0]
+            jump_ok = call_p + 4 + rel == exit_p - 2
+        elif dispatch[call_p + 2] == 0xE9:
+            rel = struct.unpack_from('<i', dispatch, call_p + 3)[0]
+            jump_ok = call_p + 7 + rel == exit_p - 2
+        rep.check('dispatch.async_joins_the_shared_exit', jump_ok,
+                  'jmp .return_ok, one leave/ret for both paths')
+    rep.check('dispatch.no_eoi_writes',
+              b'\xE6\x21' not in dispatch and b'\xE6\xA1' not in dispatch,
+              'the EOI belongs to the IRQ layer, not to the dispatcher')
 
 
 def check_selftest_abi(rep, img):
@@ -1493,7 +1617,8 @@ def check_position_independence(rep, asm_, root, out, low):
     for name in ('gdt', 'tss', 'idt', 'gdtr', 'idtr', 'data_start', 'data_end',
                  'ist1', 'ist2', 'ist3', 'ist4', 'panic_stack', 'stubs_start',
                  'stubs_end', 'dispatch', 'code_start', 'code_end',
-                 'cpu_init', 'cpu_trap_dispatch', 'cpu_panic'):
+                 'cpu_init', 'cpu_trap_dispatch', 'cpu_panic',
+                 'cpu_irq_set_handler', 'irq_handler'):
         shifted = shifted and hi[name] == low[name] + delta
     rep.check('reloc.labels_shift_by_kernel_base', shifted)
     for name in ('gdt_size', 'tss_size', 'idt_size', 'frame_size', 'vectors'):
@@ -1547,7 +1672,7 @@ FIXTURES = [
     ('saved-rip-ignored', 'kernel/cpu/idt_traps.inc',
      '        mov     rax, [rcx + CPU_FRAME_RIP]\n'
      '        cmp     rax, [cpu_trap_expect_rip]\n'
-     '        jne     .unexpected\n',
+     '        jne     .try_async\n',
      '        mov     rax, [rcx + CPU_FRAME_RIP]\n', 'check'),
     # the arming names the resume RIP where the hardware saves the faulting
     # instruction: #UD would never match at run time
@@ -1672,6 +1797,30 @@ FIXTURES = [
     ('gdt-data-constant-accessed', 'kernel/cpu/api.inc',
      'CPU_GDT_DATA_VALUE  = 0x00CF92000000FFFF',
      'CPU_GDT_DATA_VALUE  = 0x00CF93000000FFFF', 'assemble'),
+
+    # ---- task 69: the asynchronous IRQ hook ----------------------------
+    # without the vector floor an architectural trap could reach the handler
+    ('irq-vector-floor-removed', 'kernel/cpu/idt_traps.inc',
+     '        cmp     rdx, CPU_IRQ_VECTOR_MIN\n'
+     '        jb      .unexpected\n',
+     '', 'check'),
+    # the registration must refuse to run with interrupts enabled
+    ('irq-if-precheck-removed', 'kernel/cpu/idt_traps.inc',
+     '        pushfq\n'
+     '        pop     rax\n'
+     '        test    eax, CPU_RFLAGS_IF\n'
+     '        jnz     .eperm\n',
+     '', 'check'),
+    # a second registration must be EALREADY, not a silent overwrite
+    ('irq-ealready-removed', 'kernel/cpu/idt_traps.inc',
+     '        cmp     qword [cpu_irq_handler], 0\n'
+     '        jne     .ealready\n',
+     '', 'check'),
+    # an unregistered handler must panic, not call address zero
+    ('irq-null-handler-called', 'kernel/cpu/idt_traps.inc',
+     '        test    rax, rax\n'
+     '        jz      .unexpected\n',
+     '', 'check'),
 ]
 
 
@@ -1757,6 +1906,7 @@ def main(argv):
     check_functions(rep, img)
     check_uart(rep, img)
     check_trap_api(rep, img)
+    check_irq_api(rep, img)
     check_selftest_abi(rep, img)
     check_tss_runtime_type(rep, img)
     check_gdt_runtime_mask(rep, img)

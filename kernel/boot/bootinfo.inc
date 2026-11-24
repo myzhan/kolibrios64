@@ -42,9 +42,10 @@ K64BOOTINFO_VERSION   = 1
 K64_IDENTITY_MAP_LIMIT = 0x100000000
 
 ; Feature flags. A flag may only be set when the matching data is valid,
-; so version 1 of the loader sets MEMORY_MAP and leaves the rest clear.
+; so the loader always sets MEMORY_MAP and sets FRAMEBUFFER only when the
+; GOP handover really captured a usable linear framebuffer.
 K64BOOTINFO_FLAG_MEMORY_MAP  = 0x01
-K64BOOTINFO_FLAG_FRAMEBUFFER = 0x02 ; reserved, not implemented by loader v1
+K64BOOTINFO_FLAG_FRAMEBUFFER = 0x02 ; GOP framebuffer captured before ExitBootServices
 K64BOOTINFO_FLAG_RSDP        = 0x04 ; reserved, not implemented by loader v1
 K64BOOTINFO_FLAG_INITRAMFS   = 0x08 ; reserved, not implemented by loader v1
 K64BOOTINFO_FLAG_KNOWN       = 0x0F
@@ -76,12 +77,12 @@ struct K64BOOTINFO
         stack_phys_start     dq ? ; physical base of the kernel stack
         stack_phys_end       dq ? ; physical end of the kernel stack
 
-        gop_framebuffer_addr dq ? ; zero while GOP handover is not implemented
-        gop_framebuffer_size dq ? ; zero
-        gop_width            dd ? ; zero
-        gop_height           dd ? ; zero
-        gop_pixel_format     dd ? ; zero
-        gop_pixels_per_line  dd ? ; zero
+        gop_framebuffer_addr dq ? ; physical base of the GOP linear framebuffer, zero without FLAG_FRAMEBUFFER
+        gop_framebuffer_size dq ? ; framebuffer size in bytes, zero without the flag
+        gop_width            dd ? ; horizontal resolution in pixels, zero without the flag
+        gop_height           dd ? ; vertical resolution in pixels, zero without the flag
+        gop_pixel_format     dd ? ; EFI_GRAPHICS_PIXEL_FORMAT as reported, never BltOnly, zero without the flag
+        gop_pixels_per_line  dd ? ; scanline stride in pixels, zero without the flag
 
         rsdp_addr            dq ? ; zero while ACPI handover is not implemented
         initramfs_addr       dq ? ; zero while initramfs loading is not implemented

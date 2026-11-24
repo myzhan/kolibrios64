@@ -227,12 +227,17 @@ cpu_trap_finish:
 ; rcx = CPU_TRAP_FRAME of the stub that fired
 ; out
 ; never returns for an unexpected trap; for an expected one the frame is
-; copied, rewritten and the stub returns through iretq
+; copied, rewritten and the stub returns through iretq; for an asynchronous
+; one the registered handler runs and the stub returns through iretq
 ;
 ; An expected trap has to match on four independent facts: the vector, the
-; saved RIP and the two masked hardware values. Anything else is a bug in the
-; kernel or in the expectation, and either way it is not something this stage
-; can recover from, so it panics with the frame address.
+; saved RIP and the two masked hardware values. That path is tried first and
+; is byte for byte what it always was. Only a trap that matches no armed
+; expectation may take the asynchronous branch: a vector of CPU_IRQ_VECTOR_MIN
+; or above with a registered handler is delivered to it with RCX = frame.
+; Anything else is a bug in the kernel or in the expectation, and either way
+; it is not something this stage can recover from, so it panics with the
+; frame address.
 ; ------------------------------------------------------------------
 
 cpu_trap_dispatch:
@@ -245,30 +250,30 @@ cpu_trap_dispatch:
         test    al, 3
         jnz     .not_kernel
         cmp     byte [cpu_trap_armed], 0
-        je      .unexpected
+        je      .try_async
         ; the vector must be the one that was armed
         mov     rdx, [rcx + CPU_FRAME_VECTOR]
         cmp     rdx, CPU_IDT_VECTORS
-        jae     .unexpected
+        jae     .try_async
         movzx   eax, byte [cpu_trap_vector]
         cmp     rax, rdx
-        jne     .unexpected
+        jne     .try_async
         ; and it must have been taken at the expected instruction
         mov     rax, [rcx + CPU_FRAME_RIP]
         cmp     rax, [cpu_trap_expect_rip]
-        jne     .unexpected
+        jne     .try_async
         ; (error & mask) == value
         mov     rax, [rcx + CPU_FRAME_ERROR]
         mov     rdx, [cpu_trap_err_mask]
         and     rax, rdx
         cmp     rax, [cpu_trap_err_value]
-        jne     .unexpected
+        jne     .try_async
         ; (cr2 & mask) == value
         mov     rax, [rcx]
         mov     rdx, [cpu_trap_cr2_mask]
         and     rax, rdx
         cmp     rax, [cpu_trap_cr2_value]
-        jne     .unexpected
+        jne     .try_async
         ; accepted: keep the handler frame address and a private copy of the
         ; whole frame before the stub restores anything
         mov     [cpu_trap_handler_frame], rcx
@@ -287,9 +292,29 @@ cpu_trap_dispatch:
         mov     [rcx + CPU_FRAME_RIP], rax
         mov     byte [cpu_trap_armed], 0
         mov     byte [cpu_trap_result_ready], 1
+.return_ok:
         xor     eax, eax
         leave
         ret
+.try_async:
+        ; no expectation matched: an asynchronous vector with a registered
+        ; handler belongs to the IRQ layer, everything else still panics
+        mov     rdx, [rcx + CPU_FRAME_VECTOR]
+        cmp     rdx, CPU_IRQ_VECTOR_MIN
+        jb      .unexpected
+        cmp     rdx, CPU_IDT_VECTORS
+        jae     .unexpected
+        mov     rax, [cpu_irq_handler]
+        test    rax, rax
+        jz      .unexpected
+        ; the callback takes RCX = frame under the MS x64 ABI: the uniform
+        ; frame keeps RSP 16 byte aligned and its low 32 bytes are the shadow
+        ; space, so this call needs no further bookkeeping
+        mov     rcx, [rbp-8]
+        call    rax
+        ; the stub restores every register from the frame and iretqs; the
+        ; EOI is the IRQ layer's job, the dispatcher never sends one
+        jmp     .return_ok
 .unexpected:
         mov     rcx, msg_trap_unexpected
         mov     rdx, [rbp-8]
@@ -302,3 +327,63 @@ cpu_trap_dispatch:
         mov     r8, CPU_EPERM
         call    cpu_panic
         jmp     cpu_halt_forever
+
+; ------------------------------------------------------------------
+; register, or unregister, the asynchronous IRQ handler
+; in
+; rcx = handler VA in the kernel half, or 0 to unregister
+; out
+; eax = 0 on success, EPERM when not ring 0 or IF is set, EINVAL for a non
+;       canonical handler, EALREADY when a non zero handler is registered
+; rdx = 0
+;
+; The handler must be canonical in the kernel half, with the same check
+; cpu_trap_expect applies to its addresses. Only one handler exists: while
+; a non zero one is registered every further registration is EALREADY, and
+; unregistering with zero opens the slot again. The dispatcher reads the
+; pointer once per trap, so the swap needs no lock beyond IF = 0.
+; ------------------------------------------------------------------
+
+cpu_irq_set_handler:
+        push    rbp
+        mov     rbp, rsp
+        sub     rsp, CPU_STACK_FRAME
+        ; this stage only runs in ring 0
+        mov     ax, cs
+        test    al, 3
+        jnz     .eperm
+        ; and only with interrupts masked, like every other setup call
+        pushfq
+        pop     rax
+        test    eax, CPU_RFLAGS_IF
+        jnz     .eperm
+        test    rcx, rcx
+        jz      .clear
+        mov     rax, rcx
+        shr     rax, CPU_KERNEL_SHIFT
+        cmp     rax, CPU_KERNEL_TOP
+        jne     .einval
+        ; one handler at a time, unregister first to replace it
+        cmp     qword [cpu_irq_handler], 0
+        jne     .ealready
+        mov     [cpu_irq_handler], rcx
+        jmp     .ok
+.clear:
+        mov     qword [cpu_irq_handler], 0
+.ok:
+        xor     eax, eax
+        xor     edx, edx
+        leave
+        ret
+.eperm:
+        mov     eax, CPU_EPERM
+        jmp     .fail
+.einval:
+        mov     eax, CPU_EINVAL
+        jmp     .fail
+.ealready:
+        mov     eax, CPU_EALREADY
+.fail:
+        xor     edx, edx
+        leave
+        ret

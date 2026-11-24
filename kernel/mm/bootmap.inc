@@ -512,7 +512,7 @@ mm_bootmap_build:
         mov     rdi, qword [rbx + MM_INIT_PARAMS.bootinfo_phys]
         mov     qword [mm_boot_state + MM_BOOT_STATE.bootinfo_phys], rdi
 
-        ; signature, version, size and flags are fixed by the contract
+        ; signature, version and size are fixed, flags follow a mask rule
         mov     rax, qword [rdi + MM_BOOTINFO.signature]
         mov     rdx, MM_BOOTINFO_SIGNATURE
         cmp     rax, rdx
@@ -521,20 +521,66 @@ mm_bootmap_build:
         jne     .invalid
         cmp     dword [rdi + MM_BOOTINFO.struct_size], MM_BOOTINFO_SIZE
         jne     .invalid
-        cmp     qword [rdi + MM_BOOTINFO.flags], MM_BOOTINFO_FLAG_MAP
-        jne     .invalid
+        ; flags: unknown bits are refused, the memory map is mandatory,
+        ; the framebuffer feature is optional
+        mov     rax, qword [rdi + MM_BOOTINFO.flags]
+        mov     rdx, MM_BOOTINFO_FLAG_KNOWN
+        not     rdx
+        test    rax, rdx
+        jnz     .invalid
+        test    rax, MM_BOOTINFO_FLAG_MAP
+        jz      .invalid
 
-        ; features without a flag must stay explicit zeros
+        ; features without an implementation must stay explicit zeros
+        mov     rdx, qword [rdi + MM_BOOTINFO.rsdp_addr]
+        or      rdx, qword [rdi + MM_BOOTINFO.initramfs_addr]
+        or      rdx, qword [rdi + MM_BOOTINFO.initramfs_size]
+        jnz     .invalid
+
+        ; the GOP block is conditional on the framebuffer flag
+        test    rax, MM_BOOTINFO_FLAG_FRAMEBUFFER
+        jnz     .gop_present
         mov     rdx, qword [rdi + MM_BOOTINFO.gop_framebuffer_addr]
         or      rdx, qword [rdi + MM_BOOTINFO.gop_framebuffer_size]
         or      rdx, qword [rdi + MM_BOOTINFO.gop_width]
         or      rdx, qword [rdi + MM_BOOTINFO.gop_height]
         or      rdx, qword [rdi + MM_BOOTINFO.gop_pixel_format]
         or      rdx, qword [rdi + MM_BOOTINFO.gop_pixels_per_line]
-        or      rdx, qword [rdi + MM_BOOTINFO.rsdp_addr]
-        or      rdx, qword [rdi + MM_BOOTINFO.initramfs_addr]
-        or      rdx, qword [rdi + MM_BOOTINFO.initramfs_size]
         jnz     .invalid
+        jmp     .gop_done
+.gop_present:
+        ; the framebuffer may sit outside every memory map descriptor,
+        ; so no physical range or overlap check applies to it
+        mov     rdx, qword [rdi + MM_BOOTINFO.gop_framebuffer_addr]
+        test    rdx, rdx
+        jz      .invalid
+        mov     rdx, qword [rdi + MM_BOOTINFO.gop_framebuffer_size]
+        test    rdx, rdx
+        jz      .invalid
+        mov     r8d, dword [rdi + MM_BOOTINFO.gop_width]
+        test    r8d, r8d
+        jz      .invalid
+        mov     r9d, dword [rdi + MM_BOOTINFO.gop_height]
+        test    r9d, r9d
+        jz      .invalid
+        mov     r10d, dword [rdi + MM_BOOTINFO.gop_pixels_per_line]
+        cmp     r10d, r8d
+        jb      .invalid                ; pitch must cover the width
+        mov     edx, dword [rdi + MM_BOOTINFO.gop_pixel_format]
+        cmp     rdx, MM_GOP_PIXEL_FORMAT_MAX
+        ja      .invalid                ; BltOnly has no linear framebuffer
+        ; size >= pixels_per_line * height * 4, the 32bpp budget
+        mov     rax, r10
+        mul     r9                      ; RDX:RAX = pitch * height
+        test    rdx, rdx
+        jnz     .invalid
+        mov     rcx, 4
+        mul     rcx
+        test    rdx, rdx
+        jnz     .invalid
+        cmp     qword [rdi + MM_BOOTINFO.gop_framebuffer_size], rax
+        jb      .invalid
+.gop_done:
 
         ; and the reserved area must be zero in version 1
         xor     ecx, ecx

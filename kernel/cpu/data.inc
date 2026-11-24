@@ -212,7 +212,8 @@ end if
 ; The trap state is exactly what the three trap API calls agree on: one armed
 ; expectation (vector, the RIP the hardware must have saved, the RIP to resume
 ; at, and the two masked hardware facts) and one result waiting to be
-; collected.
+; collected. The IRQ handler pointer is the one asynchronous fact: zero means
+; no handler, and only cpu_irq_set_handler ever writes it.
 ; ------------------------------------------------------------------
 
 align 8
@@ -244,6 +245,8 @@ cpu_trap_cr2_mask:
 cpu_trap_cr2_value:
         dq      0
 cpu_trap_handler_frame:
+        dq      0
+cpu_irq_handler:
         dq      0
 cpu_panic_active:
         db      0
@@ -361,4 +364,7 @@ if cpu_selftest_expect_cr2_value - cpu_selftest_expect <> CPU_EXPECT_OFF_CR2_VAL
 end if
 if (cpu_trap_expect_rip and 7) <> 0
         err 'the trap state qwords must stay qword aligned'
+end if
+if (cpu_irq_handler and 7) <> 0
+        err 'the IRQ handler pointer must stay qword aligned'
 end if

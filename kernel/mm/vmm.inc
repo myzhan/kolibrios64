@@ -525,6 +525,189 @@ vmm_unmap_page:
         ret
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; map one 4 KiB MMIO page inside the public window
+; in
+; rcx = virtual address, rdx = physical address
+; out
+; eax = status, rdx = 0
+; note
+; the leaf flags are fixed to PCD|RW|NX, there is no flags argument.
+; The physical page must NOT be eligible: conventional memory belongs
+; to pmm and has to go through vmm_map_page, MMIO and reserved pages
+; are exempt from the ownership check in the opposite direction. The
+; heap range and the core test PML4 slot are refused with EPERM, an
+; existing leaf reports EALREADY. Table pages still come from
+; mm_pmm_alloc_table so the pin/accounting invariants stay untouched.
+vmm_map_mmio:
+        mm_enter
+        cld
+        sub     rsp, 96                 ; 32 shadow + publish/build state
+        mov     r15, rcx
+        mov     r14, rdx
+        mov     qword [rsp+32], 0       ; publish point
+        mov     qword [rsp+40], 0       ; number of new tables
+
+        cmp     dword [mm_vmm_state + MM_VMM_STATE.ready], 0
+        je      .notready
+
+        ; the public window only
+        mov     rax, qword [mm_vmm_state + MM_VMM_STATE.window_base]
+        cmp     r15, rax
+        jb      .permitted
+        mov     rax, qword [mm_vmm_state + MM_VMM_STATE.window_limit]
+        cmp     r15, rax
+        jae     .permitted
+
+        ; never inside the early heap range
+        mov     rax, MM_HEAP_LIMIT
+        cmp     r15, rax
+        jb      .permitted
+
+        ; never inside the core test PML4 slot
+        mov     rax, r15
+        shr     rax, 39
+        and     eax, 0x1FF
+        cmp     eax, MM_CORE_TEST_SLOT
+        je      .permitted
+
+        ; both addresses page aligned
+        test    r15, MM_PAGE_SIZE-1
+        jnz     .invalid
+        test    r14, MM_PAGE_SIZE-1
+        jnz     .invalid
+
+        ; reverse ownership: an eligible page is conventional memory and
+        ; must go through vmm_map_page, only non eligible pages pass here
+        mov     rbx, r14
+        shr     rbx, MM_PAGE_SHIFT
+        cmp     rbx, MM_PFN_COUNT
+        jae     .mmio_ok
+        bt      qword [mm_bitmap_eligible], rbx
+        jc      .permitted
+.mmio_ok:
+
+        ; the address must also fit the CPU physical width
+        mov     rax, qword [mm_vmm_state + MM_VMM_STATE.pa_mask]
+        not     rax
+        test    r14, rax
+        jnz     .overflow
+
+        mov     rbx, qword [mm_vmm_state + MM_VMM_STATE.root_phys]
+        mov     r12, 39
+.level_loop:
+        mov     rax, r15
+        mov     ecx, r12d
+        shr     rax, cl
+        and     eax, 0x1FF
+        lea     rsi, [rbx + rax*8]
+        mov     rdi, qword [rsi]
+        test    dil, MM_PTE_P
+        jnz     .descend
+
+        ; offline build: allocate, record, link inside the new pages only
+        call    mm_pmm_alloc_table
+        test    eax, eax
+        jnz     .rollback_nomem
+        cmp     qword [rsp+40], 0
+        jne     .link_now
+        mov     qword [rsp+32], rsi
+        jmp     .record
+.link_now:
+        mov     rax, rdx
+        or      rax, MM_PTE_P or MM_PTE_RW
+        mov     qword [rsi], rax
+.record:
+        mov     rax, qword [rsp+40]
+        mov     qword [rsp+48 + rax*8], rdx
+        inc     rax
+        mov     qword [rsp+40], rax
+        mov     rbx, rdx
+        jmp     .next_level
+.descend:
+        test    dil, MM_PTE_PS
+        jnz     .rollback_notsup
+        mov     rax, qword [mm_vmm_state + MM_VMM_STATE.pa_mask]
+        and     rdi, rax
+        mov     rbx, rdi
+        mov     rax, MM_PHYS_LIMIT
+        cmp     rbx, rax
+        jae     .rollback_notsup
+.next_level:
+        cmp     r12, 21
+        je      .leaf
+        sub     r12, 9
+        jmp     .level_loop
+
+.leaf:
+        mov     rax, r15
+        shr     rax, 12
+        and     eax, 0x1FF
+        lea     rsi, [rbx + rax*8]
+        bt      qword [rsi], 0
+        jc      .rollback_already
+        mov     rax, r14
+        or      rax, MM_PTE_P or MM_PTE_RW or MM_PTE_PCD
+        mov     rcx, MM_PTE_NX
+        or      rax, rcx
+        mov     qword [rsi], rax
+
+        ; atomic publish of the whole new chain
+        mov     rcx, qword [rsp+40]
+        test    rcx, rcx
+        jz      .published
+        mov     rsi, qword [rsp+32]
+        mov     rax, qword [rsp+48]
+        or      rax, MM_PTE_P or MM_PTE_RW
+        mov     qword [rsi], rax
+.published:
+        mov     rax, qword [rsp+40]
+        add     qword [mm_vmm_state + MM_VMM_STATE.table_allocs], rax
+        invlpg  [r15]
+        xor     eax, eax
+        jmp     .done
+
+.rollback_already:
+        mov     r12d, MM_EALREADY
+        jmp     .rollback
+.rollback_notsup:
+        mov     r12d, MM_ENOTSUP
+        jmp     .rollback
+.rollback_nomem:
+        mov     r12d, MM_ENOMEM
+.rollback:
+        mov     rax, qword [rsp+40]
+        add     qword [mm_vmm_state + MM_VMM_STATE.table_drops], rax
+        mov     rcx, qword [rsp+40]
+.drop_loop:
+        test    rcx, rcx
+        jz      .dropped
+        dec     rcx
+        mov     rbx, rcx
+        mov     rcx, qword [rsp+48 + rbx*8]
+        call    mm_pmm_drop_table
+        mov     rcx, rbx
+        jmp     .drop_loop
+.dropped:
+        mov     eax, r12d
+        jmp     .done
+.permitted:
+        mov     eax, MM_EPERM
+        jmp     .done
+.invalid:
+        mov     eax, MM_EINVAL
+        jmp     .done
+.overflow:
+        mov     eax, MM_EOVERFLOW
+        jmp     .done
+.notready:
+        mov     eax, MM_ENOTREADY
+.done:
+        xor     edx, edx
+        add     rsp, 96
+        mm_leave
+        ret
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; initialise virtual memory on the loader CR3
 ; in
 ; rcx = INIT_PARAMS

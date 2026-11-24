@@ -301,6 +301,22 @@ mm_probe_manifest:
         dq      mm_kern_pml4
         dq      mm_kern_pt
 
+; MMIO mapping: the new public entry, its contract constants and matrix
+        dq      vmm_map_mmio
+        dq      MM_MMIO_LAPIC_VA
+        dq      MM_MMIO_FLAGS
+        dq      MM_CORE_TEST_SLOT
+        dq      mm_mmio_count
+        dq      mm_mmio_table
+
+; BootInfo feature flags and the GOP format ceiling
+        dq      MM_BOOTINFO_FLAG_MAP
+        dq      MM_BOOTINFO_FLAG_FRAMEBUFFER
+        dq      MM_BOOTINFO_FLAG_RSDP
+        dq      MM_BOOTINFO_FLAG_INITRAMFS
+        dq      MM_BOOTINFO_FLAG_KNOWN
+        dq      MM_GOP_PIXEL_FORMAT_MAX
+
 ; ------------------------------------------------------------------
 ; low address space, MM_PB_LOW_ARENA
 ;
@@ -607,6 +623,92 @@ fx_kern4g_boot:
         fx_bootinfo_ks fx_stride40_map, fx_stride40_end - fx_stride40_map, 40, 4, 0x100000000, 0x100001000, 0x100000000, 0x100001000, 1
 
 ; ------------------------------------------------------------------
+; fixtures 20..29: BootInfo feature flags and the GOP handover block
+;
+; The flags follow a mask rule: unknown bits are refused, MEMORY_MAP is
+; mandatory, FRAMEBUFFER is optional. With the flag clear the six GOP
+; fields must stay zero; with it set the geometry must be consistent:
+; pitch >= width, size >= pitch * height * 4 (the 32bpp budget), and
+; the pixel format stays below BltOnly. The framebuffer address may be
+; absent from the memory map entirely, no range check applies to it.
+; ------------------------------------------------------------------
+
+macro fx_bootinfo_f map, size, stride, count, flags, fbaddr, fbsize, width, height, format, pitch
+        dq      'K64BOOTI'
+        dd      1
+        dd      208
+        dq      flags
+        dq      map
+        dq      size
+        dd      stride
+        dd      1
+        dq      count
+        dq      0x00500000                  ; kernel start
+        dq      0x00501000                  ; kernel end
+        dq      0x00500000                  ; stack start
+        dq      0x00501000                  ; stack end
+        dq      fbaddr
+        dq      fbsize
+        dd      width
+        dd      height
+        dd      format
+        dd      pitch
+        dq      0                           ; no RSDP
+        dq      0, 0                        ; no initramfs
+        dq      8 dup 0                     ; reserved
+end macro
+
+; fixture 20: a valid GOP handover, the framebuffer is absent from the map
+align 8
+fx_fbok_boot:
+        fx_bootinfo_f fx_stride40_map, fx_stride40_end - fx_stride40_map, 40, 4, 3, 0x80000000, 0x300000, 1024, 768, 0, 1024
+
+; fixture 21: a padded pitch above the width, BGRX format
+align 8
+fx_fbpitch_boot:
+        fx_bootinfo_f fx_stride40_map, fx_stride40_end - fx_stride40_map, 40, 4, 3, 0x80000000, 0x360000, 1024, 768, 1, 1152
+
+; fixture 22: the BitMask format is accepted as well
+align 8
+fx_fbfmt2_boot:
+        fx_bootinfo_f fx_stride40_map, fx_stride40_end - fx_stride40_map, 40, 4, 3, 0x80000000, 0x300000, 1024, 768, 2, 1024
+
+; fixture 23: an unknown flag bit must be refused
+align 8
+fx_fbunk_boot:
+        fx_bootinfo_f fx_stride40_map, fx_stride40_end - fx_stride40_map, 40, 4, 0x11, 0, 0, 0, 0, 0, 0
+
+; fixture 24: GOP fields without the framebuffer flag must be refused
+align 8
+fx_fbnofl_boot:
+        fx_bootinfo_f fx_stride40_map, fx_stride40_end - fx_stride40_map, 40, 4, 1, 0x80000000, 0x300000, 1024, 768, 0, 1024
+
+; fixture 25: the framebuffer flag with all zero GOP fields is refused
+align 8
+fx_fbzero_boot:
+        fx_bootinfo_f fx_stride40_map, fx_stride40_end - fx_stride40_map, 40, 4, 3, 0, 0, 0, 0, 0, 0
+
+; fixture 26: a pitch below the width is refused
+align 8
+fx_fbpitlo_boot:
+        fx_bootinfo_f fx_stride40_map, fx_stride40_end - fx_stride40_map, 40, 4, 3, 0x80000000, 0x300000, 1024, 768, 0, 1023
+
+; fixture 27: a size below the 32bpp budget is refused
+align 8
+fx_fbsize_boot:
+        fx_bootinfo_f fx_stride40_map, fx_stride40_end - fx_stride40_map, 40, 4, 3, 0x80000000, 0x2FFFFF, 1024, 768, 0, 1024
+
+; fixture 28: BltOnly has no linear framebuffer and is refused
+align 8
+fx_fbfmt3_boot:
+        fx_bootinfo_f fx_stride40_map, fx_stride40_end - fx_stride40_map, 40, 4, 3, 0x80000000, 0x300000, 1024, 768, 3, 1024
+
+; fixture 29: the framebuffer flag without the memory map flag is refused
+align 8
+fx_fbmap0_boot:
+        fx_bootinfo_f fx_stride40_map, fx_stride40_end - fx_stride40_map, 40, 4, 2, 0x80000000, 0x300000, 1024, 768, 0, 1024
+
+; ------------------------------------------------------------------
 ; INIT_PARAMS blocks, one per fixture
 ;
 ; The stack top is a kernel virtual address one page above the kernel
@@ -687,6 +789,26 @@ mm_ip_bigimg:
         fx_params fx_bigimg_boot, mm_fx_pml4, MM_PB_STACK
 mm_ip_kern4g:
         fx_params fx_kern4g_boot, mm_fx_pml4, MM_PB_STACK
+mm_ip_fbok:
+        fx_params fx_fbok_boot, mm_fx_pml4, MM_PB_STACK
+mm_ip_fbpitch:
+        fx_params fx_fbpitch_boot, mm_fx_pml4, MM_PB_STACK
+mm_ip_fbfmt2:
+        fx_params fx_fbfmt2_boot, mm_fx_pml4, MM_PB_STACK
+mm_ip_fbunk:
+        fx_params fx_fbunk_boot, mm_fx_pml4, MM_PB_STACK
+mm_ip_fbnofl:
+        fx_params fx_fbnofl_boot, mm_fx_pml4, MM_PB_STACK
+mm_ip_fbzero:
+        fx_params fx_fbzero_boot, mm_fx_pml4, MM_PB_STACK
+mm_ip_fbpitlo:
+        fx_params fx_fbpitlo_boot, mm_fx_pml4, MM_PB_STACK
+mm_ip_fbsize:
+        fx_params fx_fbsize_boot, mm_fx_pml4, MM_PB_STACK
+mm_ip_fbfmt3:
+        fx_params fx_fbfmt3_boot, mm_fx_pml4, MM_PB_STACK
+mm_ip_fbmap0:
+        fx_params fx_fbmap0_boot, mm_fx_pml4, MM_PB_STACK
 
 ; malformed INIT_PARAMS blocks, every one of them must be refused
 mm_ip_badver:
@@ -861,7 +983,7 @@ mm_fx_many_base:
 ; ------------------------------------------------------------------
 
 mm_fx_count:
-        dq      36
+        dq      46
 mm_fx_table:
         ; baseline and stride variants
         dq      'STRIDE40', mm_ip_stride40, 0, 3, 0xFFFFD, 0x100, 4
@@ -943,6 +1065,27 @@ mm_fx_table:
         dq      0, 0, 0, 0, 0, 0, 0, 0, 0
         dq      'KERN4G', mm_ip_kern4g, 0, 3, 0xFFFFD, 0x100, 4
         dq      0x100, 1, 0, 0x500, 0, 1, 0x10, 0, 1
+        ; BootInfo feature flags and the GOP handover block
+        dq      'FBOK', mm_ip_fbok, 0, 3, 0xFFFFD, 0x100, 4
+        dq      0x100, 1, 0, 0x200, 1, 0, 0x10, 0, 1
+        dq      'FBPITCH', mm_ip_fbpitch, 0, 3, 0xFFFFD, 0x100, 4
+        dq      0x100, 1, 0, 0x200, 1, 0, 0x10, 0, 1
+        dq      'FBFMT2', mm_ip_fbfmt2, 0, 3, 0xFFFFD, 0x100, 4
+        dq      0x100, 1, 0, 0x200, 1, 0, 0x10, 0, 1
+        dq      'FBUNK', mm_ip_fbunk, -1, 0, 0x100000, -1, 0
+        dq      0, 0, 0, 0, 0, 0, 0, 0, 0
+        dq      'FBNOFL', mm_ip_fbnofl, -1, 0, 0x100000, -1, 0
+        dq      0, 0, 0, 0, 0, 0, 0, 0, 0
+        dq      'FBZERO', mm_ip_fbzero, -1, 0, 0x100000, -1, 0
+        dq      0, 0, 0, 0, 0, 0, 0, 0, 0
+        dq      'FBPITLO', mm_ip_fbpitlo, -1, 0, 0x100000, -1, 0
+        dq      0, 0, 0, 0, 0, 0, 0, 0, 0
+        dq      'FBSIZE', mm_ip_fbsize, -1, 0, 0x100000, -1, 0
+        dq      0, 0, 0, 0, 0, 0, 0, 0, 0
+        dq      'FBFMT3', mm_ip_fbfmt3, -1, 0, 0x100000, -1, 0
+        dq      0, 0, 0, 0, 0, 0, 0, 0, 0
+        dq      'FBMAP0', mm_ip_fbmap0, -1, 0, 0x100000, -1, 0
+        dq      0, 0, 0, 0, 0, 0, 0, 0, 0
 
 ; ------------------------------------------------------------------
 ; query table, read by check.py
@@ -1088,6 +1231,66 @@ mm_unmap_table:
         dq      'UM1G', MM_WINDOW_BASE + (1 shl 30), -6, 0, 0
         dq      'UMOUT', MM_WINDOW_BASE - 0x1000, -5, 0, 0
         dq      'UMAL', MM_WINDOW_BASE + 0x800, -1, 0, 0
+
+; ------------------------------------------------------------------
+; MMIO map table, read by check.py
+;
+; 8 qwords per entry:
+;   +0  tag
+;   +8  virtual address
+;   +16 physical address
+;   +24 expected status
+;   +32 test hook: fail the N-th page table allocation, 0 to disable
+;   +40 expected number of newly built page tables
+;   +48 expected raw leaf entry
+;   +56 expected leaf present, 1 or 0
+;
+; vmm_map_mmio takes no flags argument: every accepted leaf carries
+; exactly PCD|RW|NX. The physical page must be non eligible (an eligible
+; page belongs to pmm and has to go through vmm_map_page), the VA must
+; clear the heap range and the core test PML4 slot, and an existing leaf
+; reports EALREADY. Every case starts from a fresh copy of the image.
+; ------------------------------------------------------------------
+
+mm_mmio_count:
+        dq      19
+mm_mmio_table:
+        ; accepted: the LAPIC window needs one fresh PT under the window
+        dq      'MMIOOK', MM_MMIO_LAPIC_VA, 0xFEE00000, 0, 0, 1
+        dq      0xFEE00000 + 0x8000000000000013, 1
+        ; the heap limit itself is already above the heap range
+        dq      'MMIOHBAS', MM_HEAP_LIMIT, 0xFEE00000, 0, 0, 1
+        dq      0xFEE00000 + 0x8000000000000013, 1
+        ; PML4 slot 385 is inside the window and builds three tables
+        dq      'MMIO3TB', MM_WINDOW_BASE + (1 shl 39), 0xFEE00000, 0, 0, 3
+        dq      0xFEE00000 + 0x8000000000000013, 1
+        ; a framebuffer like address no memory map descriptor covers: the
+        ; eligible bit is zero, so the reverse ownership check passes it
+        dq      'MMIOFB', MM_HEAP_LIMIT + 0x1000, 0x80000000, 0, 0, 1
+        dq      0x80000000 + 0x8000000000000013, 1
+        ; an eligible page is conventional memory and must be refused
+        dq      'MMIOELIG', MM_MMIO_LAPIC_VA, 0x00260000, -5, 0, 0, 0, 0
+        dq      'MMIOWLOW', MM_WINDOW_BASE - 0x1000, 0xFEE00000, -5, 0, 0, 0, 0
+        dq      'MMIOWLIM', MM_WINDOW_LIMIT, 0xFEE00000, -5, 0, 0, 0, 0
+        dq      'MMIOHEAP', MM_WINDOW_BASE, 0xFEE00000, -5, 0, 0, 0, 0
+        dq      'MMIOHEND', MM_HEAP_LIMIT - 0x1000, 0xFEE00000, -5, 0, 0, 0, 0
+        ; the core test slot 386 is refused even though map_page takes it
+        dq      'MMIOS386', MM_WINDOW_BASE + (2 shl 39), 0xFEE00000, -5, 0, 0, 0, 0
+        dq      'MMIOVAAL', MM_MMIO_LAPIC_VA + 0x800, 0xFEE00000, -1, 0, 0, 0, 0
+        dq      'MMIOPAAL', MM_MMIO_LAPIC_VA, 0xFEE00123, -1, 0, 0, 0, 0
+        ; mapping the LAPIC page twice reports EALREADY (check.py maps it
+        ; once first: the heap refusal runs before the leaf check)
+        dq      'MMIODUP', MM_MMIO_LAPIC_VA, 0xFEE00000, -8, 0, 0, 0, 0
+        ; a 2 MiB leaf in the PD cannot be split (check.py plants the PS
+        ; entry above the heap limit before this case runs)
+        dq      'MMIOBIG', MM_HEAP_LIMIT + 0x200000, 0xFEE00000, -6, 0, 0, 0, 0
+        ; hooked builds roll every fresh table back
+        dq      'MMIORLL1', MM_WINDOW_BASE + (1 shl 39), 0xFEE00000, -2, 1, 0, 0, 0
+        dq      'MMIORLL2', MM_WINDOW_BASE + (1 shl 39), 0xFEE00000, -2, 2, 0, 0, 0
+        dq      'MMIORLL3', MM_WINDOW_BASE + (1 shl 39), 0xFEE00000, -2, 3, 0, 0, 0
+        dq      'MMIORL1T', MM_MMIO_LAPIC_VA, 0xFEE00000, -2, 1, 0, 0, 0
+        ; a physical address beyond the CPU width, non eligible by range
+        dq      'MMIOOVFL', MM_MMIO_LAPIC_VA, 0x10000000000000, -10, 0, 0, 0, 0
 
 mm_probe_end:
 

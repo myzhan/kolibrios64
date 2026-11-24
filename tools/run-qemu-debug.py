@@ -13,13 +13,14 @@ Modes:
                  continue. Ctrl-C stops QEMU and cleans up.
   --no-freeze    smoke mode: no -S, bounded by --timeout; waits for a
                  TERMINAL marker (K64-FOUNDATION-OK or K64-CPU-PANIC),
-                 not the first K64-BOOT-OK. PASS requires all six OK
-                 markers (BOOT/CPU/PMM/VMM/HEAP/FOUNDATION) exactly once
+                 not the first K64-BOOT-OK. PASS requires all seven OK
+                 markers (BOOT/CPU/PMM/VMM/HEAP/IRQ/FOUNDATION) exactly once
                  and in order, no K64-CPU-PANIC / K64-BOOT-FAIL, no triple
                  fault or unexpected reset, and the frozen task-60 verdict
                  values: CPU selftest passed = 0x5FF (parsed from the
                  serial report line) plus mm_mask = 0, hook_hits = 3,
-                 core_mask = 0. The kernel never prints those three
+                 core_mask = 0, and the frozen IRQ-v1 verdict values
+                 irq_mask = 0, ticks = 10. The kernel never prints those
                  counters on the success path, so they are read from
                  guest memory through the gdbstub after the terminal
                  marker (task 60 used the same channel). Any parse/read
@@ -57,20 +58,22 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# the six milestone markers, in their fixed emission order
+# the seven milestone markers, in their fixed emission order
 MARKERS = ("K64-BOOT-OK", "K64-CPU-OK", "K64-PMM-OK", "K64-VMM-OK",
-           "K64-HEAP-OK", "K64-FOUNDATION-OK")
+           "K64-HEAP-OK", "K64-IRQ-OK", "K64-FOUNDATION-OK")
 TERMINAL_MARKERS = ("K64-FOUNDATION-OK", "K64-CPU-PANIC")
 FORBIDDEN_MARKERS = ("K64-CPU-PANIC", "K64-BOOT-FAIL")
 
 # frozen task-60 verdict values. passed comes from the serial report line;
-# the three counters are memory-only on the success path, so their VAs are
+# the counters are memory-only on the success path, so their VAs are
 # resolved via a private ELF wrapper and read through the gdbstub 'm' packet
 COUNTER_SYMBOLS = (("mm_test_selftest_mask", 8), ("mm_test_fail_hits", 4),
-                   ("core_selftest_mask", 8))
+                   ("core_selftest_mask", 8),
+                   ("irq_test_selftest_mask", 8), ("irq_test_ticks", 8))
 EXPECTED_PASSED = 0x5FF
 EXPECTED_COUNTERS = {"mm_test_selftest_mask": 0, "mm_test_fail_hits": 3,
-                     "core_selftest_mask": 0}
+                     "core_selftest_mask": 0,
+                     "irq_test_selftest_mask": 0, "irq_test_ticks": 10}
 PASSED_RE = re.compile(r"K64-CPU-SELFTEST passed = (0x[0-9A-Fa-f]+)")
 
 _qemu_proc = None
@@ -306,7 +309,7 @@ def judge(serial, debug, counters, early_exit):
     ordered = (all(p >= 0 for p in positions)
                and positions == sorted(positions)
                and len(set(positions)) == len(positions))
-    req(ordered, "the six OK markers appear in order")
+    req(ordered, "the seven OK markers appear in order")
     for m in FORBIDDEN_MARKERS:
         req(m not in serial, f"no {m} in serial")
     req("Triple fault" not in debug, "no triple fault in qemu-debug.log")
