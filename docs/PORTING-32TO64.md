@@ -16,7 +16,8 @@
 | kolibrios64 | `dde7da1` | 已验证的 QEMU 启动调试工作流（gdbstub + ELF64 符号） |
 | kolibrios64 | `028f27f` | MM 子系统 PMM/VMM/heap（冻结契约 K64-FOUNDATION-v1，复验） |
 | kolibrios64 | `553a031` | CPU+MM 内核基础集成（QEMU 验证） |
-| kolibrios64 | `983111c` | IRQ-v1 LAPIC 定时器闭环 + GOP 交接（QEMU 验证，当前 HEAD） |
+| kolibrios64 | `983111c` | IRQ-v1 LAPIC 定时器闭环 + GOP 交接（QEMU 验证） |
+| kolibrios64 | `7b2c4b7` | GUI-G1 GOP framebuffer 图形闭环（QEMU 验证，当前 HEAD） |
 | fasm2 | `0253b7f` | macOS x64 自举工作流收口（自举里程碑，含 `aad830d` 自举宿主与自宿主测试） |
 
 以上锚点已用 `git log --oneline` 核对。本文档随后续里程碑一并提交，不单独入库。
@@ -624,7 +625,7 @@
 
 ---
 
-## 7. GUI-G1：图形输出闭环（本次提交，哈希待提交后补入锚点表）
+## 7. GUI-G1：图形输出闭环（提交 `7b2c4b7`）
 
 > 状态：已通过独立验证与收口审查（2 必改 + 3 建议全采纳），即将提交。
 > 提交范围：kernel/video 新模块、core 集成（contracts.inc /
@@ -850,5 +851,5 @@
 
 *首版撰写于里程碑 553a031（CPU+MM 集成）收口之后；IRQ-v1 章节补录于
 其收口审查通过之后（已随提交 983111c 入库）；GUI-G1 章节补录于其收口
-审查通过之后（提交哈希待补）。后续每个里程碑收口时，由变更史官
+审查通过之后（已随提交 7b2c4b7 入库）。后续每个里程碑收口时，由变更史官
 增补对应小节并更新提交锚点表。*
