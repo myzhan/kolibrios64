@@ -15,7 +15,8 @@
 | kolibrios64 | `ead8369` | stage-1 启动链 + CPU 描述符/异常模块（已验证） |
 | kolibrios64 | `dde7da1` | 已验证的 QEMU 启动调试工作流（gdbstub + ELF64 符号） |
 | kolibrios64 | `028f27f` | MM 子系统 PMM/VMM/heap（冻结契约 K64-FOUNDATION-v1，复验） |
-| kolibrios64 | `553a031` | CPU+MM 内核基础集成（QEMU 验证，当前 HEAD） |
+| kolibrios64 | `553a031` | CPU+MM 内核基础集成（QEMU 验证） |
+| kolibrios64 | `983111c` | IRQ-v1 LAPIC 定时器闭环 + GOP 交接（QEMU 验证，当前 HEAD） |
 | fasm2 | `0253b7f` | macOS x64 自举工作流收口（自举里程碑，含 `aad830d` 自举宿主与自宿主测试） |
 
 以上锚点已用 `git log --oneline` 核对。本文档随后续里程碑一并提交，不单独入库。
@@ -432,13 +433,17 @@
   + gdbstub 仅绑定 127.0.0.1。默认 `-S` 冻结调试（lldb 经
   `tools/gen-kernel-symbols.py` + `tools/kernel64-elf.asm` 产出的符号
   ELF 下硬件断点；TCG 无 watchpoint）；`--no-freeze` 冒烟模式判定冻结：
-  七个里程碑 `K64-BOOT-OK → K64-CPU-OK → K64-PMM-OK → K64-VMM-OK →
-  K64-HEAP-OK → K64-IRQ-OK → K64-FOUNDATION-OK` 各恰好一次且按序
-  （K64-IRQ-OK 随 IRQ-v1 插入），禁止
+  八个里程碑 `K64-BOOT-OK → K64-CPU-OK → K64-PMM-OK → K64-VMM-OK →
+  K64-HEAP-OK → K64-IRQ-OK → K64-GUI-OK → K64-FOUNDATION-OK` 各恰好
+  一次且按序（K64-IRQ-OK 随 IRQ-v1、K64-GUI-OK 随 GUI-G1 插入，见
+  §6/§7），禁止
   `K64-CPU-PANIC`/`K64-BOOT-FAIL`，CPU 自测 passed = 0x5FF（串口报告行），
-  五计数器 `mm_mask = 0`、`hook_hits = 3`、`core_mask = 0`、`irq_mask = 0`、
-  `irq_test_ticks = 10`（成功路径不打印，经 gdbstub 从 guest 内存读取；
-  后两项随 IRQ-v1 新增）。默认 CPU `qemu64,+popcnt`（裸 qemu64 缺
+  六计数器 `mm_mask = 0`、`hook_hits = 3`、`core_mask = 0`、`irq_mask = 0`、
+  `irq_test_ticks = 10`、`video_selftest_mask = 0`（成功路径不打印，经
+  gdbstub 从 guest 内存读取；irq 两项随 IRQ-v1、video 一项随 GUI-G1
+  新增）。冒烟另在终止标记后经 QEMU monitor screendump 采帧做 28 探针
+  像素判定，并有 `--gui-skip` 回退判定模式（均随 GUI-G1 新增，见
+  §7.6/§7.8）。默认 CPU `qemu64,+popcnt`（裸 qemu64 缺
   MM 所需 POPCNT）。QEMU 进程组随退出/中断整体清理，不留 stray 进程。
   注意：QEMU TCG 自行翻译 guest 指令，**与宿主 Rosetta 无关**；正常启动
   在 `-d cpu_reset` 下有 2 次复位（上电 + OVMF 平台复位），判异常须排除。
@@ -477,13 +482,14 @@
 
 ---
 
-## 6. IRQ-v1：LAPIC 定时器闭环（本次提交，哈希待提交后补入锚点表）
+## 6. IRQ-v1：LAPIC 定时器闭环（提交 `983111c`）
 
 > 状态：已通过独立验证与收口审查（含两项必改修复：ISR 降序冲刷、GOP
-> 命中标记守卫），即将提交。提交范围：kernel/irq 新模块、mm 的
-> vmm_map_mmio 与 bootmap 放宽、cpu 异步分发、boot GOP 交接、core 集成、
-> tools 扩展、tests/stage2-irq 及 cpu/mm 测试扩展、本文档；**不含**
-> kernel/video 与 tests/stage2-fb（GUI 轨未集成，另行提交）。
+> 命中标记守卫），已随提交 `983111c` 入库。提交范围：kernel/irq 新模块、
+> mm 的 vmm_map_mmio 与 bootmap 放宽、cpu 异步分发、boot GOP 交接、
+> core 集成、tools 扩展、tests/stage2-irq 及 cpu/mm 测试扩展、本文档；
+> **不含** kernel/video 与 tests/stage2-fb（GUI 轨当时未集成，后随
+> GUI-G1 收口提交，见 §7）。
 
 ### 6.1 中断控制器：PIC 兜底 + APIC 可选双轨 → 纯 LAPIC xAPIC MMIO
 
@@ -563,7 +569,7 @@
   `kolibrios/kernel/trunk/const.inc`（PG_NOCACHE）、
   `kolibrios/kernel/trunk/kernel.asm`（map_io_mem 调用，32 位对照）。
 
-### 6.5 GOP 交接：VESA/BIOS → UEFI GOP（随本次提交）
+### 6.5 GOP 交接：VESA/BIOS → UEFI GOP（随 IRQ-v1 提交 `983111c`）
 
 - **32 位做法**：引导期 VESA/BIOS 设置显示模式（`boot/bootvesa.inc`）。
 - **64 位做法**：加载器 LocateProtocol(GOP) → 有界 QueryMode 扫描
@@ -600,11 +606,14 @@
 ### 6.7 验证口径更新（本次撰写时本地重跑实测，全部 0 失败）
 
 - **门禁计数**：stage2-cpu 524、stage2-mm 1688、stage2-irq 295、
-  stage2-fb 430（fb 属 GUI 轨，不在本次提交）；check-boot-contract
+  stage2-fb 430（时为 GUI 轨独立交付计数，不在 IRQ-v1 提交内；该轨
+  现已集成收口并扩至 449，见 §7.8）；check-boot-contract
   106 项 PASS；其负向变异测试 62/62 夹具 + 57/57 寄存器模型查询 +
   2/2 清理检查。
 - **冒烟口径**：7 标记按序各恰一次（新增 K64-IRQ-OK），passed=0x5FF，
   五计数器（新增 irq_mask=0、irq_test_ticks=10，经 gdbstub 读取）。
+  （此为 IRQ-v1 收口时口径；GUI-G1 起为 8 标记/六计数器，见
+  §5.3/§7.8。）
 - **收口审查修复记录**：① ISR 降序冲刷（§6.1）；② GOP 命中标记守卫
   （§6.5）；③ BootInfo 8 对齐回归——GOP 字段填值不得破坏 208 字节
   布局的 8 字节对齐，`bootinfo.inc` 的 `sizeof mod 8` 汇编期断言守住。
@@ -615,19 +624,209 @@
 
 ---
 
-## 7. 进行中（占位，待验证通过后补录）
+## 7. GUI-G1：图形输出闭环（本次提交，哈希待提交后补入锚点表）
+
+> 状态：已通过独立验证与收口审查（2 必改 + 3 建议全采纳），即将提交。
+> 提交范围：kernel/video 新模块、core 集成（contracts.inc /
+> foundation.inc / kernel64.asm include 顺序）、tools/run-qemu-debug.py
+> 冒烟判定扩展、tests/stage2-fb（含 check-gui-judge.py）及本文档。
+> GOP 交接的加载器改动已随 IRQ-v1 提交 `983111c` 入库，本章仅作
+> 上下文简述（§7.1，详见 §6.5）。
+
+### 7.1 GOP 交接上下文（已随 IRQ-v1 入库，详见 §6.5）
+
+- **32 位做法**：引导期 VESA/BIOS 设置显示模式（`boot/bootvesa.inc`）。
+- **64 位做法**：加载器 LocateProtocol(GOP) → 有界 QueryMode 枚举
+  （MaxMode 与 GOP_MAX_MODES=64 双重上界）→ 仅精确 1024x768 命中
+  （gop_match=1 守卫）才 SetMode；BltOnly 无线性帧缓冲拒绝。一切失败
+  非致命：未命中保留固件 live mode（OVMF 默认 800x600，--gui-skip
+  场景实测 mode 0x2）仍如实置 FLAG_FRAMEBUFFER。BootInfo GOP 字段
+  偏移 @88（fb PA）/96（size）/104（width）/108（height）/112（format）/
+  116（pitch），208 字节结构零变更、8 字节对齐断言守住。本轮冒烟
+  实测：BootInfo @0x405158，GOP fb PA 0x80000000，1024x768 BGRX
+  （mode 0x6）。
+- **变更理由**：GOP 失败不阻断启动、live mode 如实交接，是 §7.4
+  GUI-SKIP 回退路径的前提（完整理由见 §6.5）。
+- **证据文件**：`kolibrios64/kernel/boot/bootx64.asm`（gop_handover）、
+  `kernel/boot/bootinfo.inc`、`kernel/video/api.inc`（GOP 字段偏移
+  私有副本 + 断言）；实测数字来自本轮冒烟 serial.log（build/ 产物
+  目录，不入库）。
+
+### 7.2 显示体系：VESA/LFB + 自有驱动 → 直接消费 GOP 物理 framebuffer
+
+- **32 位做法**：VESA/LFB 加自有显示驱动体系（`drivers/video/`、
+  `kernel/trunk/gui/`），LFB 经 map_io_mem + PG_NOCACHE 直接映射
+  （§6.4）。
+- **64 位做法**：首阶段不建显示驱动，直接消费 UEFI GOP 交接的物理
+  framebuffer。FB 窗口 `FB_VA = 0xFFFFC00001000000` 恰起于 heap
+  limit、PML4 slot 384，上界严格低于 LAPIC VA 0xFFFFC00002000000，
+  得 16 MiB / 4096 页映射预算（全部汇编期断言）；1024x768x4 = 3 MiB
+  参考帧经 `vmm_map_mmio` 逐 4 KiB 页映射 768 页（PCD|RW|NX）。
+  PA 走 mm 的**负向判定**：framebuffer 实测缺席全部 UEFI memmap
+  描述符，非 eligible 即放行（§6.4）。几何上限 2560x1600、仅 BGRX、
+  size ≤ 16 MiB、pitch ≥ width、PA 页对齐；模块对外唯一依赖是
+  vmm_map_mmio。栈帧为模块自有 video_enter/leave（8 push + sub 40：
+  32 shadow + 第五参数槽），与 §3.3 同一 MS x64 ABI，帧形与 CPU/MM
+  的 128 字节帧不同，门禁按模块宏逐函数断言。
+- **变更理由**：直接消费 GOP 交接绕开实模式 VESA 与驱动枚举，是最短
+  图形闭环；FB 窗口夹在 heap 与 LAPIC 之间使「不重叠、有预算」成为
+  可静态断言的性质。
+- **证据文件**：`kolibrios64/kernel/video/api.inc`（窗口/预算断言与
+  video_enter 宏）、`kernel/video/fb.inc`（video_init）、
+  `kernel/mm/vmm.inc`（vmm_map_mmio）；
+  `kolibrios/drivers/video/`、`kolibrios/kernel/trunk/gui/`（32 位对照）。
+
+### 7.3 像素格式与集成期抓修的两个真实缺陷
+
+- **32 位做法**：无字节级颜色顺序断言，无外部像素真值判定。
+- **64 位做法**：BGRX（B 在低字节，X 字节写 0）；0x00RRGGBB 的小端
+  存储恰为 B,G,R,X 字节序，故 `video_bgrx` 仅 `and eax, 0x00FFFFFF`
+  丢弃 alpha，掩码即全部转换。集成期抓修两个真实缺陷：
+  ① **bswap 双重转换**：颜色路径多一次 bswap 使存储变 R,G,B,X，
+  屏幕上红蓝互换——串口全绿无法发现，由 screendump 探针抓出
+  （draw.inc 注释记录在案，负向夹具 bgrx-byteswap 钉死）；
+  ② **几何寄存器被破坏**：width/height/pitch/format 暂存
+  caller-saved r8-r11，被 768 次 vmm_map_mmio 调用破坏后发布垃圾
+  几何；修复为映射完成后从 r12 持有的 BootInfo 重载再发布
+  （负向夹具 stale-geometry 钉死）。
+- **变更理由**：两个缺陷都是「调用序列成功但结果错」类真实 bug，
+  其中 bswap 缺陷只能靠像素真值（§7.6）抓住；修复后均以负向
+  夹具固化，防回退。
+- **证据文件**：`kolibrios64/kernel/video/draw.inc`（video_bgrx 及其
+  注释）、`kernel/video/fb.inc`（.mapped 重载段）、
+  `tests/stage2-fb/check.py`（bgrx-byteswap/stale-geometry 夹具）。
+
+### 7.4 几何门与失败语义（冻结口径）
+
+- **32 位做法**：无对应分级失败语义。
+- **64 位做法**：ENOTSUP **只**来自几何门——video_init 的格式/
+  宽高上限/size 窗口，与 video_selftest 的非精确 1024x768 拒绝——
+  foundation 视为非致命，发 `K64-GUI-SKIP` 后继续；
+  FLAG_FRAMEBUFFER 缺失同样 SKIP。映射中途任何一次 vmm_map_mmio
+  失败 → `VIDEO_EIO(-9)` → panic，**绝不透传原始 MM 状态**
+  （MM_ENOTSUP 若透传会被 foundation 误读为几何 skip）；
+  mapped_pages 在每条退出路径保留精确进度供诊断。该口径在
+  api.inc 状态码注释与 foundation.inc 冻结，负向夹具
+  map-fail-passthrough 钉死。
+- **变更理由**：结构性 MM 故障若伪装成可跳过的几何不匹配，会静默
+  吞掉真实缺陷；错误码语义分区使 SKIP 路径可信。
+- **证据文件**：`kolibrios64/kernel/video/api.inc`、`fb.inc`、
+  `kernel/core/foundation.inc`（.gui_skip 分支）、
+  `tests/stage2-fb/check.py`。
+
+### 7.5 字体：charUni.mt 全量字体 → 95 字形子集嵌入 + sha256 双重冻结
+
+- **32 位做法**：`kernel/trunk/gui/charUni.mt` 全量字体文件，按码点
+  索引字形。
+- **64 位做法**：提取 0x20..0x7E 共 95 字形 × 16 字节 = 1520 字节
+  嵌入 `font.inc`（每行 1 字节，MSB 为最左像素；源文件 GPLv2，与本
+  仓库 LICENSE 一致）。sha256 双重冻结：stage2-fb/check.py 与
+  check-gui-judge.py 各钉同一哈希；32 位基线文件不可达时，judge 从
+  模块内嵌字节回退推导字体，仍必须过同一 sha256（收口建议修复，
+  回退推导与冻结子集逐字节相等有专项断言）。
+- **变更理由**：复用基线字体避免手绘漂移；双重冻结 + 回退推导使
+  「字体漂移」在两侧门禁都必然失败，且基线缺席不会静默改变渲染帧。
+- **证据文件**：`kolibrios64/kernel/video/font.inc`、
+  `tests/stage2-fb/check.py`（FONT_SHA256）、
+  `tests/stage2-fb/check-gui-judge.py`（font_bytes/derived_font）；
+  `kolibrios/kernel/trunk/gui/charUni.mt`（32 位基线）。
+
+### 7.6 draw-only 自检与像素真值裁决（验证口径显式声明）
+
+- **32 位做法**：无自检画面判定机制。
+- **64 位做法**：`video_selftest` 为 **draw-only（无 readback）**，
+  冻结图案四层按序：8 色条各 128 列（红绿蓝黄青品红白黑）→ 1px
+  白边框 → 中央 (412,284)-(611,483) 200x200 0x808080 矩形 → 左上
+  (8,8) "K64 GUI-G1" 白色文本（8x16，10 字形）。图案 spec 冻结在
+  api.inc 顶部表格，坐标绝对不缩放（仅接受 1024x768）；失败层号
+  记入 video_selftest_mask（1 bars / 2 border / 3 rect / 4 text）。
+  **像素真值由外部裁决**：冒烟在终止标记后经 QEMU monitor
+  screendump 采帧到 screen.ppm，run-qemu-debug.py 以纯 Python 解析
+  PPM P6，比对 28 个冻结探针。**验证口径：串口标记 + 计数器全绿
+  ≠ 画面正确**——串口证据只证明绘制调用序列与状态，像素正确性
+  只能由 screendump 探针裁决。
+- **变更理由**：无 readback 使 FB 保持只写证据、语义最简；外部像素
+  裁决补上「画成功但画错」的检测缺口（能力边界见 §7.9）。
+- **证据文件**：`kolibrios64/kernel/video/api.inc`（spec 表）、
+  `kernel/video/selftest.inc`、`tools/run-qemu-debug.py`
+  （PPM_PROBES 与 P6 解析）、`tests/stage2-fb/check-gui-judge.py`。
+
+### 7.7 收口审查修复记录（2 必改 + 3 建议全采纳）
+
+- **必改① size 上界守卫**：取整前 `cmp size, 16 MiB`——size≈2^64 时
+  `add 4095` 回绕成 0 页，绕过页预算门在未映射 VA 上发布 ready=1；
+  该守卫同时使 pitch*4 远离 32 位 stride 回绕（负向夹具
+  size-wrap-unguarded）。
+- **必改② blit 源行距补偿**：源行恒按**原始 w** 紧密打包，右缘部分
+  裁剪后每行源指针补偿 `(orig_w - clipped_w) * 4`，修复第二行起读错
+  源像素的缺陷（负向夹具 blit-src-stride）。
+- **建议③ 映射故障 EIO 区分**：见 §7.4（负向夹具
+  map-fail-passthrough）。
+- **建议④ judge 字体基线缺失容错**：回退推导仍过 sha256 冻结，见
+  §7.5。
+- **建议⑤ foundation.inc 尾换行**：文件尾补换行（卫生项）。
+- **证据文件**：`kolibrios64/kernel/video/fb.inc`、`draw.inc`
+  （修复点注释）、`tests/stage2-fb/check.py`（三个新负向夹具）、
+  `tests/stage2-fb/check-gui-judge.py`、`kernel/core/foundation.inc`。
+
+### 7.8 集成与验证证据（实测，全部 0 失败）
+
+- **foundation 顺序**：core_selftest 之后 video_init →
+  vmm_boot_protect（video 数据区 RW|NX 恰 1 页）→ video_selftest →
+  `K64-GUI-OK` → `K64-FOUNDATION-OK`。GUI 有意放在 leg7 表页核算
+  基线之后：冻结的 3/3/3 表页 delta 不受影响（FB 映射仅新增 PT 页）。
+- **宿主静态门禁**（原生 arm64 python3，不执行 guest 机器码）：
+  check-boot-contract FAILURES 0；其负向变异测试 62/62 夹具 +
+  2/2 清理检查 + 57/57 寄存器模型查询；stage2-cpu 524、stage2-mm
+  1688、stage2-irq 295、stage2-fb 449（11 负向夹具全部被抓，含
+  size-wrap-unguarded / blit-src-stride / map-fail-passthrough）；
+  check-gui-judge 21（judge 纯函数正基线 + 12 负向变异全部被抓）。
+- **QEMU TCG 冒烟**（唯一真实执行环境，禁 Rosetta 口径延续 §5.4）：
+  128/256 MiB 多轮；8 串口标记按序各恰一次（K64-GUI-OK 位于 IRQ 与
+  FOUNDATION 之间）；passed=0x5FF；6 计数器经 gdbstub 读取全为冻结
+  值（mm_mask=0、hook_hits=3、core_mask=0、irq_mask=0、ticks=10、
+  video_selftest_mask=0）；screendump 1024x768，28 探针全绿。
+- **--gui-skip 回退场景**（GOP_MAX_MODES=0 加载器）：保留固件 live
+  mode 800x600，`K64-GUI-SKIP` + `K64-FOUNDATION-OK`，无 panic、
+  无像素断言。
+- **独立验证者复核**：全帧 786432 像素（1024x768）与冻结 spec 模型
+  逐一比对，0 差异。
+- **坏内核 panic profile**：变异内核触发 #UD，rip 精确命中变异 VA，
+  证明 panic 诊断路径有效。
+- **证据文件**：`kolibrios64/kernel/core/foundation.inc`、
+  `kernel/video/data.inc`（恰 1 页数据区断言）、
+  `tests/stage2-cpu/`、`tests/stage2-mm/`、`tests/stage2-irq/`、
+  `tests/stage2-fb/`（check.py + check-gui-judge.py）、
+  `tools/check-boot-contract.py`、`tools/test-boot-contract-checker.py`、
+  `tools/run-qemu-debug.py`；冒烟实测数字来自本轮 build/ 产物
+  （g1-final-128 / g1-smoke-256 / g1-skip 等，不入库）。
+
+### 7.9 已知遗留（如实记录，不粉饰）
+
+- `draw.inc` 文件尾无换行（卫生项，下次顺手；本轮实测文件以 ret
+  结尾无 0x0A）。
+- draw-only 自检的数据变异（如颜色常量漂移）依赖外部 screendump
+  探针检测——这是**能力边界而非漏检**：串口/计数器无法区分「画对」
+  与「画错」，口径已在 §7.6 显式写明。
+- 末腿 timer mask 的运行时证据缺口仍留 IRQ-v2（见 §6.6）。
+
+---
+
+## 8. 进行中（占位，待验证通过后补录）
 
 ### IRQ-v1：LAPIC 定时器闭环 —— 已完成
 
-- 已收口并补录为 §6；提交哈希待产生后补入里程碑锚点表（本次不写未
-  产生的哈希）。
+- 已收口并补录为 §6；提交 `983111c` 已入里程碑锚点表。
 
-### GUI-G1：图形输出闭环 —— 进行中
+### GUI-G1：图形输出闭环 —— 已完成
 
-- FB 模块（`kernel/video/`）与 `tests/stage2-fb/`（430 项门禁）已独立
-  交付，但**未集成**进内核映像，不在 IRQ-v1 提交范围，另行提交。
-- 本小节在该里程碑集成并验证收口后按四段式补录，届时补充提交锚点
-  与证据文件。
+- 已收口并补录为 §7；提交哈希待产生后补入锚点表（本次不写未产生
+  的哈希）。
+
+### IRQ-v2 —— 待启动
+
+- 已知缺口：末腿 timer mask 的运行时证据（见 §6.6/§7.9）；范围待
+  该里程碑启动时冻结。
 
 ---
 
@@ -650,5 +849,6 @@
 ---
 
 *首版撰写于里程碑 553a031（CPU+MM 集成）收口之后；IRQ-v1 章节补录于
-其收口审查通过之后（提交哈希待补）。后续每个里程碑收口时，由变更史官
+其收口审查通过之后（已随提交 983111c 入库）；GUI-G1 章节补录于其收口
+审查通过之后（提交哈希待补）。后续每个里程碑收口时，由变更史官
 增补对应小节并更新提交锚点表。*

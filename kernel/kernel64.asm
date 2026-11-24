@@ -356,6 +356,14 @@ include 'mm/mm.asm'
 
 include 'irq/irq.asm'
 
+; GUI-G1: the framebuffer module calls vmm_map_mmio of MM and nothing
+; else outside its own files. VIDEO_HOSTED keeps video.asm from emitting
+; its standalone format/org pair, exactly like MM_HOSTED above. Its data
+; region sits mid image and is protected RW/NX by the foundation GUI
+; stage; the core files still close the image.
+VIDEO_HOSTED = 1
+include 'video/video.asm'
+
 include 'core/contracts.inc'
 include 'core/foundation.inc'
 include 'core/selftest.inc'

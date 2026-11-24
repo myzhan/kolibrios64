@@ -13,19 +13,29 @@ Modes:
                  continue. Ctrl-C stops QEMU and cleans up.
   --no-freeze    smoke mode: no -S, bounded by --timeout; waits for a
                  TERMINAL marker (K64-FOUNDATION-OK or K64-CPU-PANIC),
-                 not the first K64-BOOT-OK. PASS requires all seven OK
-                 markers (BOOT/CPU/PMM/VMM/HEAP/IRQ/FOUNDATION) exactly once
-                 and in order, no K64-CPU-PANIC / K64-BOOT-FAIL, no triple
-                 fault or unexpected reset, and the frozen task-60 verdict
-                 values: CPU selftest passed = 0x5FF (parsed from the
-                 serial report line) plus mm_mask = 0, hook_hits = 3,
-                 core_mask = 0, and the frozen IRQ-v1 verdict values
-                 irq_mask = 0, ticks = 10. The kernel never prints those
+                 not the first K64-BOOT-OK. PASS requires all eight OK
+                 markers (BOOT/CPU/PMM/VMM/HEAP/IRQ/GUI/FOUNDATION) exactly
+                 once and in order, no K64-CPU-PANIC / K64-BOOT-FAIL, no
+                 triple fault or unexpected reset, and the frozen task-60
+                 verdict values: CPU selftest passed = 0x5FF (parsed from
+                 the serial report line) plus mm_mask = 0, hook_hits = 3,
+                 core_mask = 0, the frozen IRQ-v1 verdict values
+                 irq_mask = 0, ticks = 10, and the GUI-G1 verdict value
+                 video_selftest_mask = 0. The kernel never prints those
                  counters on the success path, so they are read from
                  guest memory through the gdbstub after the terminal
-                 marker (task 60 used the same channel). Any parse/read
-                 failure, or a timeout without a terminal marker, is a
-                 FAIL with the reason printed.
+                 marker (task 60 used the same channel). After the
+                 terminal marker a monitor screendump is captured to
+                 screen.ppm and judged in pure Python against the frozen
+                 28-probe pattern spec (1024x768, eight bars, border,
+                 gray rectangle, text glyphs). Any parse/read failure,
+                 or a timeout without a terminal marker, is a FAIL with
+                 the reason printed.
+  --gui-skip     expect the non-fatal GUI skip path instead: the seven
+                 non-GUI OK markers plus exactly one K64-GUI-SKIP between
+                 IRQ and FOUNDATION, no K64-GUI-OK, no pixel assertions;
+                 video_fb_state is read through the gdbstub as geometry
+                 evidence. Used with a loader built with GOP_MAX_MODES=0.
 
 Nothing outside the artifact directory is written; build.sh, build_fasm2.sh
 and the kernel/loader sources are never modified. QEMU runs in its own
@@ -37,8 +47,9 @@ default CPU is "qemu64,+popcnt" in BOTH debug and smoke mode; --cpu overrides
 it for experiments (e.g. a host-passthrough model or extra feature flags).
 
 Usage:
-  run-qemu-debug.py [--no-freeze] [--port N] [--timeout SEC]
-                    [--art-dir DIR] [--qemu PATH] [--cpu MODEL]
+  run-qemu-debug.py [--no-freeze] [--gui-skip] [--mem MIB] [--port N]
+                    [--timeout SEC] [--art-dir DIR] [--qemu PATH]
+                    [--cpu MODEL]
 
 Environment: FASMG / FASM2_DIR / FASM1 are forwarded to build_fasm2.sh.
 """
@@ -58,22 +69,47 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# the seven milestone markers, in their fixed emission order
+# the eight milestone markers, in their fixed emission order; GUI-G1 sits
+# between IRQ and FOUNDATION (foundation.inc emits it after core_selftest)
 MARKERS = ("K64-BOOT-OK", "K64-CPU-OK", "K64-PMM-OK", "K64-VMM-OK",
-           "K64-HEAP-OK", "K64-IRQ-OK", "K64-FOUNDATION-OK")
+           "K64-HEAP-OK", "K64-IRQ-OK", "K64-GUI-OK", "K64-FOUNDATION-OK")
+GUI_OK_MARKER = "K64-GUI-OK"
+GUI_SKIP_MARKER = "K64-GUI-SKIP"
 TERMINAL_MARKERS = ("K64-FOUNDATION-OK", "K64-CPU-PANIC")
 FORBIDDEN_MARKERS = ("K64-CPU-PANIC", "K64-BOOT-FAIL")
+
+# frozen GUI-G1 screendump spec: 1024x768, the 28 pixel probes of the
+# task-77 pattern (0xRRGGBB). Bars: red green blue yellow cyan magenta
+# white black, 128 columns each; 1px white border; the centered gray
+# rectangle (412,284)-(611,483); the "K64 GUI-G1" glyph probes at (8,8).
+PPM_WIDTH, PPM_HEIGHT = 1024, 768
+PPM_PROBES = (
+    (64, 100, 0xFF0000), (192, 100, 0x00FF00), (320, 100, 0x0000FF),
+    (448, 100, 0xFFFF00), (576, 100, 0x00FFFF), (704, 100, 0xFF00FF),
+    (832, 100, 0xFFFFFF), (960, 100, 0x000000),
+    (127, 100, 0xFF0000), (128, 100, 0x00FF00),
+    (895, 100, 0xFFFFFF), (896, 100, 0x000000),
+    (0, 0, 0xFFFFFF), (1023, 767, 0xFFFFFF), (512, 0, 0xFFFFFF),
+    (0, 384, 0xFFFFFF), (1023, 100, 0xFFFFFF), (1, 1, 0xFF0000),
+    (412, 284, 0x808080), (611, 483, 0x808080),
+    (411, 284, 0xFFFF00), (612, 284, 0x00FFFF),
+    (412, 283, 0xFFFF00), (412, 484, 0xFFFF00),
+    (9, 10, 0xFFFFFF), (14, 10, 0xFFFFFF),
+    (8, 10, 0xFF0000), (8, 8, 0xFF0000),
+)
 
 # frozen task-60 verdict values. passed comes from the serial report line;
 # the counters are memory-only on the success path, so their VAs are
 # resolved via a private ELF wrapper and read through the gdbstub 'm' packet
 COUNTER_SYMBOLS = (("mm_test_selftest_mask", 8), ("mm_test_fail_hits", 4),
                    ("core_selftest_mask", 8),
-                   ("irq_test_selftest_mask", 8), ("irq_test_ticks", 8))
+                   ("irq_test_selftest_mask", 8), ("irq_test_ticks", 8),
+                   ("video_selftest_mask", 8))
 EXPECTED_PASSED = 0x5FF
 EXPECTED_COUNTERS = {"mm_test_selftest_mask": 0, "mm_test_fail_hits": 3,
                      "core_selftest_mask": 0,
-                     "irq_test_selftest_mask": 0, "irq_test_ticks": 10}
+                     "irq_test_selftest_mask": 0, "irq_test_ticks": 10,
+                     "video_selftest_mask": 0}
 PASSED_RE = re.compile(r"K64-CPU-SELFTEST passed = (0x[0-9A-Fa-f]+)")
 
 _qemu_proc = None
@@ -171,8 +207,11 @@ def gen_symbols(art, bin_dir):
     return elf
 
 
-def counter_addresses(art):
-    """Resolve the three counter VAs; returns ({name: VA}, error strings).
+def counter_addresses(art, extra=()):
+    """Resolve the counter VAs; returns ({name: VA}, error strings).
+
+    `extra` adds (name, size) pairs to the same wrapper, e.g. the 64-byte
+    video_fb_state block read as geometry evidence in --gui-skip mode.
 
     tools/kernel64-elf.asm only publishes the entry/console labels, so a
     private wrapper is generated INSIDE the artifact directory: the same
@@ -188,10 +227,11 @@ def counter_addresses(art):
         return {}, [f"fasmg host {host} not executable"]
     wrapper = os.path.join(art, "kernel64-counters.asm")
     elf_path = os.path.join(art, "kernel64-counters.elf")
+    symbols = COUNTER_SYMBOLS + tuple(extra)
     with open(wrapper, "w", encoding="utf-8") as f:
         f.write("format elf64\n")
         f.write("include '%s'\n" % os.path.join(REPO, "kernel", "kernel64.asm"))
-        for name, _ in COUNTER_SYMBOLS:
+        for name, _ in symbols:
             f.write("public %s\n" % name)
     r = subprocess.run(
         [host, "-e100", "-iInclude 'fasm2.inc'", wrapper, elf_path],
@@ -213,7 +253,7 @@ def counter_addresses(art):
         return {}, ["counter wrapper ELF has no .symtab"]
     strtab = shdrs[symtab[6]]
     strs = elf[strtab[4]:strtab[4] + strtab[5]]
-    wanted = {name for name, _ in COUNTER_SYMBOLS}
+    wanted = {name for name, _ in symbols}
     addrs, errors = {}, []
     for i in range(symtab[5] // 24):
         st_name, _, _, st_shndx, st_value, _ = struct.unpack_from(
@@ -285,10 +325,93 @@ def read_counters(port, addrs):
     return counters, errors
 
 
-def judge(serial, debug, counters, early_exit):
+def screendump(art, timeout=15.0):
+    """Capture the guest screen through the unix-socket QEMU monitor.
+
+    Returns the raw PPM bytes; screen.ppm stays in the artifact directory
+    as forensic evidence. The command completes before the next (qemu)
+    prompt is printed, so the file is whole when the prompt arrives.
+    """
+    sock_path = os.path.join(art, "monitor.sock")
+    ppm_path = os.path.join(art, "screen.ppm")
+    if os.path.exists(ppm_path):
+        os.unlink(ppm_path)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        s.connect(sock_path)
+        buf = b""
+
+        def wait_prompt():
+            nonlocal buf
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if b"(qemu)" in buf:
+                    return
+                chunk = s.recv(4096)
+                if not chunk:
+                    raise OSError("monitor socket closed before prompt")
+                buf += chunk
+            raise OSError("no (qemu) prompt before timeout")
+
+        wait_prompt()  # the monitor greeting ends with the first prompt
+        buf = b""
+        s.sendall(("screendump " + ppm_path + "\n").encode())
+        wait_prompt()
+    with open(ppm_path, "rb") as f:
+        return f.read()
+
+
+def parse_ppm(data):
+    """Pure-Python PPM P6 parser -> (width, height, rgb bytes).
+
+    No PIL or any other dependency: header tokens are read with comment
+    skipping, exactly one whitespace byte separates maxval from the
+    binary payload, maxval must be 255. Raises ValueError on any defect.
+    """
+    if not data.startswith(b"P6"):
+        raise ValueError("not a P6 PPM")
+    pos = 2
+    tokens = []
+    while len(tokens) < 3:
+        while pos < len(data):
+            c = data[pos:pos + 1]
+            if c in b" \t\r\n":
+                pos += 1
+            elif c == b"#":
+                nl = data.find(b"\n", pos)
+                if nl < 0:
+                    raise ValueError("unterminated PPM comment")
+                pos = nl + 1
+            else:
+                break
+        start = pos
+        while pos < len(data) and data[pos:pos + 1] not in b" \t\r\n#":
+            pos += 1
+        if pos == start:
+            raise ValueError("truncated PPM header")
+        tokens.append(int(data[start:pos]))
+    w, h, maxval = tokens
+    if w <= 0 or h <= 0 or maxval != 255:
+        raise ValueError(f"unsupported PPM header {w}x{h} maxval {maxval}")
+    pos += 1  # the single whitespace byte after maxval
+    px = data[pos:]
+    if len(px) != w * h * 3:
+        raise ValueError(f"PPM payload {len(px)} bytes, need {w * h * 3}")
+    return w, h, px
+
+
+def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None):
     """Pure smoke verdict: (ok, report lines). No I/O in here, so the
     decision can be exercised unit-style against mutated serial/debug
-    fixtures (the task-67 sensitivity evidence)."""
+    fixtures (the task-67 sensitivity evidence).
+
+    gui_mode="ok"   the default eight-marker PASS path plus the frozen
+                    28-probe PPM pixel assertions on `ppm` (raw bytes).
+    gui_mode="skip" the non-fatal GOP fallback path: seven OK markers,
+                    exactly one K64-GUI-SKIP between IRQ and FOUNDATION,
+                    no K64-GUI-OK, no pixel assertions. Never mixed into
+                    the default PASS path.
+    """
     lines = []
     ok = True
 
@@ -302,14 +425,16 @@ def judge(serial, debug, counters, early_exit):
     req(bool(terminal),
         "terminal marker seen (K64-FOUNDATION-OK or K64-CPU-PANIC)")
     positions = []
-    for m in MARKERS:
+    markers = (MARKERS if gui_mode == "ok"
+               else tuple(m for m in MARKERS if m != GUI_OK_MARKER))
+    for m in markers:
         n = serial.count(m)
         req(n == 1, f"{m} count = {n} (need exactly 1)")
         positions.append(serial.find(m))
     ordered = (all(p >= 0 for p in positions)
                and positions == sorted(positions)
                and len(set(positions)) == len(positions))
-    req(ordered, "the seven OK markers appear in order")
+    req(ordered, f"the {len(markers)} OK markers appear in order")
     for m in FORBIDDEN_MARKERS:
         req(m not in serial, f"no {m} in serial")
     req("Triple fault" not in debug, "no triple fault in qemu-debug.log")
@@ -334,6 +459,37 @@ def judge(serial, debug, counters, early_exit):
         else:
             got = counters[name]
             req(got == want, f"{name} = {got:#x} (need {want:#x})")
+
+    # GUI-G1 verdict, kept separate from the shared checks above
+    if gui_mode == "ok":
+        req(GUI_SKIP_MARKER not in serial,
+            "no K64-GUI-SKIP in serial (ok mode)")
+        if ppm is None:
+            req(False, "screendump PPM captured")
+        else:
+            try:
+                w, h, px = parse_ppm(ppm)
+            except ValueError as e:
+                req(False, f"PPM parse: {e}")
+            else:
+                req((w, h) == (PPM_WIDTH, PPM_HEIGHT),
+                    f"PPM size {w}x{h} (need {PPM_WIDTH}x{PPM_HEIGHT})")
+                if (w, h) == (PPM_WIDTH, PPM_HEIGHT):
+                    for x, y, want in PPM_PROBES:
+                        off = (y * w + x) * 3
+                        got = (px[off] << 16) | (px[off + 1] << 8) | px[off + 2]
+                        req(got == want,
+                            f"pixel ({x},{y}) = {got:#08x} (need {want:#08x})")
+    else:
+        req(GUI_OK_MARKER not in serial,
+            "no K64-GUI-OK in serial (skip mode)")
+        n = serial.count(GUI_SKIP_MARKER)
+        req(n == 1, f"{GUI_SKIP_MARKER} count = {n} (need exactly 1)")
+        p_irq = serial.find("K64-IRQ-OK")
+        p_skip = serial.find(GUI_SKIP_MARKER)
+        p_found = serial.find("K64-FOUNDATION-OK")
+        req(p_irq >= 0 and p_skip > p_irq and p_found > p_skip,
+            "K64-GUI-SKIP sits between K64-IRQ-OK and K64-FOUNDATION-OK")
     return ok, lines
 
 
@@ -342,14 +498,15 @@ def qemu_argv(args, art, esp):
     # POPCNT and the MM module would take #UD, hence the +popcnt default
     argv = [args.qemu,
             "-accel", "tcg",
-            "-m", "128",
+            "-m", str(args.mem),
             "-cpu", args.cpu,
             "-smp", "1",
             "-bios", os.path.join(REPO, "OVMF.fd"),
             "-drive", f"driver=vvfat,rw=on,dir={esp}",
             "-nic", "none",
             "-display", "none",
-            "-monitor", "none",
+            "-monitor", ("unix:" + os.path.join(art, "monitor.sock")
+                         + ",server=on,wait=off"),
             "-serial", "file:" + os.path.join(art, "serial.log"),
             "-d", "int,guest_errors,cpu_reset",
             "-D", os.path.join(art, "qemu-debug.log"),
@@ -426,7 +583,7 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
             terminal_seen = True
             break
         time.sleep(0.5)
-    # give the kernel a moment to finish its report, then read the three
+    # give the kernel a moment to finish its report, then read the
     # memory-only counters while QEMU (and the halted kernel) still lives
     time.sleep(1.0)
     counters = {}
@@ -438,11 +595,35 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
     elif not terminal_seen:
         read_errors.append("counters not read: no terminal marker "
                            "before timeout")
+    # capture the screen before killing QEMU; screen.ppm stays in the
+    # artifact directory as forensic evidence in both GUI modes
+    ppm = None
+    ppm_path = os.path.join(art, "screen.ppm")
+    if proc.poll() is None:
+        try:
+            ppm = screendump(art)
+        except OSError as e:
+            read_errors.append(f"screendump failed: {e}")
+    # geometry evidence for the skip path: the live GOP mode the loader
+    # handed over (or zeros when the FRAMEBUFFER flag was never set)
+    fb_note = None
+    if (args.gui_skip and proc.poll() is None
+            and "video_fb_state" in counter_addrs):
+        try:
+            raw = gdb_read_mem(args.port, counter_addrs["video_fb_state"], 64)
+            b = raw.to_bytes(64, "little")
+            ready, = struct.unpack_from("<I", b, 0)
+            width, height = struct.unpack_from("<II", b, 8)
+            fb_note = (f"video_fb_state: ready={ready} "
+                       f"geometry={width}x{height} (skip evidence)")
+        except OSError as e:
+            read_errors.append(f"video_fb_state read: {e}")
     cleanup()
 
     serial = read_log(serial_path)
     debug = read_log(os.path.join(art, "qemu-debug.log"))
-    ok, lines = judge(serial, debug, counters, early_exit)
+    ok, lines = judge(serial, debug, counters, early_exit,
+                      gui_mode="skip" if args.gui_skip else "ok", ppm=ppm)
     print()
     print("=" * 72)
     print(f"run-qemu-debug: smoke verdict: {'PASS' if ok else 'FAIL'}")
@@ -451,6 +632,10 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
     for e in read_errors:
         print("  counter read: " + e)
     print(f"  terminal marker before timeout : {terminal_seen}")
+    print(f"  screendump PPM : {ppm_path} "
+          f"({'captured' if ppm is not None else 'MISSING'})")
+    if fb_note:
+        print("  " + fb_note)
     if serial:
         print("  serial.log:")
         for line in serial.splitlines():
@@ -463,6 +648,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--no-freeze", action="store_true",
                     help="smoke mode: run without -S under a timeout")
+    ap.add_argument("--gui-skip", action="store_true",
+                    help="expect the non-fatal GUI skip path "
+                         "(K64-GUI-SKIP) instead of K64-GUI-OK; no pixel "
+                         "assertions, video_fb_state is read as evidence")
+    ap.add_argument("--mem", type=int, default=128,
+                    help="guest RAM in MiB (default 128)")
     ap.add_argument("--port", type=int, default=1234,
                     help="gdbstub port on 127.0.0.1 (default 1234)")
     ap.add_argument("--timeout", type=float, default=90.0,
@@ -484,6 +675,12 @@ def main():
     art = os.path.abspath(args.art_dir or os.path.join(
         REPO, "build", "qemu-debug", f"{stamp}-{os.getpid()}"))
     os.makedirs(art, exist_ok=True)
+    # a reused art-dir must not leak a previous session's terminal marker
+    # into the smoke poll loop, nor a stale socket into the monitor bind
+    for stale in ("serial.log", "qemu-debug.log", "screen.ppm", "monitor.sock"):
+        p = os.path.join(art, stale)
+        if os.path.exists(p):
+            os.unlink(p)
     print(f"run-qemu-debug: session artifacts: {art}")
 
     bin_dir = build(art)
@@ -492,7 +689,8 @@ def main():
     elf = gen_symbols(art, bin_dir)
     counter_addrs, counter_errors = {}, []
     if args.no_freeze:
-        counter_addrs, counter_errors = counter_addresses(art)
+        extra = (("video_fb_state", 64),) if args.gui_skip else ()
+        counter_addrs, counter_errors = counter_addresses(art, extra)
         for e in counter_errors:
             print("run-qemu-debug: WARNING: " + e, file=sys.stderr)
 

@@ -15,7 +15,10 @@
 ;;   vmm_boot_protect over the CPU/MM/core data regions (RW/NX) ->
 ;;   K64-VMM-OK -> heap_init -> K64-HEAP-OK -> irq_init ->
 ;;   vmm_boot_protect over the IRQ data region -> irq_selftest ->
-;;   K64-IRQ-OK -> core_selftest -> K64-FOUNDATION-OK -> halt.
+;;   K64-IRQ-OK -> core_selftest -> the GUI-G1 stage (video_init ->
+;;   vmm_boot_protect over the video data region -> video_selftest ->
+;;   K64-GUI-OK, or K64-GUI-SKIP when the GOP is absent or the geometry
+;;   is not the frozen 1024x768) -> K64-FOUNDATION-OK -> halt.
 ;;
 ;; Nothing here ever executes STI itself; the only STI windows of the
 ;; whole kernel belong to irq_selftest, which always returns with the
@@ -167,6 +170,54 @@ k64_foundation_init:
         test    eax, eax
         jnz     .selftest_fail
 
+        ; ---------------- GUI-G1: the framebuffer closed loop ----------------
+        ; Runs AFTER core_selftest on purpose: the framebuffer mapping
+        ; allocates its page tables after the leg 7 accounting baseline,
+        ; so the frozen 3/3/3 table delta stays untouched.
+        ;
+        ; A missing GOP (FLAG_FRAMEBUFFER clear) or a geometry G1 does
+        ; not support (video_init / video_selftest return ENOTSUP) is a
+        ; non fatal skip: K64-GUI-SKIP and straight on to FOUNDATION-OK.
+        ; Frozen task-85 policy: ENOTSUP only ever comes from the video
+        ; geometry gates; a mapping fault inside video_init returns EIO
+        ; and every other failure is a real bring-up fault that panics.
+        mov     rax, [rbp-8]
+        mov     rax, [rax + K64BOOTINFO.flags]
+        test    rax, K64BOOTINFO_FLAG_FRAMEBUFFER
+        jz      .gui_skip               ; no GOP handover, nothing to map
+
+        mov     qword [rbp-16], kmsg_fail_gui
+        mov     rcx, [rbp-8]            ; BootInfo, identity mapped
+        call    video_init
+        cmp     eax, VIDEO_ENOTSUP
+        je      .gui_skip               ; foreign format or oversized FB
+        test    eax, eax
+        jnz     .fail
+
+        ; the video data region becomes RW/NX like the other blocks
+        mov     qword [rbp-16], kmsg_fail_protect
+        mov     rcx, video_data_start
+        mov     rdx, (video_data_end - video_data_start) / K64_PAGE_SIZE
+        mov     r8, MM_MAP_RW or MM_MAP_NX
+        call    vmm_boot_protect
+        test    eax, eax
+        jnz     .fail
+
+        ; the frozen pattern; a geometry other than exactly 1024x768 is
+        ; refused with ENOTSUP and skips the milestone, never panics
+        mov     qword [rbp-16], kmsg_fail_gui
+        call    video_selftest
+        cmp     eax, VIDEO_ENOTSUP
+        je      .gui_skip
+        test    eax, eax
+        jnz     .fail
+
+        k64_report kmsg_gui_ok, .fail
+        jmp     .gui_done
+.gui_skip:
+        k64_report kmsg_gui_skip, .fail
+.gui_done:
+
         k64_report kmsg_foundation_ok, .fail
         jmp     cpu_halt_forever
 
@@ -195,3 +246,12 @@ k64_foundation_init:
         call    cpu_panic
         ; cpu_panic never returns; halt is the belt and braces exit
         jmp     cpu_halt_forever
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; GUI-G1 messages, read only constants emitted with the foundation code
+; like the first stage kmsg_* block of kernel64.asm; the mutable core
+; data region stays the last bytes of the image in core/selftest.inc.
+; The skip marker is not a milestone: the smoke judges it separately.
+kmsg_gui_ok           db 'K64-GUI-OK', 13, 10, 0
+kmsg_gui_skip         db 'K64-GUI-SKIP', 13, 10, 0
+kmsg_fail_gui         db 'foundation: video bring-up failed', 0

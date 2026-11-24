@@ -578,3 +578,146 @@ end if
 if K64_CORE_ACCOUNT_TABLES <> 3
         err 'the leg7 accounting expectation is frozen at three tables'
 end if
+
+; ------------------------------------------------------------------
+; GUI-G1: the shared K64_VIDEO_* spelling of the video layer contract
+; and the three copy comparison against the private VIDEO_* values.
+; Appended by task 78; every assertion above stays untouched. Pure
+; constant math, zero bytes emitted.
+;
+; The GUI stage runs AFTER core_selftest, so the framebuffer page
+; tables never enter the leg 7 baseline and K64_CORE_ACCOUNT_TABLES
+; stays frozen at three.
+; ------------------------------------------------------------------
+
+K64_VIDEO_FB_VA        = 0xFFFFC00001000000
+K64_VIDEO_FB_VA_LIMIT  = 0xFFFFC00002000000
+K64_VIDEO_FB_MAX_SIZE  = 0x1000000
+K64_VIDEO_FB_MAX_PAGES = 4096
+K64_VIDEO_MAX_WIDTH    = 2560
+K64_VIDEO_MAX_HEIGHT   = 1600
+K64_VIDEO_BPP          = 4
+K64_VIDEO_FMT_BGRX     = 1
+K64_VIDEO_FONT_STRIDE  = 16
+K64_VIDEO_FONT_BYTES   = 1520
+K64_VIDEO_ST_WIDTH     = 1024
+K64_VIDEO_ST_HEIGHT    = 768
+K64_VIDEO_ST_BARS      = 8
+K64_VIDEO_ST_BAR_W     = 128
+K64_VIDEO_ST_RECT_X    = 412
+K64_VIDEO_ST_RECT_Y    = 284
+K64_VIDEO_ST_RECT_W    = 200
+K64_VIDEO_ST_RECT_H    = 200
+K64_VIDEO_ST_RECT_COLOR = 0x808080
+K64_VIDEO_ST_TEXT_X    = 8
+K64_VIDEO_ST_TEXT_Y    = 8
+K64_VIDEO_ST_TEXT_LEN  = 10
+
+if K64_VIDEO_FB_VA <> VIDEO_FB_VA
+        err 'FB VA disagrees with the video copy'
+end if
+if K64_VIDEO_FB_VA_LIMIT <> VIDEO_FB_VA_LIMIT
+        err 'FB VA limit disagrees with the video copy'
+end if
+if K64_VIDEO_FB_MAX_SIZE <> VIDEO_FB_MAX_SIZE | K64_VIDEO_FB_MAX_PAGES <> VIDEO_FB_MAX_PAGES
+        err 'FB window size/page count disagree with the video copy'
+end if
+if K64_VIDEO_MAX_WIDTH <> VIDEO_MAX_WIDTH | K64_VIDEO_MAX_HEIGHT <> VIDEO_MAX_HEIGHT
+        err 'maximum geometry disagrees with the video copy'
+end if
+if K64_VIDEO_BPP <> VIDEO_BPP | K64_VIDEO_FMT_BGRX <> VIDEO_FMT_BGRX
+        err 'pixel depth/format disagree with the video copy'
+end if
+if K64_VIDEO_FONT_STRIDE <> VIDEO_FONT_STRIDE | K64_VIDEO_FONT_BYTES <> VIDEO_FONT_BYTES
+        err 'font stride/size disagree with the video copy'
+end if
+if K64_VIDEO_ST_WIDTH <> VIDEO_ST_WIDTH | K64_VIDEO_ST_HEIGHT <> VIDEO_ST_HEIGHT
+        err 'pattern geometry disagrees with the video copy'
+end if
+if K64_VIDEO_ST_BARS <> VIDEO_ST_BARS | K64_VIDEO_ST_BAR_W <> VIDEO_ST_BAR_W
+        err 'pattern bar layout disagrees with the video copy'
+end if
+if K64_VIDEO_ST_RECT_X <> VIDEO_ST_RECT_X | K64_VIDEO_ST_RECT_Y <> VIDEO_ST_RECT_Y
+        err 'pattern rectangle origin disagrees with the video copy'
+end if
+if K64_VIDEO_ST_RECT_W <> VIDEO_ST_RECT_W | K64_VIDEO_ST_RECT_H <> VIDEO_ST_RECT_H
+        err 'pattern rectangle size disagrees with the video copy'
+end if
+if K64_VIDEO_ST_RECT_COLOR <> VIDEO_ST_RECT_COLOR
+        err 'pattern rectangle color disagrees with the video copy'
+end if
+if K64_VIDEO_ST_TEXT_X <> VIDEO_ST_TEXT_X | K64_VIDEO_ST_TEXT_Y <> VIDEO_ST_TEXT_Y
+        err 'pattern text origin disagrees with the video copy'
+end if
+if K64_VIDEO_ST_TEXT_LEN <> VIDEO_ST_TEXT_LEN
+        err 'pattern text length disagrees with the video copy'
+end if
+
+; the video status codes are the shared ones, a vmm_map_mmio failure
+; propagates through video_init without translation
+if K64_OK <> VIDEO_OK | K64_EINVAL <> VIDEO_EINVAL | K64_ENOTSUP <> VIDEO_ENOTSUP
+        err 'video status codes disagree with the shared copy'
+end if
+if K64_ENOTREADY <> VIDEO_ENOTREADY | K64_EALREADY <> VIDEO_EALREADY | K64_EIO <> VIDEO_EIO
+        err 'video status codes disagree with the shared copy'
+end if
+
+; the video private BootInfo copy must describe the same record and the
+; same framebuffer feature flag the loader publishes
+if VIDEO_BOOTINFO_SIZE <> sizeof.K64BOOTINFO
+        err 'BootInfo size disagrees with the video copy'
+end if
+if VIDEO_FLAG_FRAMEBUFFER <> K64BOOTINFO_FLAG_FRAMEBUFFER
+        err 'FRAMEBUFFER flag disagrees with the video copy'
+end if
+if VIDEO_BOOTINFO.flags <> K64BOOTINFO.flags
+        err 'BootInfo.flags offset disagrees with the video copy'
+end if
+if VIDEO_BOOTINFO.gop_framebuffer_addr <> K64BOOTINFO.gop_framebuffer_addr | VIDEO_BOOTINFO.gop_framebuffer_size <> K64BOOTINFO.gop_framebuffer_size
+        err 'GOP address/size offsets disagree with the video copy'
+end if
+if VIDEO_BOOTINFO.gop_width <> K64BOOTINFO.gop_width | VIDEO_BOOTINFO.gop_height <> K64BOOTINFO.gop_height
+        err 'GOP geometry offsets disagree with the video copy'
+end if
+if VIDEO_BOOTINFO.gop_pixel_format <> K64BOOTINFO.gop_pixel_format | VIDEO_BOOTINFO.gop_pixels_per_line <> K64BOOTINFO.gop_pixels_per_line
+        err 'GOP format/pitch offsets disagree with the video copy'
+end if
+
+; FB window placement premises: above the heap, inside the public
+; window, under the window base PML4 slot, never under the core test
+; slot, and never reaching into the LAPIC MMIO page of the IRQ layer
+if K64_VIDEO_FB_VA <> K64_HEAP_LIMIT
+        err 'the FB window must start exactly at the heap limit'
+end if
+if K64_VIDEO_FB_VA < K64_VMM_WINDOW_BASE | K64_VIDEO_FB_VA_LIMIT > K64_VMM_WINDOW_LIMIT
+        err 'the FB window must stay inside the mapping window'
+end if
+if K64_VIDEO_FB_VA mod K64_PAGE_SIZE
+        err 'the FB window must be page aligned'
+end if
+if ((K64_VIDEO_FB_VA shr 39) and 0x1FF) <> ((K64_VMM_WINDOW_BASE shr 39) and 0x1FF)
+        err 'the FB window must share the window base PML4 slot'
+end if
+if ((K64_VIDEO_FB_VA shr 39) and 0x1FF) = K64_CORE_TEST_SLOT
+        err 'the FB window must not use the core test PML4 slot'
+end if
+if K64_VIDEO_FB_VA >= K64_MMIO_LAPIC_VA
+        err 'the FB window must start below the LAPIC MMIO VA'
+end if
+if K64_VIDEO_FB_VA + K64_VIDEO_FB_MAX_SIZE > K64_MMIO_LAPIC_VA
+        err 'the FB window must never reach the LAPIC MMIO VA'
+end if
+if K64_VIDEO_FB_VA_LIMIT <> K64_MMIO_LAPIC_VA
+        err 'the FB window limit is the LAPIC MMIO VA'
+end if
+if K64_VIDEO_MAX_WIDTH * K64_VIDEO_MAX_HEIGHT * K64_VIDEO_BPP > K64_VIDEO_FB_MAX_SIZE
+        err 'the maximum geometry must fit the FB window'
+end if
+
+; the frozen pattern relations the screendump forensics rely on
+if K64_VIDEO_ST_WIDTH <> K64_VIDEO_ST_BARS * K64_VIDEO_ST_BAR_W
+        err 'the bars must tile the reference width exactly'
+end if
+if K64_VIDEO_ST_RECT_X <> (K64_VIDEO_ST_WIDTH - K64_VIDEO_ST_RECT_W) / 2 | K64_VIDEO_ST_RECT_Y <> (K64_VIDEO_ST_HEIGHT - K64_VIDEO_ST_RECT_H) / 2
+        err 'the pattern rectangle must stay centered'
+end if
