@@ -111,6 +111,11 @@ CPU_GDT_OFF_TSS     = 24
 CPU_GDT_NULL_VALUE  = 0x0000000000000000
 CPU_GDT_CODE_VALUE  = 0x00AF9A000000FFFF     ; base 0, limit 4 GiB, L=1, DPL0
 CPU_GDT_DATA_VALUE  = 0x00CF92000000FFFF     ; base 0, limit 4 GiB, DPL0
+; the CPU sets the accessed bit (access byte bit 0, qword bit 40) when the
+; segment is loaded: retfq for CS, mov for DS/ES/SS. Runtime compares must
+; mask it off; the image is built with it clear.
+CPU_GDT_DESC_ACCESSED = 1 shl 40
+CPU_GDT_DESC_RUNTIME_MASK = not CPU_GDT_DESC_ACCESSED
 CPU_GDTR_SIZE       = 10                    ; packed limit(2) + base(8)
 CPU_GDTR_LIMIT      = CPU_GDT_SIZE - 1
 
@@ -557,6 +562,12 @@ if CPU_GDT_OFF_DATA <> CPU_SEL_DATA
 end if
 if CPU_GDT_OFF_TSS + CPU_TSS_DESC_SIZE <> CPU_GDT_SIZE
         err 'GDT must end right after the TSS descriptor'
+end if
+if (CPU_GDT_CODE_VALUE and CPU_GDT_DESC_ACCESSED) <> 0
+        err 'the code descriptor is built with the accessed bit clear'
+end if
+if (CPU_GDT_DATA_VALUE and CPU_GDT_DESC_ACCESSED) <> 0
+        err 'the data descriptor is built with the accessed bit clear'
 end if
 if CPU_GDTR_SIZE <> 10
         err 'GDTR must be the packed 10 byte form'

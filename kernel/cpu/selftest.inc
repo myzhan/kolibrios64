@@ -105,11 +105,19 @@ cpu_selftest:
         mov     rax, [cpu_gdt + CPU_GDT_OFF_NULL]
         test    rax, rax
         jnz     cpu_selftest_gdt_bad
+        ; loading a segment makes the CPU write the accessed bit (qword
+        ; bit 40) into the descriptor in memory: retfq for CS, mov for
+        ; DS/ES/SS. Mask it off before comparing, the image keeps the
+        ; built value with the bit clear.
         mov     rax, [cpu_gdt + CPU_GDT_OFF_CODE]
+        mov     rdx, CPU_GDT_DESC_RUNTIME_MASK
+        and     rax, rdx                    ; CS was reloaded through retfq
         mov     rdx, CPU_GDT_CODE_VALUE
         cmp     rax, rdx
         jne     cpu_selftest_gdt_bad
         mov     rax, [cpu_gdt + CPU_GDT_OFF_DATA]
+        mov     rdx, CPU_GDT_DESC_RUNTIME_MASK
+        and     rax, rdx                    ; DS/ES/SS were loaded with mov
         mov     rdx, CPU_GDT_DATA_VALUE
         cmp     rax, rdx
         jne     cpu_selftest_gdt_bad

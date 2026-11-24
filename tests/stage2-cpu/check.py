@@ -52,6 +52,8 @@ GDT_SIZE = 40
 GDT_ALIGN = 16
 GDT_CODE_VALUE = 0x00AF9A000000FFFF
 GDT_DATA_VALUE = 0x00CF92000000FFFF
+GDT_DESC_ACCESSED = 1 << 40
+GDT_RUNTIME_MASK = ((1 << 64) - 1) ^ GDT_DESC_ACCESSED
 SEL_CODE = 0x08
 SEL_DATA = 0x10
 SEL_TSS = 0x18
@@ -1256,6 +1258,45 @@ def check_tss_runtime_type(rep, img):
               'the image is built with 0x89; LTR changes it at run time')
 
 
+def check_gdt_runtime_mask(rep, img):
+    """Loading a segment sets its accessed bit; the compare must mask it.
+
+    retfq into CS and mov into DS/ES/SS make the CPU write the A bit
+    (qword bit 40) into the GDT in memory, so an exact compare against the
+    built value fails on real hardware. The self test has to AND the
+    observed descriptor with a mask that clears exactly that bit before
+    comparing, while the image itself stays built with the bit clear.
+    """
+    d = img.data
+    at, end = img.at('cpu_selftest'), img.at('cpu_init')
+    body = d[at:end]
+    for name, slot, value in (('code', 'gdt_code', GDT_CODE_VALUE),
+                              ('data', 'gdt_data', GDT_DATA_VALUE)):
+        reads = [off - at for target, off in
+                 rip_targets(img, at, end, b'\x48\x8B\x05')
+                 if target == img[slot]]
+        rep.equal('selftest.%s_read_once' % name, len(reads), 1)
+        if len(reads) != 1:
+            continue
+        p = reads[0]
+        rep.check('selftest.%s_masks_the_observed_value' % name,
+                  body[p + 7:p + 9] == b'\x48\xBA' and
+                  body[p + 17:p + 20] == bytes.fromhex('48 21 D0'),
+                  'mov rdx, mask / and rax, rdx right after the read')
+        mask = u64(body, p + 9) if body[p + 7:p + 9] == b'\x48\xBA' else None
+        rep.check('selftest.%s_mask_clears_only_accessed' % name,
+                  mask == GDT_RUNTIME_MASK,
+                  'mask %s' % (hex(mask) if mask is not None else 'missing'))
+        rep.check('selftest.%s_compares_the_built_value' % name,
+                  body[p + 20:p + 22] == b'\x48\xBA' and
+                  u64(body, p + 22) == value and
+                  body[p + 30:p + 33] == bytes.fromhex('48 39 D0'),
+                  'mov rdx, built value / cmp rax, rdx')
+        rep.check('gdt.%s_image_accessed_clear' % name,
+                  u64(d, img[slot]) & GDT_DESC_ACCESSED == 0,
+                  'the image keeps the built value; only hardware sets A')
+
+
 def check_selftest(rep, img):
     """The self test must take the six resumable vectors, nothing else.
 
@@ -1604,6 +1645,33 @@ FIXTURES = [
     ('tss-type-image-busy', 'kernel/cpu/data.inc',
      '        db      CPU_TSS_DESC_TYPE\n', '        db      CPU_TSS_DESC_TYPE_BUSY\n',
      'check'),
+
+    # ---- task 64: the accessed bit the CPU writes on segment load ------
+    # an exact compare of the data descriptor fails once DS/ES/SS are loaded
+    ('gdt-data-exact-compare', 'kernel/cpu/selftest.inc',
+     '        mov     rax, [cpu_gdt + CPU_GDT_OFF_DATA]\n'
+     '        mov     rdx, CPU_GDT_DESC_RUNTIME_MASK\n'
+     '        and     rax, rdx                    ; DS/ES/SS were loaded with mov\n',
+     '        mov     rax, [cpu_gdt + CPU_GDT_OFF_DATA]\n', 'check'),
+    # CS is reloaded through retfq, so the code descriptor gets A set too
+    ('gdt-code-exact-compare', 'kernel/cpu/selftest.inc',
+     '        mov     rax, [cpu_gdt + CPU_GDT_OFF_CODE]\n'
+     '        mov     rdx, CPU_GDT_DESC_RUNTIME_MASK\n'
+     '        and     rax, rdx                    ; CS was reloaded through retfq\n',
+     '        mov     rax, [cpu_gdt + CPU_GDT_OFF_CODE]\n', 'check'),
+    # a mask that clears some other bit leaves A in the compare
+    ('gdt-mask-wrong-bit', 'kernel/cpu/api.inc',
+     'CPU_GDT_DESC_RUNTIME_MASK = not CPU_GDT_DESC_ACCESSED',
+     'CPU_GDT_DESC_RUNTIME_MASK = not (1 shl 41)', 'check'),
+    # the image must stay built with A clear; only hardware sets it
+    ('gdt-data-image-accessed', 'kernel/cpu/data.inc',
+     '        dq      CPU_GDT_DATA_VALUE\n',
+     '        dq      (CPU_GDT_DATA_VALUE or CPU_GDT_DESC_ACCESSED)\n',
+     'check'),
+    # the built constant itself must keep A clear: the assertion fires
+    ('gdt-data-constant-accessed', 'kernel/cpu/api.inc',
+     'CPU_GDT_DATA_VALUE  = 0x00CF92000000FFFF',
+     'CPU_GDT_DATA_VALUE  = 0x00CF93000000FFFF', 'assemble'),
 ]
 
 
@@ -1691,6 +1759,7 @@ def main(argv):
     check_trap_api(rep, img)
     check_selftest_abi(rep, img)
     check_tss_runtime_type(rep, img)
+    check_gdt_runtime_mask(rep, img)
     check_selftest(rep, img)
     check_sources(rep, root)
     check_position_independence(rep, asm_, root, out, img)

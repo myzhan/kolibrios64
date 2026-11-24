@@ -369,16 +369,36 @@ heap_selftest:
         or      r12d, 4
 
 .step3:
-        ; step 3: a failed growth rolls the mapping and the data pages back
+        ; step 3: a failed growth rolls the mapping and the data pages back.
+        ; The failure hook lives in the table allocator only, so the
+        ; injection must force a fresh page table: one PT spans 2 MiB, so
+        ; first grow the heap up to the next 2 MiB boundary (no hook), and
+        ; only then arm the hook -- the next page needs a new PT and the
+        ; injection is guaranteed to fire. A growth inside an existing PT
+        ; never calls the table allocator and could not be failed this way.
+        lea     rcx, [mm_heap_stats_scratch]
+        call    heap_get_stats
+        test    eax, eax
+        jnz     .fail3
+        mov     rcx, qword [mm_heap_stats_scratch + MM_HEAP_STATS.mapped_end]
+        sub     rcx, qword [mm_heap_stats_scratch + MM_HEAP_STATS.base]
+        add     rcx, 0x1FFFFF
+        and     rcx, -0x200000            ; next 2 MiB boundary >= mapped
+        sub     rcx, qword [mm_heap_stats_scratch + MM_HEAP_STATS.brk]
+        add     rcx, qword [mm_heap_stats_scratch + MM_HEAP_STATS.base]
+        jz      .at_boundary              ; already on a boundary
+        mov     rdx, 16
+        call    heap_alloc
+        test    eax, eax
+        jnz     .fail3
+.at_boundary:
         lea     rcx, [mm_heap_stats_scratch]
         call    heap_get_stats
         test    eax, eax
         jnz     .fail3
         mov     r13, qword [mm_heap_stats_scratch + MM_HEAP_STATS.brk]
         mov     r14, qword [mm_heap_stats_scratch + MM_HEAP_STATS.mapped_end]
-        mov     rcx, r14
-        sub     rcx, qword [mm_heap_stats_scratch + MM_HEAP_STATS.base]
-        add     rcx, MM_HEAP_INITIAL
+        mov     rcx, MM_PAGE_SIZE
         mov     rdx, 16
         mov     dword [mm_test_fail], 1
         call    heap_alloc

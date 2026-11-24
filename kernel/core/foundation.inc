@@ -1,0 +1,169 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;                                                              ;;
+;; Copyright (C) KolibriOS team 2025-2025. All rights reserved. ;;
+;; Distributed under terms of the GNU General Public License v2 ;;
+;;                                                              ;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;
+;; Core integration: the foundation bring-up orchestration.
+;;
+;; Runs on the BSP with IF = 0 after the first stage report, on the kernel
+;; stack the entry point established. The fixed order is:
+;;
+;;   fill K64_INIT_PARAMS -> cpu_init (GDT -> RSP0 -> IDT, no output in
+;;   between) -> K64-CPU-OK -> pmm_init -> K64-PMM-OK -> vmm_init ->
+;;   vmm_boot_protect over the CPU/MM/core data regions (RW/NX) ->
+;;   K64-VMM-OK -> heap_init -> K64-HEAP-OK -> core_selftest ->
+;;   K64-FOUNDATION-OK -> halt.
+;;
+;; Nothing here ever executes STI and nothing calls back into UEFI. Every
+;; failure goes through cpu_panic, which reports on COM1 within a bound
+;; and halts on its own stack. All console output uses the new ABI CPU
+;; module functions, never the first stage com1_* helpers.
+;;
+
+; bounded marker output through the new ABI console, inlined so the
+; caller frame (RSP mod 16 = 0) is preserved for cpu_com1_puts
+macro k64_report msg*, fail*
+        mov     rcx, msg
+        mov     rdx, CPU_PUTS_MAX
+        call    cpu_com1_puts
+        test    eax, eax
+        jnz     fail
+end macro
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; bring up the foundation modules and run the core self test
+; in
+; rcx = physical address of K64BOOTINFO, identity mapped
+; out
+; never returns on success: reports K64-FOUNDATION-OK and halts;
+; any failure panics and halts
+; destroys everything (no caller state survives by design)
+k64_foundation_init:
+        push    rbp
+        mov     rbp, rsp
+        sub     rsp, K64_STACK_FRAME
+        cld
+        mov     [rbp-8], rcx            ; BootInfo physical address
+
+        ; ---------------- the shared handover parameters ----------------
+        ; filled before any module runs, in core static data so the VA is
+        ; canonical high half and 8 byte aligned as cpu_init demands
+        mov     dword [core_init_params + K64_INIT_OFF_VERSION], K64_INIT_VERSION
+        mov     dword [core_init_params + K64_INIT_OFF_SIZE], K64_INIT_SIZE
+        mov     rax, [rbp-8]
+        mov     [core_init_params + K64_INIT_OFF_BOOTINFO_VA], rax
+        mov     [core_init_params + K64_INIT_OFF_BOOTINFO_PHYS], rax
+        mov     rax, cr3
+        and     rax, not (K64_PAGE_SIZE - 1)
+        mov     [core_init_params + K64_INIT_OFF_CR3_PHYS], rax
+        ; the stack top is the exact BootInfo range conversion, not the
+        ; current RSP: KERNEL_BASE + (stack_phys_end - kernel_phys_start)
+        mov     rax, [rbp-8]
+        mov     rdx, [rax + K64BOOTINFO.stack_phys_end]
+        sub     rdx, [rax + K64BOOTINFO.kernel_phys_start]
+        add     rdx, VIRT_KERNEL_BASE
+        mov     [core_init_params + K64_INIT_OFF_STACK_TOP], rdx
+        mov     qword [core_init_params + K64_INIT_OFF_FLAGS], K64_INIT_FLAGS_VALUE
+        mov     qword [core_init_params + K64_INIT_OFF_RESERVED0], K64_INIT_RESERVED_VALUE
+        mov     qword [core_init_params + K64_INIT_OFF_RESERVED1], K64_INIT_RESERVED_VALUE
+
+        ; ---------------- CPU: GDT -> RSP0 -> IDT ----------------
+        ; cpu_init performs the descriptor handover with no output and no
+        ; other initialisation between LGDT and LIDT
+        mov     qword [rbp-16], kmsg_fail_cpu
+        mov     rcx, core_init_params
+        call    cpu_init
+        test    eax, eax
+        jnz     .fail
+
+        ; the console the rest of this path reports through
+        mov     qword [rbp-16], kmsg_fail_com1
+        call    cpu_com1_init
+        test    eax, eax
+        jnz     .fail
+
+        k64_report kmsg_cpu_ok, .fail
+
+        ; ---------------- physical allocator ----------------
+        mov     qword [rbp-16], kmsg_fail_pmm
+        mov     rcx, core_init_params
+        call    pmm_init
+        test    eax, eax
+        jnz     .fail
+
+        k64_report kmsg_pmm_ok, .fail
+
+        ; ---------------- virtual memory on the loader CR3 ----------------
+        mov     qword [rbp-16], kmsg_fail_vmm
+        mov     rcx, core_init_params
+        call    vmm_init
+        test    eax, eax
+        jnz     .fail
+
+        ; the module data regions become RW/NX: stacks, bitmaps, tables
+        ; and scratch are data, never instructions
+        mov     qword [rbp-16], kmsg_fail_protect
+        mov     rcx, cpu_data_start
+        mov     rdx, (cpu_data_end - cpu_data_start) / K64_PAGE_SIZE
+        mov     r8, MM_MAP_RW or MM_MAP_NX
+        call    vmm_boot_protect
+        test    eax, eax
+        jnz     .fail
+        mov     rcx, mm_data_start
+        mov     rdx, (mm_data_end - mm_data_start) / K64_PAGE_SIZE
+        mov     r8, MM_MAP_RW or MM_MAP_NX
+        call    vmm_boot_protect
+        test    eax, eax
+        jnz     .fail
+        mov     rcx, core_data_start
+        mov     rdx, (core_data_end - core_data_start) / K64_PAGE_SIZE
+        mov     r8, MM_MAP_RW or MM_MAP_NX
+        call    vmm_boot_protect
+        test    eax, eax
+        jnz     .fail
+
+        k64_report kmsg_vmm_ok, .fail
+
+        ; ---------------- the early bump heap ----------------
+        mov     qword [rbp-16], kmsg_fail_heap
+        call    heap_init
+        test    eax, eax
+        jnz     .fail
+
+        k64_report kmsg_heap_ok, .fail
+
+        ; ---------------- the cross module core self test ----------------
+        call    core_selftest
+        test    eax, eax
+        jnz     .selftest_fail
+
+        k64_report kmsg_foundation_ok, .fail
+        jmp     cpu_halt_forever
+
+.selftest_fail:
+        ; report the leg mask before the panic so the serial log names
+        ; the failing probe, then take the standard fatal path
+        mov     [rbp-24], eax
+        mov     rcx, kmsg_selftest_mask
+        mov     rdx, CPU_PUTS_MAX
+        call    cpu_com1_puts
+        mov     rcx, [core_selftest_mask]
+        mov     rdx, CPU_PUTHEX_DIGITS
+        call    cpu_com1_puthex
+        mov     rcx, kmsg_core_nl
+        mov     rdx, CPU_PUTS_MAX
+        call    cpu_com1_puts
+        mov     eax, [rbp-24]
+        mov     qword [rbp-16], kmsg_fail_selftest
+        jmp     .fail
+
+.fail:
+        ; eax = the status of the failed step, [rbp-16] = its message
+        movsxd  r8, eax
+        xor     edx, edx
+        mov     rcx, [rbp-16]
+        call    cpu_panic
+        ; cpu_panic never returns; halt is the belt and braces exit
+        jmp     cpu_halt_forever

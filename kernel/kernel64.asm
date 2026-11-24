@@ -286,6 +286,11 @@ k64_entry:
         mov     rsi, kmsg_newline
         call    com1_puts
 
+        ; the first stage report is complete: hand over to the foundation
+        ; (CPU descriptors, PMM, VMM, heap and the core self test). It
+        ; reports its own milestones and halts, on success it never returns.
+        mov     rcx, r15
+        call    k64_foundation_init
         jmp     halt_forever
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -335,3 +340,24 @@ kmsg_fail_memmap      db 'K64-BOOT-FAIL memory map'
                       db 13, 10, 0
 kmsg_fail_ranges      db 'K64-BOOT-FAIL kernel and stack ranges'
                       db 13, 10, 0
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; stage 2 modules and the core integration
+;
+; Each module emits all of its code first and its data region last, 4 KiB
+; aligned at both ends and really present in the file. MM_HOSTED keeps
+; mm.asm from emitting its standalone format/org pair. The core files
+; close the image: nothing may follow core_data_end.
+
+include 'cpu/cpu.asm'
+
+MM_HOSTED = 1
+include 'mm/mm.asm'
+
+include 'core/contracts.inc'
+include 'core/foundation.inc'
+include 'core/selftest.inc'
+
+if $ <> core_data_end
+        err 'nothing may follow the core data region'
+end if

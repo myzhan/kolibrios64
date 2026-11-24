@@ -20,6 +20,13 @@
 ;; that is folded into bit 0 of its own group so the aggregated result is
 ;; never a silent success.
 ;;
+;; Hook hit accounting behind the frozen smoke verdict hook_hits = 3:
+;; mm_pmm_hook increments mm_test_fail_hits on EVERY armed call, the
+;; pass-through ones included. vmm_selftest step5 arms countdown = 2
+;; (2 hits) and heap_selftest step3 arms countdown = 1 (1 hit): 2 + 1 = 3.
+;; Adding or removing an armed scenario changes this total -- update this
+;; note AND the counter assertion in tools/run-qemu-debug.py together.
+;;
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; run every layer self test
