@@ -371,6 +371,14 @@ include 'input/input.asm'
 VIDEO_HOSTED = 1
 include 'video/video.asm'
 
+; DESKTOP-v1: the minimal shell calls the video primitives, the input
+; IOAPIC helper and irq_sti_wait; desktop_run is the second legal STI
+; owner of the kernel. DESKTOP_HOSTED keeps desktop.asm from emitting
+; its standalone format/org pair. Its data region is protected RW/NX
+; by the foundation desktop stage; the core files still close the image.
+DESKTOP_HOSTED = 1
+include 'desktop/desktop.asm'
+
 include 'core/contracts.inc'
 include 'core/foundation.inc'
 include 'core/selftest.inc'

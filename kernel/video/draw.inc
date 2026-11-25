@@ -232,3 +232,75 @@ video_blit_rect:
 .done:
         video_leave
         ret
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; read a rectangle from the framebuffer into a kernel buffer
+; in
+; rcx = destination kernel VA, tightly packed w * 4 byte rows,
+; edx = src x, r8d = src y, r9d = w, [rsp+40] = h
+; out
+; eax = VIDEO_OK (a fully clipped rectangle is a silent no-op),
+;       VIDEO_EINVAL for a null destination, VIDEO_ENOTREADY
+; note
+; task 96, the ONLY sanctioned framebuffer read path: the desktop
+; cursor saves the background under the sprite before drawing it.
+; video_selftest stays draw-only, its evidence is the external QEMU
+; screendump, never this API. Exact mirror of video_blit_rect with
+; the direction reversed: source rows are stride bytes apart (r13
+; compensation), destination rows stay packed at the ORIGINAL w, so
+; after a right edge clip every row advance skips (orig_w - clipped_w)
+; * 4 destination bytes (r14). No color conversion happens, the copy
+; moves the raw BGRX dwords.
+video_readback_rect:
+        mov     eax, dword [rsp+40]     ; fifth argument, MS x64 stack slot
+        video_enter
+        cld
+        mov     r12, rcx                ; destination
+        mov     ecx, edx                ; x
+        mov     edx, r8d                ; y
+        mov     r14d, r9d               ; original w, saved before the clip
+        mov     r8d, r9d                ; w
+        mov     r9, rax                 ; h, already zero extended
+        test    r12, r12
+        jz      .invalid
+        cmp     dword [video_fb_state + VIDEO_FB_STATE.ready], 0
+        je      .notready
+        call    video_clip_rect
+        test    eax, eax
+        jz      .clipped
+        mov     r15, r8                 ; w
+        mov     rbx, r9                 ; h
+        mov     rdi, r12
+        ; row base = fb_va + y * stride + x * 4
+        mov     eax, dword [video_fb_state + VIDEO_FB_STATE.stride]
+        imul    rax, rdx
+        mov     rsi, qword [video_fb_state + VIDEO_FB_STATE.fb_va]
+        add     rsi, rax
+        lea     rsi, [rsi + rcx*4]
+        ; source rows are stride bytes apart, destination rows w * 4
+        mov     r13d, dword [video_fb_state + VIDEO_FB_STATE.stride]
+        mov     rax, r15
+        shl     rax, 2
+        sub     r13, rax
+        ; the destination stays packed at the original w: after a right
+        ; edge clip each row must skip (orig_w - clipped_w) * 4 dest bytes
+        sub     r14, r8
+        shl     r14, 2
+.row:
+        mov     rcx, r15
+        rep movsd
+        add     rsi, r13                ; source row pitch compensation
+        add     rdi, r14
+        dec     rbx
+        jnz     .row
+.clipped:
+        xor     eax, eax
+        jmp     .done
+.invalid:
+        mov     eax, VIDEO_EINVAL
+        jmp     .done
+.notready:
+        mov     eax, VIDEO_ENOTREADY
+.done:
+        video_leave
+        ret

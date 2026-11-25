@@ -180,8 +180,8 @@ MANIFEST_NAMES = """
 magic version org
 video_data_start video_data_end video_fb_state video_selftest_mask
 mm_data_start mm_data_end
-video_init video_putpixel video_fill_rect video_blit_rect video_puts
-video_selftest video_bgrx video_clip_rect vmm_map_mmio
+video_init video_putpixel video_fill_rect video_blit_rect video_readback_rect
+video_puts video_selftest video_bgrx video_clip_rect vmm_map_mmio
 video_font video_font_end video_st_colors video_st_text
 VIDEO_FB_VA VIDEO_FB_VA_LIMIT VIDEO_FB_MAX_SIZE VIDEO_FB_MAX_PAGES
 VIDEO_MAX_WIDTH VIDEO_MAX_HEIGHT VIDEO_BPP VIDEO_FMT_BGRX
@@ -207,7 +207,8 @@ VIDEO_EIO MM_MMIO_LAPIC_VA MM_HEAP_LIMIT VIDEO_PAGE_SIZE
 MANIFEST_BYTES = len(MANIFEST_NAMES) * 8
 
 VIDEO_ENTRIES = ['video_init', 'video_putpixel', 'video_fill_rect',
-                 'video_blit_rect', 'video_puts', 'video_selftest']
+                 'video_blit_rect', 'video_readback_rect', 'video_puts',
+                 'video_selftest']
 VIDEO_HELPERS = ['video_bgrx', 'video_clip_rect']
 
 # the uniform video_enter frame, and the fifth argument load in front
@@ -216,6 +217,7 @@ STACK_ARG = bytes.fromhex('8B 44 24 28')     # mov eax, [rsp+40]
 PROLOGUES = {
     'video_fill_rect': STACK_ARG + FRAME,
     'video_blit_rect': STACK_ARG + FRAME,
+    'video_readback_rect': STACK_ARG + FRAME,
     'video_bgrx': bytes.fromhex('25'),          # and eax, imm32
     'video_clip_rect': bytes.fromhex('89 C9'),  # mov ecx, ecx
 }
@@ -387,7 +389,7 @@ def check_image(chk, man, img, org, label):
            'manifest magic')
     chk.eq(man['version'], 1, 'manifest version')
     chk.eq(man['org'], org & MASK64, 'manifest org')
-    chk.eq(len(MANIFEST_NAMES), 80, 'the manifest keeps 80 entries')
+    chk.eq(len(MANIFEST_NAMES), 81, 'the manifest keeps 81 entries')
     chk.ok(len(img) >= MANIFEST_BYTES, 'the image holds the manifest')
 
     data_start, data_end = man['video_data_start'], man['video_data_end']
@@ -665,6 +667,64 @@ def check_bodies(chk, man, img, org, label):
     field('video_blit_rect', EXPECT_OFFSETS['VIDEO_FB_STATE.stride'],
           'the stride for the destination row offset')
 
+    # ---- video_readback_rect: the task-96 mirror of the blit --------
+    # the ONLY sanctioned FB read path, the desktop cursor background
+    # save; the direction is reversed, so the stride compensation moves
+    # to the SOURCE (rsi += r13) and the original-w packing compensation
+    # moves to the DESTINATION (rdi += r14)
+    addr, body = bodies['video_readback_rect']
+    chk.ok('video_clip_rect' in calls('video_readback_rect'),
+           'readback_rect clips through video_clip_rect')
+    chk.ok(b'\xF3\xA5' in body, 'readback_rect copies with rep movsd')
+    chk.ok(b'\xFC' in body, 'readback_rect clears DF before the copy')
+    chk.ok('video_bgrx' not in calls('video_readback_rect'),
+           'readback_rect copies raw BGRX dwords without conversion')
+    chk.ok(b'\x4D\x85\xE4' in body,
+           'readback_rect refuses a null destination buffer')
+    save_w = body.find(bytes.fromhex('45 89 CE'))   # mov r14d, r9d
+    clip_call = body.find(b'\xE8')
+    chk.ok(0 <= save_w < clip_call,
+           'readback_rect saves the original w before the clip')
+    comp = bytes.fromhex('4D 29 C6 49 C1 E6 02')    # sub r14,r8 / shl r14,2
+    movsd = body.find(b'\xF3\xA5')
+    advance = body.find(bytes.fromhex('4C 01 F7'), movsd)  # add rdi, r14
+    chk.ok(comp in body and movsd >= 0 and advance > movsd,
+           'readback_rect packs the destination rows at the original w')
+    src_adv = body.find(bytes.fromhex('4C 01 EE'), movsd)  # add rsi, r13
+    chk.ok(movsd >= 0 and src_adv > movsd,
+           'readback_rect compensates the source row pitch by the stride')
+    # task-102 D2: pin the copy-loop register ROLES byte for byte.
+    # rdi must be established from the destination buffer (r12), rsi
+    # from fb_va + y * stride + x * 4, both BEFORE the rep movsd; an
+    # xchg rsi, rdi anywhere in the body swaps source and destination
+    # and must be caught here statically, never only by a runtime #PF.
+    rdi_load = body.find(bytes.fromhex('4C 89 E7'))    # mov rdi, r12
+    chk.ok(rdi_load >= 0,
+           'readback_rect establishes rdi from the destination buffer')
+    rsi_load = -1
+    for i in find_all(body, bytes.fromhex('48 8B 35')):  # mov rsi, [rip+x]
+        disp = struct.unpack_from('<i', body, i + 3)[0]
+        if addr + i + 7 + disp == man['video_fb_state'] \
+                + EXPECT_OFFSETS['VIDEO_FB_STATE.fb_va']:
+            rsi_load = i
+            break
+    chk.ok(rsi_load >= 0,
+           'readback_rect loads rsi from fb_va, the framebuffer source')
+    add_rsi = body.find(bytes.fromhex('48 01 C6'))     # add rsi, rax
+    lea_rsi = body.find(bytes.fromhex('48 8D 34 8E'))  # lea rsi,[rsi+rcx*4]
+    chk.ok(0 <= rdi_load < rsi_load < add_rsi < lea_rsi < movsd,
+           'readback_rect establishes rdi=buffer then rsi=FB+stride before the copy')
+    chk.ok(bytes.fromhex('48 87') not in body,
+           'readback_rect never exchanges rsi/rdi (no source/dest role swap)')
+    chk.ok(0 <= movsd < src_adv < advance,
+           'readback_rect advances rsi by stride before rdi by the packed w')
+    field('video_readback_rect', EXPECT_OFFSETS['VIDEO_FB_STATE.stride'],
+          'the stride for the source row offset')
+    field('video_readback_rect', EXPECT_OFFSETS['VIDEO_FB_STATE.fb_va'],
+          'fb_va is the readback source')
+    chk.ok('video_readback_rect' not in calls('video_selftest'),
+           'the selftest stays draw-only, it never reads the FB back')
+
     # ---- video_puts: glyph index, range skip, per pixel clipping ----
     addr, body = bodies['video_puts']
     for pattern, what in (
@@ -934,6 +994,35 @@ FIXTURES = [
     ('blit-src-stride', 'kernel/video/draw.inc',
      '        add     rsi, r14                ; source row pitch compensation\n',
      ''),
+    # task-96: the readback source stride compensation is gone, row 2+
+    # of a cursor background save reads the wrong framebuffer pixels
+    ('readback-src-stride', 'kernel/video/draw.inc',
+     '        add     rsi, r13                ; source row pitch compensation\n',
+     ''),
+    # task-102 D2: the copy-loop register roles are swapped after the
+    # address establishment; the copy writes INTO the framebuffer from
+    # the buffer and reads the buffer as if it were the FB. Must be
+    # caught statically, not only by a runtime #PF
+    ('readback-src-dst-swap', 'kernel/video/draw.inc',
+     '        lea     rsi, [rsi + rcx*4]\n',
+     '        lea     rsi, [rsi + rcx*4]\n'
+     '        xchg    rsi, rdi\n'),
+    # task-96: the readback no longer clips, a save rectangle past the
+    # right/bottom edge reads freely past the framebuffer mapping
+    ('readback-clip-missing', 'kernel/video/draw.inc',
+     '        cmp     dword [video_fb_state + VIDEO_FB_STATE.ready], 0\n'
+     '        je      .notready\n'
+     '        call    video_clip_rect\n'
+     '        test    eax, eax\n'
+     '        jz      .clipped\n'
+     '        mov     r15, r8                 ; w\n'
+     '        mov     rbx, r9                 ; h\n'
+     '        mov     rdi, r12\n',
+     '        cmp     dword [video_fb_state + VIDEO_FB_STATE.ready], 0\n'
+     '        je      .notready\n'
+     '        mov     r15, r8                 ; w\n'
+     '        mov     rbx, r9                 ; h\n'
+     '        mov     rdi, r12\n'),
     # task-85: the mapping fault passes the raw MM status through again,
     # MM_ENOTSUP would reach foundation as a non-fatal geometry skip
     ('map-fail-passthrough', 'kernel/video/fb.inc',

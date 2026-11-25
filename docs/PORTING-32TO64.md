@@ -19,7 +19,9 @@
 | kolibrios64 | `983111c` | IRQ-v1 LAPIC 定时器闭环 + GOP 交接（QEMU 验证） |
 | kolibrios64 | `7b2c4b7` | GUI-G1 GOP framebuffer 图形闭环（QEMU 验证） |
 | kolibrios64 | `227c7dd` | docs：GUI-G1 提交哈希补录 |
-| kolibrios64 | `ddad22d` | IRQ-v2 IOAPIC + PS/2 键鼠输入闭环（QEMU 验证，当前 HEAD，见 §8） |
+| kolibrios64 | `ddad22d` | IRQ-v2 IOAPIC + PS/2 键鼠输入闭环（QEMU 验证，见 §8） |
+| kolibrios64 | `ef6a29b` | docs：IRQ-v2 提交哈希补录（当前 HEAD） |
+| kolibrios64 | （待补入） | 桌面壳：最小交互桌面（已验证，即将提交，见 §9） |
 | fasm2 | `0253b7f` | macOS x64 自举工作流收口（自举里程碑，含 `aad830d` 自举宿主与自宿主测试） |
 
 以上锚点已用 `git log --oneline` 核对。本文档随后续里程碑一并提交，不单独入库。
@@ -436,23 +438,30 @@
   + gdbstub 仅绑定 127.0.0.1。默认 `-S` 冻结调试（lldb 经
   `tools/gen-kernel-symbols.py` + `tools/kernel64-elf.asm` 产出的符号
   ELF 下硬件断点；TCG 无 watchpoint）；`--no-freeze` 冒烟模式判定冻结：
-  九个里程碑 `K64-BOOT-OK → K64-CPU-OK → K64-PMM-OK → K64-VMM-OK →
+  十个里程碑 `K64-BOOT-OK → K64-CPU-OK → K64-PMM-OK → K64-VMM-OK →
   K64-HEAP-OK → K64-IRQ-OK → K64-INPUT-OK → K64-GUI-OK →
-  K64-FOUNDATION-OK` 各恰好一次且按序（K64-IRQ-OK 随 IRQ-v1、
-  K64-INPUT-OK 随 IRQ-v2、K64-GUI-OK 随 GUI-G1 插入，见
-  §6/§7/§8），禁止
+  K64-DESKTOP-OK → K64-FOUNDATION-OK` 各恰好一次且按序
+  （K64-IRQ-OK 随 IRQ-v1、K64-INPUT-OK 随 IRQ-v2、K64-GUI-OK 随
+  GUI-G1、K64-DESKTOP-OK 随桌面壳插入，见 §6/§7/§8/§9），禁止
   `K64-CPU-PANIC`/`K64-BOOT-FAIL`，CPU 自测 passed = 0x5FF（串口报告行），
-  十计数器 `mm_mask = 0`、`hook_hits = 3`、`core_mask = 0`、`irq_mask = 0`、
-  `irq_test_ticks = 11`、`input mask = 0`、`kbd_count = 2`、
-  `mouse_count = 3`、`stage = 6`、`video_selftest_mask = 0`（成功路径
+  十六计数器 `mm_mask = 0`、`hook_hits = 3`、`core_mask = 0`、
+  `irq_mask = 0`、`irq_test_ticks = 11`、`input mask = 0`、
+  `kbd_count = 6`、`mouse_count = 6`、`stage = 6`、
+  `video_selftest_mask = 0`、`desktop mask = 0`、`desktop stage = 5`、
+  `keys = 2`、`cursor = (557,411)`、`gui_frame_stage = 3`（成功路径
   不打印，经 gdbstub 从 guest 内存读取；irq 两项随 IRQ-v1、video
-  一项随 GUI-G1、input 四项随 IRQ-v2 新增，ticks 终值 10→11 的推导
-  见 §8.7）。冒烟循环另驱动 IRQ-v2 输入握手：经 gdbstub 轮询
-  input_test_stage、按 stage 经 monitor 注入 sendkey/mouse_move/
-  mouse_button（见 §8.8）；终止标记后经 QEMU monitor screendump
-  采帧做 28 探针像素判定，并有 `--gui-skip` 回退判定模式（均随
-  GUI-G1 新增，见 §7.6/§7.8）。默认 CPU `qemu64,+popcnt`（裸 qemu64 缺
-  MM 所需 POPCNT）。QEMU 进程组随退出/中断整体清理，不留 stray 进程。
+  一项随 GUI-G1、input 四项随 IRQ-v2、desktop 六项随桌面壳新增，
+  ticks 终值 10→11 的推导见 §8.7，kbd/mouse 2/3→6/6 与 desktop
+  计数推导见 §9.5）。冒烟循环另驱动 IRQ-v2 输入握手与桌面壳握手：
+  经 gdbstub 轮询 input_test_stage / desktop_test_stage、按 stage 经
+  monitor 注入 sendkey/mouse_move/mouse_button（见 §8.8/§9.6）；
+  GUI 帧取证窗口经 gdb_write_mem 'M' 包写 RELEASE 放行 guest 有界
+  自旋（§9.5）。像素判定为**三帧取证**：screen-gui.ppm（28 探针）+
+  screen-echo.ppm（回显帧）+ screen.ppm（终帧），另有 -d int 向量
+  交付计数断言（ok 模式 v21=6 / v2c=18，skip 模式 2/9），见 §9.6；
+  `--gui-skip` 回退判定模式（随 GUI-G1 新增，桌面壳扩展为
+  GUI-SKIP + DESKTOP-SKIP 级联，见 §7.6/§7.8/§9.7）。默认 CPU
+  `qemu64,+popcnt`（裸 qemu64 缺 MM 所需 POPCNT）。QEMU 进程组随退出/中断整体清理，不留 stray 进程。
   注意：QEMU TCG 自行翻译 guest 指令，**与宿主 Rosetta 无关**；正常启动
   在 `-d cpu_reset` 下有 2 次复位（上电 + OVMF 平台复位），判异常须排除。
 - **变更理由**：TCG 提供确定性的特权级全系统环境，失败即 guest 内三重
@@ -608,7 +617,8 @@
   （ticks=10 为 IRQ-v1 退出口径；IRQ-v2 input 补证腿后全程终值为 11，
   见 §8.7。末腿 mask 的运行时证据缺口当时未闭合，后由 IRQ-v2
   masked-oneshot 腿补证，见 §8.7。IRQ-v2 延续本纪律：input 模块零
-  STI，窗口全走 irq_sti_wait。）
+  STI，窗口全走 irq_sti_wait。桌面壳起全内核为**两个**合法 STI
+  拥有者：irq_sti_wait 与 desktop_run 常驻循环，见 §9.4。）
 - **变更理由**：有界窗口使中断行为完全可断言；IF 证据对证明中断门
   语义（handler 内 IF=0）与窗口上下文（IF=1）同时成立。
 - **证据文件**：`kolibrios64/kernel/irq/selftest.inc`、
@@ -626,7 +636,8 @@
 - **冒烟口径**：7 标记按序各恰一次（新增 K64-IRQ-OK），passed=0x5FF，
   五计数器（新增 irq_mask=0、irq_test_ticks=10，经 gdbstub 读取）。
   （此为 IRQ-v1 收口时口径；GUI-G1 起为 8 标记/六计数器，IRQ-v2
-  起为 9 标记/十计数器，见 §5.3/§7.8/§8.9。）
+  起为 9 标记/十计数器，桌面壳起为 10 标记/十六计数器，见
+  §5.3/§7.8/§8.9/§9.7。）
 - **收口审查修复记录**：① ISR 降序冲刷（§6.1）；② GOP 命中标记守卫
   （§6.5）；③ BootInfo 8 对齐回归——GOP 字段填值不得破坏 208 字节
   布局的 8 字节对齐，`bootinfo.inc` 的 `sizeof mod 8` 汇编期断言守住。
@@ -794,9 +805,11 @@
   2/2 清理检查 + 57/57 寄存器模型查询；stage2-cpu 524、stage2-mm
   1688、stage2-irq 295（时为 GUI-G1 时计数；IRQ-v2 扩至 317，见
   §8.9）、stage2-fb 449（11 负向夹具全部被抓，含
-  size-wrap-unguarded / blit-src-stride / map-fail-passthrough）；
+  size-wrap-unguarded / blit-src-stride / map-fail-passthrough；
+  桌面壳扩至 493，见 §9.7）；
   check-gui-judge 21（时为 GUI-G1 计数，judge 纯函数正基线 + 12
-  负向变异全部被抓；IRQ-v2 扩至 35，见 §8.9）。
+  负向变异全部被抓；IRQ-v2 扩至 35，见 §8.9；桌面壳扩至 92，
+  见 §9.7）。
 - **QEMU TCG 冒烟**（唯一真实执行环境，禁 Rosetta 口径延续 §5.4）：
   128/256 MiB 多轮；8 串口标记按序各恰一次（K64-GUI-OK 位于 IRQ 与
   FOUNDATION 之间）；passed=0x5FF；6 计数器经 gdbstub 读取全为冻结
@@ -821,7 +834,8 @@
 ### 7.9 已知遗留（如实记录，不粉饰）
 
 - `draw.inc` 文件尾无换行（卫生项，下次顺手；本轮实测文件以 ret
-  结尾无 0x0A）。
+  结尾无 0x0A）。（此项已随桌面壳改动修复，见 §9.7；本节保留
+  当时口径。）
 - draw-only 自检的数据变异（如颜色常量漂移）依赖外部 screendump
   探针检测——这是**能力边界而非漏检**：串口/计数器无法区分「画对」
   与「画错」，口径已在 §7.6 显式写明。
@@ -833,7 +847,8 @@
 ## 8. IRQ-v2：输入闭环（提交 `ddad22d`）
 
 > 状态：已通过独立验证（8/8）与复验（6/6），收口审查（1 必改 +
-> 5 建议全采纳）完成，即将提交。提交范围：kernel/input 新模块、
+> 5 建议全采纳）完成，已随提交 `ddad22d` 入库。（「1 必改」定性
+> 后有勘误，见 §8.4 勘误注。）提交范围：kernel/input 新模块、
 > irq dispatch 纯增量与向量契约、mm IOAPIC VA 契约、core 集成
 > （contracts.inc / foundation.inc / kernel64.asm include 顺序）、
 > tools/run-qemu-debug.py 注入编排与判定扩展、tests/stage2-input
@@ -939,6 +954,13 @@
   `kernel/input/keyboard.inc`、`mouse.inc`（来源过滤注释）、
   `tests/stage2-irq/check.py`（two_eoi_sites / input_eoi_jmps_to_done
   等）、`tests/stage2-input/check.py`。
+- **勘误注（桌面壳收口审查 I1，如实记录；上方历史正文不改写）**：
+  本节把 bit5 来源过滤定性为「必改修复」系 over-claim——8042 输出
+  缓冲为单字节 OBF，IRQ 仅在字节进入 OBF 时 assert，单 CPU +
+  handler IF=0 下正常流量的键鼠 misrouting 不可能发生。bit5 过滤的
+  实际定性是**防御性硬化**（phantom 交付 + flush 组合的理论路径），
+  而非修复真实可触发缺陷；实现与两侧负向夹具本身不受影响，
+  仍然有效。后续章节与记录以本注定性为准。
 
 ### 8.5 键盘解码与缓冲：set1 语义对齐 + 消费字节数口径
 
@@ -1061,6 +1083,8 @@
 - **独立验证与复验**：独立验证 8/8、复验 6/6（复验产物：4 负向夹具
   + 128/256 MiB 冒烟各一轮，全 PASS/全被抓）。
 - **收口审查**：1 必改（bit5 来源过滤，§8.4）+ 5 建议，全部修复。
+  （「必改」定性后有勘误：bit5 过滤实为防御性硬化，见 §8.4
+  勘误注。）
 - **证据文件**：`kolibrios64/kernel/core/foundation.inc`、
   `contracts.inc`、`kernel/input/`、`tests/stage2-input/`、
   `tests/stage2-irq/`、`tests/stage2-fb/check-gui-judge.py`、
@@ -1073,15 +1097,266 @@
 
 - judge 的 -d int 向量计数断言（v21/v2c/v20）**推迟到桌面壳**里程碑
   与双流常驻一并落地；本轮仅以跨运行一致性记录（§8.9）。
+  （已随桌面壳落地：v21=6 / v2c=18 进 judge 硬判定，见 §9.6。）
 - 右 Ctrl/Alt（E0+break）**不跟踪**：已文档化的简化（E0 扩展键直接
   入缓冲不进修饰键状态机），桌面壳按需扩展。
-- `draw.inc` 文件尾换行仍缺（GUI-G1 遗留卫生项，§7.9）。
+- `draw.inc` 文件尾换行仍缺（GUI-G1 遗留卫生项，§7.9）。（已随
+  桌面壳改动修复，见 §9.7。）
 - `build/ps2.inc.panic-backup` 为实现者遗留备份（gitignored，
   非交付物）。
 
 ---
 
-## 9. 进行中（占位，待验证通过后补录）
+## 9. 桌面壳：最小交互桌面（本次提交，哈希待提交后补入锚点表）
+
+> 状态：已通过独立验证（期间发现并修复 D1/D2/GUI 帧证据丢失三个
+> 真实缺陷，见 §9.6）与收口审查（**无阻断、无必改**；建议 S1 尾
+> 换行 / S3 GPL 头 / I3 不变量注释已落实，修复前后 KERNEL64.BIN
+> sha256 相同，证明语义零改动），即将提交。提交范围：
+> kernel/desktop 新模块（七文件）、video_readback_rect 读回原语、
+> core 集成（contracts.inc / foundation.inc / kernel64.asm include
+> 顺序）、tools/run-qemu-debug.py 三帧取证 + gdb 写握手 + 向量
+> 断言、tests/stage2-desktop 新门禁及 stage2-fb / stage2-irq 扩展、
+> 本文档。
+
+### 9.1 32 位基线对照：窗口系统 → 内核态最小桌面
+
+- **32 位做法**：完整窗口系统——`gui/window.inc` 窗口链表/焦点/
+  遮挡与按窗口选光标；事件掩码常量 EVENT_KEY=0x02 /
+  EVENT_BUTTON=0x04 / EVENT_MOUSE=0x20（`const.inc`），
+  `gui/event.inc` 事件队列，get_event 的键/按钮事件只投递
+  WIN_STACK 栈顶窗口（栈位置必须等于 thread_count，hotkey 缓冲
+  例外）；`hid/mousedrv.inc` 光标 save/restore：draw_mouse_under
+  按 X_UNDER/Y_UNDER 恢复旧图、save_draw_mouse 保存背景并按光标
+  下窗口选光标，__sys_draw_pointer 的 .redrawmouse 在 pushfd/cli
+  下执行 restore→save→draw。
+- **64 位做法**：首版为**内核态最小桌面**，无用户态进程/窗口
+  管理器。保留语义——光标 save/restore（§9.3）与键鼠事件消费
+  模型（handler 只写缓冲/计数，主循环消费重绘，§9.4）；丢弃
+  实现——窗口链表/焦点/遮挡、按窗口选光标、用户态事件投递
+  （均为后续里程碑，§9.8）。
+- **变更理由**：单核无调度首阶段窗口系统没有宿主；保留光标
+  save/restore 与事件消费语义使 32 位基线可直接对照，丢弃窗口
+  设施避免引入无法验证的复杂度。
+- **证据文件**：`kolibrios/kernel/trunk/const.inc`（EVENT_* 掩码）、
+  `gui/event.inc`（.Keys/.Buttons top-window 判定）、`gui/window.inc`、
+  `hid/mousedrv.inc`（draw_mouse_under/save_draw_mouse/
+  __sys_draw_pointer）；`kolibrios64/kernel/desktop/api.inc`
+  （契约头注释）。
+
+### 9.2 桌面帧与键盘回显（DESKTOP-v1 冻结契约）
+
+- **32 位做法**：桌面背景/标题栏由用户态程序绘制，无内核冻结帧
+  契约。
+- **64 位做法**：kernel/desktop 七文件（api.inc / cursor.inc /
+  data.inc / desktop.asm / desktop.inc / echo.inc / selftest.inc）。
+  帧契约冻结：背景 0x1A2B3C 全屏、标题栏 0x2C3E50
+  (0,0,1024,32)、"K64 Desktop v0.1" (8,8) 白色 16 字符（字节长度
+  断言）。回显区 (16,64) 126 列 × 44 行，**精确铺满剩余屏幕**
+  （16+126*8=1024、64+44*16=768 汇编期断言）：可打印 0x20..0x7E
+  绘制并计数（keys），Enter 换行，Backspace 以背景色擦除字符格
+  （col>0 守卫）；满行 wrap，**屏满停止并计 drops，不滚动**；
+  **row≥44 ⟹ col==0 不变量**以注释钉住（wrap 与 Enter 均置
+  col=0，屏满 drop 不进 col，未来滚动支持必须保持）。回显经
+  私有 desktop_kbd_consumed 索引消费 input_kbd_buf，**input 模块
+  零改动**；selftest 先快照 input 退出 fill level，input 自测的
+  'a' 永不被重回显。契约沿用三副本模式：DESKTOP_* 私有副本、
+  K64_DESKTOP_* 共享副本（contracts.inc 汇编期比对）、
+  stage2-desktop/check.py 独立副本。
+- **变更理由**：精确铺满断言使「文本区几何漂移」成为构建失败；
+  私有消费索引使桌面与 input 解耦（IRQ-v2 冻结字节不动）；
+  屏满停止而非滚动是首版冻结策略，使回显状态机及其不变量
+  可静态断言。
+- **证据文件**：`kolibrios64/kernel/desktop/api.inc`、`echo.inc`
+  （不变量注释）、`kernel/core/contracts.inc`（DESKTOP-v1 段）、
+  `tests/stage2-desktop/check.py`。
+
+### 9.3 光标 save/restore 与 video_readback_rect（含 D2 缺陷修复）
+
+- **32 位做法**：mousedrv.inc save/restore（§9.1），背景读回由
+  显示驱动完成，无统一读回原语契约。
+- **64 位做法**：光标 sprite 为冻结 12×18 箭头，每像素一字节
+  （0 透明/1 黑/2 白）共 216 字节，逐字节 + sha256
+  （f46ce0e0…497ad7）由 stage2-desktop 门禁双重钉死。移动协议
+  冻结：**先 restore 旧位**（video_blit_rect 写回 save 缓冲）→
+  save 新位背景（video_readback_rect）→ composite（透明保留
+  背景）→ blit draw 缓冲；hotspot clamp 1012/750 保 sprite 全在
+  屏内；位置不变不重绘。`video_readback_rect` 是**内核唯一
+  sanctioned FB 读路径**，与 video_blit_rect 精确镜像：源行按 FB
+  stride 推进（右缘裁剪补偿）、目的按原始 w 紧密打包、raw BGRX
+  无颜色转换；null dst EINVAL、未 ready ENOTREADY、全裁剪
+  silent no-op。**仅运行时 cursor save 使用读回；video_selftest
+  保持 draw-only**（§7.6 能力边界不变）。
+- **D2 缺陷（独立验证发现，已修复）**：readback src/dst 角色静态
+  钉缺口——xchg rsi/rdi 变异曾被 fb/desktop 两门禁**双漏检**
+  （qa97 回放：fb 469 项、desktop 378 项均 PASS）。修复补 5 条
+  静态钉（rdi 取自目的缓冲、rsi 取自 fb_va、copy 前先建立
+  rdi=buffer 再 rsi=FB+stride、永不 xchg、rsi 先按 stride 推进
+  再 rdi 按打包 w 推进）+ readback-src-dst-swap 负向夹具；
+  qa103 回放同一变异 fb 门禁 2 项 FAIL，抓住。
+- **变更理由**：save/restore 语义与 32 位基线对齐；读回与 blit
+  镜像使「读/写方向」成为可字节级断言的性质；D2 证明「模型
+  自洽」不等于「方向正确」，角色钉必须两侧独立钉死。
+- **证据文件**：`kolibrios64/kernel/desktop/cursor.inc`（sprite +
+  sha256 注释）、`kernel/video/draw.inc`（video_readback_rect）、
+  `tests/stage2-fb/check.py`（5 静态钉 + 夹具）、
+  `tests/stage2-desktop/check.py`（SPRITE_SHA256）；
+  `kolibrios/kernel/trunk/hid/mousedrv.inc`（32 位对照）；
+  D2 双漏检与抓住回放日志在 build/qa97、build/qa103 产物
+  （不入库）。
+
+### 9.4 常驻事件循环：第二合法 STI 拥有者
+
+- **32 位做法**：内核初始化后 sti 常开（§6.6），osloop 按事件
+  重绘光标/窗口，无 STI 所有权纪律。
+- **64 位做法**：`desktop_run` 常驻循环——cli → **先 mask LVT
+  timer 再 STI**（irq_test_ticks 永冻结 11，循环只被键鼠唤醒）→
+  两 RTE 置 live → `sti / hlt / cli / desktop_pump` 无限循环，
+  永不返回（host 取证后关 QEMU）。这是**全内核第二合法 STI
+  拥有者**（第一是 irq_sti_wait 自测窗口），desktop 模块恰含一条
+  STI；STI 中断影子覆盖 hlt，**无丢失唤醒**。重绘全在主循环
+  IF=0（desktop_pump = echo_pump + cursor_sync），IRQ handler
+  只写缓冲/计数。自测等待走 desktop_wait_count：每轮**先 pump
+  再 irq_sti_wait**（host 观察的计数在等待内推进），64 轮有界
+  超时 EIO；模块无私有 STI。stage2-irq 源码扫描更新为两拥有者
+  白名单（kernel/desktop/desktop.inc + kernel/irq/selftest.inc），
+  任何第三条 STI 即门禁失败。
+- **变更理由**：常驻循环是桌面的正常终态，但 STI 所有权必须
+  保持冻结可枚举；mask 先于 STI 使「ticks=11」是确定性推导
+  而非时序运气；pump 先于 wait 消除「计数到了但没人重绘」的
+  握手死锁。
+- **证据文件**：`kolibrios64/kernel/desktop/desktop.inc`、`api.inc`
+  （STI 所有权注释）、`kernel/core/contracts.inc`、
+  `tests/stage2-irq/check.py`（kernel_sti_sites 两拥有者断言）、
+  `tests/stage2-desktop/check.py`（desktop-sti-leak /
+  timer-unmask-drift 夹具）。
+
+### 9.5 foundation 集成与 GUI 帧取证窗口
+
+- **32 位做法**：无对应分阶段 bring-up 与取证窗口。
+- **64 位做法**：GUI-OK 之后、桌面重绘之前插入 **GUI 帧取证
+  窗口**：foundation 置 desktop_gui_frame_stage=READY(1)，pause
+  有界自旋（64 轮 × 0x2000000，IF=0，**无新 sti**）等 host
+  screendump screen-gui.ppm 后经 gdbstub 写 RELEASE(2)，guest 置
+  DONE(3) 才放行 desktop_init 重绘；**超时 EIO 走标准致命路径，
+  绝不挂起**（skip 路径不进窗口，slot 保持 0）。随后
+  desktop_init（FB ready + 1024x768 几何门，ENOTSUP → 非致命
+  `K64-DESKTOP-SKIP`）→ vmm_boot_protect（desktop 数据区 RW/NX）
+  → desktop_selftest（六腿：BG/TITLE/CURSOR/ECHO/MOUSE/FINAL，
+  失败位 bit0..5）→ `K64-DESKTOP-OK` → `K64-FOUNDATION-OK`
+  （**仍为终止判定标记，先于常驻循环打印**）→ desktop_run
+  （desktop_state=0 → cpu_halt_forever）。GUI SKIP 级联
+  DESKTOP-SKIP，非致命。leg7 表页核算 **3/3/3 不变**：desktop
+  不映射自有 MMIO（复用 FB/LAPIC/IOAPIC 窗口），sprite 与
+  save/draw 缓冲在数据区。
+- **确定性计数推导**（汇编期断言，非观测）：cursor
+  (512,384) → input 注入 (5,-3) → (517,387) → desktop 注入
+  (40,24) → (557,411)；kbd=6（input 退出 2 + h/i make+break 4）、
+  mouse=6（3 + move/press/release 3）、keys=2（仅可打印 h/i）、
+  ticks=11（常驻循环 mask timer）。**四处同步冻结**：
+  desktop/api.inc、core/contracts.inc、tools/run-qemu-debug.py
+  （EXPECTED_COUNTERS）、tests/stage2-desktop/check.py（独立
+  推导）。
+- **变更理由**：GUI 图案帧会被桌面重绘覆盖，串口标记无法证明
+  「图案曾经画对」（§7.6 像素真值口径），取证窗口在不引入新
+  STI 的前提下恢复 GUI-G1 真机像素断言；计数推导使整条注入链
+  可审计。
+- **证据文件**：`kolibrios64/kernel/core/foundation.inc`（GUI 帧
+  窗口与 desktop 阶段）、`kernel/desktop/selftest.inc`（六腿与
+  推导注释）、`api.inc`、`kernel/core/contracts.inc`
+  （K64_GUI_FRAME_*）、`tools/run-qemu-debug.py`。
+
+### 9.6 验证体系演进：三帧取证 + 向量断言 + gdb 写握手
+
+- **32 位做法**：无对应机制。
+- **64 位做法**：
+  - **三帧取证模型**：screendump 从单帧扩为三帧——
+    `screen-gui.ppm`（GUI-G1 图案帧，取证窗口内捕获，**28 探针
+    恢复 GUI-G1 图案真机断言**）、`screen-echo.ppm`（回显帧，
+    desktop stage 3 先采帧再注入 move，光标仍在 (517,387)）、
+    `screen.ppm`（终帧，光标 (557,411) 且**旧位背景已恢复**）。
+    探针集：28 GUI + 15 桌面公共 + 3 回显 + 7 终帧。
+  - **judge 向量断言落地**：-d int 交付计数进 judge 硬判定——
+    ok 模式 v21=6（2+4）、v2c=18（9+9）；skip 模式 2/9。
+    **IRQ-v2 推迟项就此闭环**（§8.10）。
+  - **gdb_write_mem 'M' 包写握手**：host 经 gdbstub 向 guest 内存
+    写 RELEASE，与读同套 detach 纪律（每条退出路径 finally 发
+    D，VM 绝不留在 paused）。
+  - **注入编排扩展**：desktop stage 1/2/3 注入 sendkey h /
+    sendkey i / mouse_move 40 24；stage 4 press/release 分离
+    （release 仅在 mouse_count≥5 后发送，QEMU 不可能合并包）。
+- **独立验证发现并修复的三个真实缺陷（如实记录）**：
+  - **D1**：run-qemu-debug.py judge 扩展为三帧后，
+    check-gui-judge.py 未同步重写，运行即崩溃；修复为同步重写
+    judge 门禁（现 92 项，§9.7）。
+  - **D2**：readback src/dst 静态钉缺口，xchg 变异曾双漏检，
+    现 5 静态钉 + 夹具抓住（§9.3）。
+  - **GUI 帧证据丢失**：desktop 重绘覆盖 GUI 图案帧，GUI-G1
+    真机像素断言丢失；修复为三帧握手（§9.5 取证窗口 +
+    screen-gui.ppm）。
+- **变更理由**：单帧取证只能证明「最后一帧对」，三帧模型使每
+  阶段像素证据独立可裁决；向量断言把「跨运行一致」升级为硬
+  判定；写握手复用读侧 detach 教训，不重蹈挂 VM 缺陷。
+- **证据文件**：`kolibrios64/tools/run-qemu-debug.py`（三帧探针 /
+  EXPECTED_VECTORS / gdb_write_mem / DESKTOP_STAGE_INJECT）、
+  `tests/stage2-fb/check-gui-judge.py`（三帧正基线 + 负向样本）、
+  `kernel/core/foundation.inc`。
+
+### 9.7 集成与验证证据（实测，全部 0 失败）
+
+- **宿主静态门禁**：check-boot-contract FAILURES 0；其检查器自测
+  62/62 夹具 + 2/2 清理检查 + 57/57 寄存器模型查询；
+  stage2-cpu 524、stage2-mm 1688、stage2-irq 317、**stage2-fb 493**
+  （readback 5 静态钉 + 新负向夹具）、stage2-input 402、
+  **stage2-desktop 386**（7 负向夹具全部被抓：desktop-sti-leak /
+  timer-unmask-drift / cursor-restore-removed /
+  echo-backspace-removed / sprite-data-drift /
+  desktop-final-count-drift / cursor-clamp-x-removed）、
+  **check-gui-judge 92**（36 正向基线/结构钉 + 56 负向样本全部
+  被抓，覆盖标记/三帧像素/计数器漂移/向量漂移/skip 模式）。
+- **QEMU TCG 冒烟**（唯一真实执行环境，禁 Rosetta 口径延续
+  §5.4）：128/256 MiB 多轮，判定 **109 [ok]**；**10 串口标记**
+  按序各恰一次（K64-DESKTOP-OK 位于 GUI 与 FOUNDATION 之间）；
+  passed=0x5FF；**16 计数器**经 gdbstub 读取全为冻结值（新增
+  desktop mask=0、stage=5、keys=2、cursor=(557,411)、
+  gui_frame_stage=3；kbd/mouse 退出值 2/3 → 6/6）；三帧探针
+  全绿；v21=6 / v2c=18。
+- **GUI SKIP 场景**：8 标记 + K64-GUI-SKIP + K64-DESKTOP-SKIP，
+  判定 **40 [ok]**，desktop 计数器全零、gui_frame_stage=0、
+  向量 2/9，无 panic、无像素断言。
+- **panic profile**：① echo 计数断言删除变异 →
+  `K64-DESKTOP-SELFTEST failed legs = 0x8` → K64-CPU-PANIC
+  （reason -9 EIO，"foundation: desktop bring-up failed"）；
+  ② GUI 帧窗口超时（host 不写 RELEASE）→ EIO panic，**不挂起**。
+- **收口审查**：无阻断、无必改；建议 S1 尾换行（draw.inc，
+  §7.9/§8.10 卫生遗留就此闭环）/ S3 desktop 新文件 GPL 头 /
+  I3 echo 不变量注释已落实——**修复前后 KERNEL64.BIN sha256
+  相同**（3e4dee2c…740b），证明语义零改动。
+- **证据文件**：`kolibrios64/tests/stage2-desktop/`、
+  `tests/stage2-fb/`（check.py + check-gui-judge.py）、
+  `tests/stage2-irq/`、`tools/run-qemu-debug.py`、
+  `tools/check-boot-contract.py`、`tools/test-boot-contract-checker.py`；
+  实测数字来自本轮 build/ 产物（t102-* / t104-* 门禁、qa103
+  门禁与 ok128/ok256、desktop-t102-skip / timeout2、qa97 变异
+  回放等，不入库）。
+
+### 9.8 已知遗留与后续（如实记录，不粉饰）
+
+- **S2 cursor_sync 返回值防御硬化**：desktop_cursor_sync 未检查
+  restore blit / place 的返回值——当前冻结几何与 ready 门下该
+  失败路径不可达，记录为防御性硬化建议，独立后续任务。
+- **S4 五门禁 assembler 发现口径统一**：既有五门禁 3:2 分裂——
+  cpu/irq/input 用 `--fasm2-dir` 参数（+ 同级目录回退），mm/fb
+  用 `FASM2_DIR` 环境变量；新 desktop 门禁沿用参数风格。统一
+  为独立后续任务。
+- 右 Ctrl/Alt 不跟踪：§8.10 已文档化简化延续。
+- 用户态窗口系统（窗口链表/焦点/遮挡）与进程调度：路线图
+  后续阶段，范围待该里程碑启动时冻结。
+- 桌面壳提交哈希待产生后补入锚点表（本次不写未产生的哈希）。
+
+---
+
+## 10. 进行中（占位，待验证通过后补录）
 
 ### IRQ-v1：LAPIC 定时器闭环 —— 已完成
 
@@ -1093,13 +1368,20 @@
 
 ### IRQ-v2：输入闭环 —— 已完成
 
-- 已收口并补录为 §8；提交哈希待产生后补入锚点表（本次不写未产生
-  的哈希）。IRQ-v1 遗留的 timer mask 运行时证据缺口已在 §8.7 补证。
+- 已收口并补录为 §8；提交 `ddad22d` 已入里程碑锚点表。IRQ-v1
+  遗留的 timer mask 运行时证据缺口已在 §8.7 补证；judge 向量
+  计数断言推迟项已随桌面壳落地（§9.6）。
 
-### 最小桌面壳 —— 待启动
+### 最小桌面壳 —— 已完成
 
-- 已知推迟项：judge 向量计数断言（与双流常驻一并落地）、右
-  Ctrl/Alt 跟踪（见 §8.10）；范围待该里程碑启动时冻结。
+- 已收口并补录为 §9；提交哈希待产生后补入锚点表（本次不写
+  未产生的哈希）。
+
+### 用户态窗口系统与进程调度 —— 路线图后续
+
+- 窗口链表/焦点/遮挡、用户态进程与调度为后续阶段（§9.1/§9.8）；
+  右 Ctrl/Alt 跟踪仍为已文档化简化（§8.10）。范围待该里程碑
+  启动时冻结。
 
 ---
 
@@ -1124,5 +1406,6 @@
 *首版撰写于里程碑 553a031（CPU+MM 集成）收口之后；IRQ-v1 章节补录于
 其收口审查通过之后（已随提交 983111c 入库）；GUI-G1 章节补录于其收口
 审查通过之后（已随提交 7b2c4b7 入库）；IRQ-v2 章节补录于其独立验证与
-收口审查通过之后（已随提交 ddad22d 入库）。后续每个里程碑收口时，
-由变更史官增补对应小节并更新提交锚点表。*
+收口审查通过之后（已随提交 ddad22d 入库）；桌面壳章节补录于其独立
+验证与收口审查通过之后（即将提交，哈希待产生后补入锚点表）。后续
+每个里程碑收口时，由变更史官增补对应小节并更新提交锚点表。*

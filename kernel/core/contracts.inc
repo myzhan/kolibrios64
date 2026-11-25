@@ -945,3 +945,222 @@ end if
 if K64_CORE_ACCOUNT_TABLES <> 3
         err 'the leg7 accounting stays frozen at three tables'
 end if
+
+; ------------------------------------------------------------------
+; DESKTOP-v1: the shared K64_* spelling of the minimal shell contract
+; and the three copy comparison against the private DESKTOP_* values.
+; Appended by task 96; every assertion above stays untouched.
+; Pure constant math, zero bytes emitted.
+;;
+; The desktop stage runs AFTER the GUI stage (and core_selftest): the
+; module maps no MMIO of its own, it reuses the video FB window, the
+; IRQ LAPIC page and the input IOAPIC page; the sprite constant and the
+; save/draw buffers live in the code/data regions, so there is no page
+; table delta and K64_CORE_ACCOUNT_TABLES stays frozen at three.
+;
+; STI ownership, frozen: desktop_run is the SECOND legal STI owner of
+; the whole kernel (the first is the irq_sti_wait self test window).
+; The desktop module contains exactly one STI, in the resident loop,
+; always preceded by the LAPIC LVT timer mask: irq_test_ticks stays
+; frozen at 11. The handlers still run with IF = 0 and only write
+; buffers/counters; every redraw happens in the main loop.
+;
+; Readback contract: video_readback_rect is the ONLY sanctioned
+; framebuffer read path of the kernel, used exclusively by the cursor
+; background save. MS x64 mirror of video_blit_rect: RCX = destination
+; kernel buffer, EDX = x, R8D = y, R9D = w, [rsp+40] = h; clipped to the
+; FB geometry, source rows advance by the FB stride, destination rows
+; are packed at the ORIGINAL w * 4. The video self test stays
+; draw-only; the desktop pixel evidence is the external screendump.
+; ------------------------------------------------------------------
+
+; the frozen desktop frame
+K64_DESKTOP_BG_COLOR    = 0x1A2B3C
+K64_DESKTOP_BAR_COLOR   = 0x2C3E50
+K64_DESKTOP_BAR_X       = 0
+K64_DESKTOP_BAR_Y       = 0
+K64_DESKTOP_BAR_W       = 1024
+K64_DESKTOP_BAR_H       = 32
+K64_DESKTOP_TITLE_X     = 8
+K64_DESKTOP_TITLE_Y     = 8
+K64_DESKTOP_TITLE_COLOR = 0xFFFFFF
+K64_DESKTOP_TITLE_LEN   = 16            ; "K64 Desktop v0.1"
+
+; the frozen 12x18 arrow sprite, one byte per pixel
+K64_DESKTOP_SPRITE_W     = 12
+K64_DESKTOP_SPRITE_H     = 18
+K64_DESKTOP_SPRITE_BYTES = K64_DESKTOP_SPRITE_W * K64_DESKTOP_SPRITE_H
+
+; the initial cursor position DERIVES from the input self test frozen
+; exit coordinates (512+5, 384-(-3)); the final position derives from
+; the injected desktop move (40,24) on top of it, never magic numbers
+K64_DESKTOP_MOUSE_XINIT = 512
+K64_DESKTOP_MOUSE_YINIT = 384
+K64_DESKTOP_CURSOR_X0 = K64_DESKTOP_MOUSE_XINIT + K64_INPUT_ST_MOUSE_DX
+K64_DESKTOP_CURSOR_Y0 = K64_DESKTOP_MOUSE_YINIT - K64_INPUT_ST_MOUSE_DY
+K64_DESKTOP_CURSOR_XMAX = K64_VIDEO_ST_WIDTH - K64_DESKTOP_SPRITE_W
+K64_DESKTOP_CURSOR_YMAX = K64_VIDEO_ST_HEIGHT - K64_DESKTOP_SPRITE_H
+K64_DESKTOP_ST_MOVE_DX = 40
+K64_DESKTOP_ST_MOVE_DY = 24             ; monitor dy, screen space
+K64_DESKTOP_ST_CURSOR_X = K64_DESKTOP_CURSOR_X0 + K64_DESKTOP_ST_MOVE_DX
+K64_DESKTOP_ST_CURSOR_Y = K64_DESKTOP_CURSOR_Y0 + K64_DESKTOP_ST_MOVE_DY
+
+; the frozen echo text area: (16,64), 126 columns x 44 rows of 8x16
+K64_DESKTOP_ECHO_X    = 16
+K64_DESKTOP_ECHO_Y    = 64
+K64_DESKTOP_ECHO_COLS = 126
+K64_DESKTOP_ECHO_ROWS = 44
+
+; frozen final counts, DETERMINISTICALLY derived from the WHOLE
+; injection chain: the input exit values plus the desktop sequence
+; (sendkey h, sendkey i = 4 kbd bytes; move + press + release = 3
+; mouse packets; 2 echoed printable chars). Ticks stay at the input
+; exit value: the resident loop masks the LVT timer BEFORE its STI.
+K64_DESKTOP_ST_KBD_FINAL      = K64_INPUT_ST_KBD_FINAL + 4
+K64_DESKTOP_ST_MOUSE_FINAL    = K64_INPUT_ST_MOUSE_FINAL + 3
+K64_DESKTOP_ST_KEYS_FINAL     = 2
+K64_DESKTOP_ST_KBD_USED_FINAL = K64_INPUT_ST_KBD_FINAL + 4
+K64_DESKTOP_TICKS_FINAL       = K64_INPUT_TICKS_FINAL
+K64_DESKTOP_STAGE_DONE        = 5
+
+; the counter layout the gdbstub smoke reads: qwords at frozen offsets
+K64_DESKTOP_DATA_OFF_TEST_MASK   = 8
+K64_DESKTOP_DATA_OFF_TEST_STAGE  = 16
+K64_DESKTOP_DATA_OFF_TEST_KEYS   = 24
+K64_DESKTOP_DATA_OFF_TEST_CURSOR_X = 32
+K64_DESKTOP_DATA_OFF_TEST_CURSOR_Y = 40
+
+; the GUI frame forensic handshake, task 102: after K64-GUI-OK and
+; before desktop_init repaints, the foundation publishes READY in the
+; desktop data slot and spins a bounded pause window until the host
+; screendumps screen-gui.ppm and writes RELEASE; a timeout is EIO and
+; takes the standard fatal path, never a hang, never a new sti
+K64_GUI_FRAME_OFF_STAGE   = 104
+K64_GUI_FRAME_READY       = 1
+K64_GUI_FRAME_RELEASE     = 2
+K64_GUI_FRAME_DONE        = 3
+K64_GUI_FRAME_POLL_CHUNK  = 0x2000000
+K64_GUI_FRAME_POLL_ROUNDS = 64
+
+; ---------------- three copy comparison ----------------
+
+if K64_DESKTOP_BG_COLOR <> DESKTOP_BG_COLOR | K64_DESKTOP_BAR_COLOR <> DESKTOP_BAR_COLOR
+        err 'the desktop colors disagree with the DESKTOP copy'
+end if
+if K64_DESKTOP_BAR_X <> DESKTOP_BAR_X | K64_DESKTOP_BAR_Y <> DESKTOP_BAR_Y | K64_DESKTOP_BAR_W <> DESKTOP_BAR_W | K64_DESKTOP_BAR_H <> DESKTOP_BAR_H
+        err 'the title bar rectangle disagrees with the DESKTOP copy'
+end if
+if K64_DESKTOP_TITLE_X <> DESKTOP_TITLE_X | K64_DESKTOP_TITLE_Y <> DESKTOP_TITLE_Y | K64_DESKTOP_TITLE_COLOR <> DESKTOP_TITLE_COLOR | K64_DESKTOP_TITLE_LEN <> DESKTOP_TITLE_LEN
+        err 'the title text spec disagrees with the DESKTOP copy'
+end if
+if K64_DESKTOP_SPRITE_W <> DESKTOP_SPRITE_W | K64_DESKTOP_SPRITE_H <> DESKTOP_SPRITE_H | K64_DESKTOP_SPRITE_BYTES <> DESKTOP_SPRITE_BYTES
+        err 'the cursor sprite spec disagrees with the DESKTOP copy'
+end if
+if K64_DESKTOP_SPRITE_BYTES <> 216
+        err 'the cursor sprite is the frozen 12x18 arrow'
+end if
+if K64_DESKTOP_MOUSE_XINIT <> DESKTOP_MOUSE_XINIT | K64_DESKTOP_MOUSE_YINIT <> DESKTOP_MOUSE_YINIT
+        err 'the mouse init coordinates disagree with the DESKTOP copy'
+end if
+if K64_DESKTOP_CURSOR_X0 <> DESKTOP_CURSOR_X0 | K64_DESKTOP_CURSOR_Y0 <> DESKTOP_CURSOR_Y0
+        err 'the initial cursor position disagrees with the DESKTOP copy'
+end if
+if K64_DESKTOP_CURSOR_X0 <> 517 | K64_DESKTOP_CURSOR_Y0 <> 387
+        err 'the initial cursor position derives from the input exit coordinates'
+end if
+if K64_DESKTOP_CURSOR_XMAX <> DESKTOP_CURSOR_XMAX | K64_DESKTOP_CURSOR_YMAX <> DESKTOP_CURSOR_YMAX
+        err 'the hotspot clamp disagrees with the DESKTOP copy'
+end if
+if K64_DESKTOP_ST_MOVE_DX <> DESKTOP_ST_MOVE_DX | K64_DESKTOP_ST_MOVE_DY <> DESKTOP_ST_MOVE_DY
+        err 'the frozen desktop injection deltas disagree with the DESKTOP copy'
+end if
+if K64_DESKTOP_ST_CURSOR_X <> DESKTOP_ST_CURSOR_X | K64_DESKTOP_ST_CURSOR_Y <> DESKTOP_ST_CURSOR_Y
+        err 'the final cursor position disagrees with the DESKTOP copy'
+end if
+if K64_DESKTOP_ST_CURSOR_X <> 557 | K64_DESKTOP_ST_CURSOR_Y <> 411
+        err 'the final cursor position derives from the injected move'
+end if
+if K64_DESKTOP_ST_CURSOR_X + K64_DESKTOP_SPRITE_W > K64_VIDEO_ST_WIDTH | K64_DESKTOP_ST_CURSOR_Y + K64_DESKTOP_SPRITE_H > K64_VIDEO_ST_HEIGHT
+        err 'the final sprite must stay fully on screen'
+end if
+if K64_DESKTOP_ECHO_X <> DESKTOP_ECHO_X | K64_DESKTOP_ECHO_Y <> DESKTOP_ECHO_Y | K64_DESKTOP_ECHO_COLS <> DESKTOP_ECHO_COLS | K64_DESKTOP_ECHO_ROWS <> DESKTOP_ECHO_ROWS
+        err 'the echo text area disagrees with the DESKTOP copy'
+end if
+if K64_DESKTOP_ECHO_X + K64_DESKTOP_ECHO_COLS * DESKTOP_FONT_W <> K64_VIDEO_ST_WIDTH
+        err 'the echo columns must tile the remaining width exactly'
+end if
+if K64_DESKTOP_ECHO_Y + K64_DESKTOP_ECHO_ROWS * DESKTOP_FONT_H <> K64_VIDEO_ST_HEIGHT
+        err 'the echo rows must tile the remaining height exactly'
+end if
+if K64_DESKTOP_ST_KBD_FINAL <> DESKTOP_ST_KBD_FINAL | K64_DESKTOP_ST_MOUSE_FINAL <> DESKTOP_ST_MOUSE_FINAL | K64_DESKTOP_ST_KEYS_FINAL <> DESKTOP_ST_KEYS_FINAL
+        err 'the frozen final counts disagree with the DESKTOP copy'
+end if
+if K64_DESKTOP_ST_KBD_USED_FINAL <> DESKTOP_ST_KBD_USED_FINAL
+        err 'the frozen buffer fill level disagrees with the DESKTOP copy'
+end if
+if K64_DESKTOP_ST_KBD_FINAL <> 6 | K64_DESKTOP_ST_MOUSE_FINAL <> 6 | K64_DESKTOP_ST_KEYS_FINAL <> 2
+        err 'the final counts derive from the whole injection chain'
+end if
+if K64_DESKTOP_TICKS_FINAL <> DESKTOP_IRQ_TICKS_FINAL | K64_DESKTOP_TICKS_FINAL <> 11
+        err 'the resident loop masks the timer, ticks stay frozen at 11'
+end if
+if K64_DESKTOP_STAGE_DONE <> DESKTOP_STAGE_DONE
+        err 'the desktop handshake end stage disagrees with the DESKTOP copy'
+end if
+if K64_DESKTOP_DATA_OFF_TEST_MASK <> DESKTOP_DATA_OFF_TEST_MASK | K64_DESKTOP_DATA_OFF_TEST_STAGE <> DESKTOP_DATA_OFF_TEST_STAGE
+        err 'the desktop mask/stage offsets disagree with the DESKTOP copy'
+end if
+if K64_DESKTOP_DATA_OFF_TEST_KEYS <> DESKTOP_DATA_OFF_TEST_KEYS | K64_DESKTOP_DATA_OFF_TEST_CURSOR_X <> DESKTOP_DATA_OFF_TEST_CURSOR_X | K64_DESKTOP_DATA_OFF_TEST_CURSOR_Y <> DESKTOP_DATA_OFF_TEST_CURSOR_Y
+        err 'the desktop keys/cursor offsets disagree with the DESKTOP copy'
+end if
+if K64_GUI_FRAME_OFF_STAGE <> DESKTOP_DATA_OFF_GUI_FRAME
+        err 'the GUI frame handshake slot disagrees with the DESKTOP copy'
+end if
+if K64_GUI_FRAME_POLL_CHUNK <> DESKTOP_POLL_CHUNK | K64_GUI_FRAME_POLL_ROUNDS <> DESKTOP_POLL_ROUNDS
+        err 'the GUI frame wait budget matches the frozen injection sizing'
+end if
+if K64_GUI_FRAME_READY <> 1 | K64_GUI_FRAME_RELEASE <> 2 | K64_GUI_FRAME_DONE <> 3
+        err 'the GUI frame stages are the frozen 1/2/3 sequence'
+end if
+
+; the private IRQ/INPUT copies the shell consumes
+if DESKTOP_LAPIC_VA <> K64_MMIO_LAPIC_VA | DESKTOP_LAPIC_LVT_TIMER <> K64_LAPIC_LVT_TIMER | DESKTOP_LVT_MASK <> K64_IRQ_LVT_MASK
+        err 'the desktop private LAPIC copies disagree with the shared contract'
+end if
+if DESKTOP_IOAPIC_IDX_KBD_LO <> K64_INPUT_IOAPIC_IDX_KBD_LO | DESKTOP_IOAPIC_IDX_MOUSE_LO <> K64_INPUT_IOAPIC_IDX_MOUSE_LO
+        err 'the desktop RTE indices disagree with the shared input contract'
+end if
+if DESKTOP_VEC_KEYBOARD <> K64_IRQ_VEC_KEYBOARD | DESKTOP_VEC_MOUSE <> K64_IRQ_VEC_MOUSE
+        err 'the desktop vectors disagree with the shared IRQ contract'
+end if
+if DESKTOP_RTE_KBD_MASKED <> K64_INPUT_RTE_KBD_MASKED | DESKTOP_RTE_MOUSE_MASKED <> K64_INPUT_RTE_MOUSE_MASKED
+        err 'the desktop masked RTEs disagree with the shared input contract'
+end if
+if DESKTOP_RTE_KBD_LIVE <> K64_IRQ_VEC_KEYBOARD | DESKTOP_RTE_MOUSE_LIVE <> K64_IRQ_VEC_MOUSE
+        err 'the live RTEs are the frozen vectors'
+end if
+if DESKTOP_SCREEN_W <> K64_VIDEO_ST_WIDTH | DESKTOP_SCREEN_H <> K64_VIDEO_ST_HEIGHT
+        err 'the desktop geometry is the frozen video reference'
+end if
+if DESKTOP_KBD_ENTRY <> 16 | INPUT_KBD_CAP < K64_DESKTOP_ST_KBD_USED_FINAL
+        err 'the key buffer entry size/cap must hold the whole injection chain'
+end if
+
+; the desktop status codes are the shared foundation set
+if K64_OK <> DESKTOP_OK | K64_EINVAL <> DESKTOP_EINVAL | K64_EPERM <> DESKTOP_EPERM
+        err 'desktop status codes disagree with the shared copy'
+end if
+if K64_EALREADY <> DESKTOP_EALREADY | K64_EIO <> DESKTOP_EIO | K64_ENOTSUP <> DESKTOP_ENOTSUP
+        err 'desktop status codes disagree with the shared copy'
+end if
+if DESKTOP_PAGE_SIZE <> K64_PAGE_SIZE | DESKTOP_DATA_ALIGN <> K64_DATA_ALIGN
+        err 'desktop geometry disagrees with the shared copy'
+end if
+if DESKTOP_PUTS_MAX <> CPU_PUTS_MAX | DESKTOP_PUTHEX_DIGITS <> CPU_PUTHEX_DIGITS
+        err 'desktop console caps disagree with the CPU copy'
+end if
+
+; no new page tables: the leg 7 baseline stays frozen at three
+if K64_CORE_ACCOUNT_TABLES <> 3
+        err 'the desktop adds no MMIO mapping, the leg7 accounting stays three'
+end if

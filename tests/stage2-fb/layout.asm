@@ -62,6 +62,7 @@ fb_probe_manifest:
         dq      video_putpixel
         dq      video_fill_rect
         dq      video_blit_rect
+        dq      video_readback_rect
         dq      video_puts
         dq      video_selftest
         dq      video_bgrx
@@ -135,7 +136,7 @@ fb_probe_manifest:
         dq      VIDEO_PAGE_SIZE
 fb_probe_manifest_end:
 
-if (fb_probe_manifest_end - fb_probe_manifest) <> 80 * 8
+if (fb_probe_manifest_end - fb_probe_manifest) <> 81 * 8
         display "the manifest must keep its fixed entry count", 13, 10
         err
 end if

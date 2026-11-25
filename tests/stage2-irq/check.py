@@ -1009,7 +1009,9 @@ def check_sources(rep, root):
         'api.inc', 'lapic.inc', 'calib.inc', 'dispatch.inc',
         'selftest.inc', 'data.inc'])
 
-    # the single-STI ownership across the whole kernel source tree
+    # the frozen STI ownership across the whole kernel source tree:
+    # irq_sti_wait (IRQ-v1 self test window) and the desktop resident
+    # loop (DESKTOP-v1, task 96) are the ONLY two legal STI owners
     hits = []
     for path in sorted((root / 'kernel').rglob('*')):
         if path.suffix not in ('.asm', '.inc') or not path.is_file():
@@ -1017,7 +1019,8 @@ def check_sources(rep, root):
         text = path.read_text(encoding='utf-8')
         for m in re.finditer(r'^\s*sti\b', text, re.M):
             hits.append(str(path.relative_to(root)))
-    rep.equal('source.kernel_sti_sites', hits, ['kernel/irq/selftest.inc'])
+    rep.equal('source.kernel_sti_sites', hits,
+              ['kernel/desktop/desktop.inc', 'kernel/irq/selftest.inc'])
     st = (module / 'selftest.inc').read_text(encoding='utf-8')
     rep.check('source.selftest_owns_cli',
               len(re.findall(r'^\s*cli\b', st, re.M)) >= 3)

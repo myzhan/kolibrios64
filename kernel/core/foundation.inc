@@ -20,12 +20,16 @@
 ;;   K64-INPUT-OK, mandatory devices, no skip) -> the GUI-G1 stage
 ;;   (video_init -> vmm_boot_protect over the video data region ->
 ;;   video_selftest -> K64-GUI-OK, or K64-GUI-SKIP when the GOP is absent
-;;   or the geometry is not the frozen 1024x768) -> K64-FOUNDATION-OK
-;;   -> halt.
+;;   or the geometry is not the frozen 1024x768) -> the DESKTOP-v1 stage
+;;   (desktop_init -> vmm_boot_protect over the desktop data region ->
+;;   desktop_selftest -> K64-DESKTOP-OK, or K64-DESKTOP-SKIP when the
+;;   GUI stage skipped) -> K64-FOUNDATION-OK -> the resident desktop
+;;   event loop, or halt when the desktop skipped.
 ;;
-;; Nothing here ever executes STI itself; the only STI windows of the
-;; whole kernel belong to irq_selftest, which always returns with the
-;; timer masked and IF = 0. Nothing calls back into UEFI. Every
+;; Nothing here ever executes STI itself; the STI windows of the whole
+;; kernel belong to irq_selftest and the resident desktop_run loop,
+;; both always entered with the timer masked as their contracts demand.
+;; Nothing calls back into UEFI. Every
 ;; failure goes through cpu_panic, which reports on COM1 within a bound
 ;; and halts on its own stack. All console output uses the new ABI CPU
 ;; module functions, never the first stage com1_* helpers.
@@ -249,12 +253,90 @@ k64_foundation_init:
         jnz     .fail
 
         k64_report kmsg_gui_ok, .fail
+
+        ; the GUI frame forensic window, task 102: the pattern frame is
+        ; about to be repainted by desktop_init, so publish READY in the
+        ; desktop handshake slot and spin a bounded pause budget until
+        ; the host screendumps screen-gui.ppm and writes RELEASE. IF
+        ; stays 0, no new sti, ticks and vectors stay frozen; a timeout
+        ; is EIO on the standard fatal path, never a hang. The skip
+        ; path never enters the window, the slot stays 0.
+        mov     qword [rbp-16], kmsg_fail_gui
+        mov     qword [desktop_gui_frame_stage], K64_GUI_FRAME_READY
+        mov     r14d, K64_GUI_FRAME_POLL_ROUNDS
+.gui_frame_poll:
+        cmp     qword [desktop_gui_frame_stage], K64_GUI_FRAME_RELEASE
+        je      .gui_frame_released
+        mov     rdx, K64_GUI_FRAME_POLL_CHUNK
+.gui_frame_pause:
+        pause
+        dec     rdx
+        jnz     .gui_frame_pause
+        dec     r14d
+        jnz     .gui_frame_poll
+        mov     eax, VIDEO_EIO
+        jmp     .fail
+.gui_frame_released:
+        mov     qword [desktop_gui_frame_stage], K64_GUI_FRAME_DONE
         jmp     .gui_done
 .gui_skip:
         k64_report kmsg_gui_skip, .fail
 .gui_done:
 
+        ; ---------------- DESKTOP-v1: the minimal shell ----------------
+        ; Runs AFTER the GUI stage: no MMIO mapping of its own (it reuses
+        ; the video FB window, the IRQ LAPIC page and the input IOAPIC
+        ; page), the sprite and the save/draw buffers live in its data
+        ; region, so the frozen leg 7 3/3/3 table delta stays untouched.
+        ;
+        ; A skipped GUI means a skipped desktop: no framebuffer, no
+        ; shell. desktop_init refuses a foreign geometry with ENOTSUP,
+        ; the same non fatal skip semantics as the GUI stage; every
+        ; other failure is a real bring-up fault that panics. The self
+        ; test needs the host injection handshake on top of the input
+        ; sequence; a timeout is a leg failure, never a pass.
+        mov     rax, [rbp-8]
+        mov     rax, [rax + K64BOOTINFO.flags]
+        test    rax, K64BOOTINFO_FLAG_FRAMEBUFFER
+        jz      .desktop_skip           ; no GOP handover, no shell
+
+        mov     qword [rbp-16], kmsg_fail_desktop
+        call    desktop_init
+        cmp     eax, DESKTOP_ENOTSUP
+        je      .desktop_skip           ; foreign geometry, nothing to draw
+        test    eax, eax
+        jnz     .fail
+
+        ; the desktop data region becomes RW/NX like the other blocks
+        mov     qword [rbp-16], kmsg_fail_protect
+        mov     rcx, desktop_data_start
+        mov     rdx, (desktop_data_end - desktop_data_start) / K64_PAGE_SIZE
+        mov     r8, MM_MAP_RW or MM_MAP_NX
+        call    vmm_boot_protect
+        test    eax, eax
+        jnz     .fail
+
+        ; on failure the desktop self test has already printed its leg
+        ; mask, the foundation takes the standard fatal path
+        mov     qword [rbp-16], kmsg_fail_desktop
+        call    desktop_selftest
+        test    eax, eax
+        jnz     .fail
+
+        k64_report kmsg_desktop_ok, .fail
+        jmp     .desktop_done
+.desktop_skip:
+        k64_report kmsg_desktop_skip, .fail
+.desktop_done:
+
         k64_report kmsg_foundation_ok, .fail
+        ; FOUNDATION-OK stays the terminal judge marker, printed BEFORE
+        ; the resident loop: a successful desktop never returns from
+        ; desktop_run (the host closes QEMU after the forensics), a
+        ; skipped desktop halts exactly like every previous milestone
+        cmp     qword [desktop_state], 0
+        je      cpu_halt_forever
+        call    desktop_run
         jmp     cpu_halt_forever
 
 .selftest_fail:
@@ -296,3 +378,10 @@ kmsg_fail_gui         db 'foundation: video bring-up failed', 0
 ; marker, the IOAPIC and the 8042 are mandatory platform devices
 kmsg_input_ok         db 'K64-INPUT-OK', 13, 10, 0
 kmsg_fail_input       db 'foundation: input bring-up failed', 0
+
+; DESKTOP-v1 messages, same read only convention; the skip marker
+; follows the GUI skip semantics (no framebuffer, no shell), it is
+; not a milestone and the smoke judges it separately
+kmsg_desktop_ok       db 'K64-DESKTOP-OK', 13, 10, 0
+kmsg_desktop_skip     db 'K64-DESKTOP-SKIP', 13, 10, 0
+kmsg_fail_desktop     db 'foundation: desktop bring-up failed', 0

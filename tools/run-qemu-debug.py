@@ -13,33 +13,56 @@ Modes:
                  continue. Ctrl-C stops QEMU and cleans up.
   --no-freeze    smoke mode: no -S, bounded by --timeout; waits for a
                  TERMINAL marker (K64-FOUNDATION-OK or K64-CPU-PANIC),
-                 not the first K64-BOOT-OK. PASS requires all nine OK
-                 markers (BOOT/CPU/PMM/VMM/HEAP/IRQ/INPUT/GUI/FOUNDATION)
-                 exactly once and in order, no K64-CPU-PANIC / K64-BOOT-FAIL,
-                 no triple fault or unexpected reset, and the frozen task-60
-                 verdict values: CPU selftest passed = 0x5FF (parsed from
-                 the serial report line) plus mm_mask = 0, hook_hits = 3,
-                 core_mask = 0, the IRQ-v2 verdict values irq_mask = 0,
-                 ticks = 11 (the input timer leg adds one to the IRQ-v1
-                 exit value 10), the input verdict values input mask = 0,
-                 kbd_count = 2, mouse_count = 3, stage = 6, and the GUI-G1
-                 verdict value video_selftest_mask = 0. The kernel never
-                 prints those counters on the success path, so they are
-                 read from guest memory through the gdbstub after the
-                 terminal marker (task 60 used the same channel). While
-                 waiting, the smoke loop drives the IRQ-v2 input self test
-                 handshake: it polls input_test_stage through the gdbstub
-                 and injects sendkey / mouse_move / mouse_button through
-                 the monitor socket, once per stage, all bounded. After
-                 the terminal marker a monitor screendump is captured to
-                 screen.ppm and judged in pure Python against the frozen
-                 28-probe pattern spec (1024x768, eight bars, border,
-                 gray rectangle, text glyphs). Any parse/read failure,
+                 not the first K64-BOOT-OK. PASS requires all ten OK
+                 markers (BOOT/CPU/PMM/VMM/HEAP/IRQ/INPUT/GUI/DESKTOP/
+                 FOUNDATION) exactly once and in order, no K64-CPU-PANIC /
+                 K64-BOOT-FAIL, no triple fault or unexpected reset, and
+                 the frozen task-60 verdict values: CPU selftest passed =
+                 0x5FF (parsed from the serial report line) plus mm_mask =
+                 0, hook_hits = 3, core_mask = 0, the IRQ-v2 verdict values
+                 irq_mask = 0, ticks = 11 (the desktop loop masks the LVT
+                 timer, the count stays at the input exit value), the
+                 input verdict values input mask = 0, kbd_count = 6,
+                 mouse_count = 6, stage = 6 (the desktop injection adds
+                 make+break of h and i plus move/press/release on top of
+                 the input exit values 2/3), the GUI-G1 verdict value
+                 video_selftest_mask = 0 and the DESKTOP-v1 verdict values
+                 desktop mask = 0, stage = 5, keys = 2, cursor = (557,411).
+                 The kernel never prints those counters on the success
+                 path, so they are read from guest memory through the
+                 gdbstub after the terminal marker (task 60 used the same
+                 channel). While waiting, the smoke loop drives the IRQ-v2
+                 input self test handshake and then the DESKTOP-v1 shell
+                 handshake: it polls input_test_stage / desktop_test_stage
+                 through the gdbstub and injects sendkey / mouse_move /
+                 mouse_button through the monitor socket, once per stage,
+                 all bounded. THREE screendumps are captured:
+                 screen-gui.ppm inside the bounded GUI frame handshake
+                 window (the foundation publishes READY in
+                 desktop_gui_frame_stage after K64-GUI-OK and spins a
+                 pause budget; the host screendumps the still pristine
+                 GUI-G1 pattern frame and writes RELEASE through the
+                 gdbstub 'M' packet; a timeout is a guest EIO panic,
+                 never a hang), screen-echo.ppm when the echo leg
+                 finished (desktop stage 3, before the mouse move:
+                 background/title/cursor at (517,387)/"hi") and
+                 screen.ppm after the terminal marker (cursor moved to
+                 (557,411), the old position restored to the background).
+                 All three are judged in pure Python against the frozen
+                 pattern/desktop frame probe specs. The -d int log is
+                 judged too: the
+                 v=0x21/v=0x2c delivery counts must equal the values
+                 deterministically derived from the WHOLE injection chain
+                 (one delivery per 8042 byte). Any parse/read failure,
                  or a timeout without a terminal marker, is a FAIL with
                  the reason printed.
   --gui-skip     expect the non-fatal GUI skip path instead: the eight
-                 non-GUI OK markers plus exactly one K64-GUI-SKIP between
-                 INPUT and FOUNDATION, no K64-GUI-OK, no pixel assertions;
+                 non-GUI/non-desktop OK markers plus exactly one
+                 K64-GUI-SKIP and one K64-DESKTOP-SKIP between INPUT and
+                 FOUNDATION, no K64-GUI-OK / K64-DESKTOP-OK, no pixel
+                 assertions; the input counters stay at their input-exit
+                 values (2/3) and the desktop counters at zero, the
+                 vector counts at the input-only derivation (2/9);
                  video_fb_state is read through the gdbstub as geometry
                  evidence. Used with a loader built with GOP_MAX_MODES=0.
 
@@ -75,35 +98,99 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# the nine milestone markers, in their fixed emission order; IRQ-v2
-# INPUT sits between IRQ and GUI, GUI-G1 between INPUT and FOUNDATION
-# (foundation.inc emits them after core_selftest)
+# the ten milestone markers, in their fixed emission order; IRQ-v2
+# INPUT sits between IRQ and GUI, GUI-G1 between INPUT and DESKTOP,
+# DESKTOP-v1 between GUI and FOUNDATION (foundation.inc emits them
+# after core_selftest)
 MARKERS = ("K64-BOOT-OK", "K64-CPU-OK", "K64-PMM-OK", "K64-VMM-OK",
            "K64-HEAP-OK", "K64-IRQ-OK", "K64-INPUT-OK", "K64-GUI-OK",
-           "K64-FOUNDATION-OK")
+           "K64-DESKTOP-OK", "K64-FOUNDATION-OK")
 GUI_OK_MARKER = "K64-GUI-OK"
 GUI_SKIP_MARKER = "K64-GUI-SKIP"
+DESKTOP_OK_MARKER = "K64-DESKTOP-OK"
+DESKTOP_SKIP_MARKER = "K64-DESKTOP-SKIP"
 TERMINAL_MARKERS = ("K64-FOUNDATION-OK", "K64-CPU-PANIC")
 FORBIDDEN_MARKERS = ("K64-CPU-PANIC", "K64-BOOT-FAIL")
 
-# frozen GUI-G1 screendump spec: 1024x768, the 28 pixel probes of the
-# task-77 pattern (0xRRGGBB). Bars: red green blue yellow cyan magenta
-# white black, 128 columns each; 1px white border; the centered gray
-# rectangle (412,284)-(611,483); the "K64 GUI-G1" glyph probes at (8,8).
+# frozen screendump spec: 1024x768. THREE captures are judged:
+#   screen-gui.ppm   the GUI-G1 pattern frame, captured inside the
+#                    bounded foundation handshake window after
+#                    K64-GUI-OK, BEFORE desktop_init repaints it
+#   screen-echo.ppm  after the echo leg (desktop stage 3, before the
+#                    mouse move): cursor at the initial (517,387)
+#   screen.ppm       after the terminal marker: cursor at (557,411),
+#                    the old position restored to the background
+# The GUI probes are the frozen task-77 pattern spec, the same 28 hand
+# written pixels as the stage2-fb spec model. Common desktop probes
+# hold in BOTH desktop frames: deep blue background 0x1A2B3C,
+# title bar 0x2C3E50 (0,0,1024,32), "K64 Desktop v0.1" at (8,8) in
+# white on the bar, the echoed "hi" at (16,64) in white on the blue.
 PPM_WIDTH, PPM_HEIGHT = 1024, 768
-PPM_PROBES = (
-    (64, 100, 0xFF0000), (192, 100, 0x00FF00), (320, 100, 0x0000FF),
-    (448, 100, 0xFFFF00), (576, 100, 0x00FFFF), (704, 100, 0xFF00FF),
-    (832, 100, 0xFFFFFF), (960, 100, 0x000000),
-    (127, 100, 0xFF0000), (128, 100, 0x00FF00),
-    (895, 100, 0xFFFFFF), (896, 100, 0x000000),
-    (0, 0, 0xFFFFFF), (1023, 767, 0xFFFFFF), (512, 0, 0xFFFFFF),
-    (0, 384, 0xFFFFFF), (1023, 100, 0xFFFFFF), (1, 1, 0xFF0000),
-    (412, 284, 0x808080), (611, 483, 0x808080),
-    (411, 284, 0xFFFF00), (612, 284, 0x00FFFF),
-    (412, 283, 0xFFFF00), (412, 484, 0xFFFF00),
-    (9, 10, 0xFFFFFF), (14, 10, 0xFFFFFF),
-    (8, 10, 0xFF0000), (8, 8, 0xFF0000),
+DESKTOP_BG = 0x1A2B3C
+DESKTOP_BAR = 0x2C3E50
+# the GUI-G1 pattern frame: 8 color bars x 128 px, white border, the
+# centered 200x200 gray rectangle at (412,284), "K64 GUI-G1" at (8,8)
+PPM_GUI_PROBES = (
+    (64, 100, 0xFF0000),                # bar 0 center is red
+    (192, 100, 0x00FF00),               # bar 1 center is green
+    (320, 100, 0x0000FF),               # bar 2 center is blue
+    (448, 100, 0xFFFF00),               # bar 3 center is yellow
+    (576, 100, 0x00FFFF),               # bar 4 center is cyan
+    (704, 100, 0xFF00FF),               # bar 5 center is magenta
+    (832, 100, 0xFFFFFF),               # bar 6 center is white
+    (960, 100, 0x000000),               # bar 7 center is black
+    (127, 100, 0xFF0000),               # bar 0/1 boundary left is red
+    (128, 100, 0x00FF00),               # bar 0/1 boundary right is green
+    (895, 100, 0xFFFFFF),               # bar 6/7 boundary left is white
+    (896, 100, 0x000000),               # bar 6/7 boundary right is black
+    (0, 0, 0xFFFFFF),                   # top left corner is border white
+    (1023, 767, 0xFFFFFF),              # bottom right corner is border white
+    (512, 0, 0xFFFFFF),                 # top edge is border white
+    (0, 384, 0xFFFFFF),                 # left edge is border white
+    (1023, 100, 0xFFFFFF),              # right edge is border white
+    (1, 1, 0xFF0000),                   # inside the border bar 0 red shows
+    (412, 284, 0x808080),               # rectangle top left is gray
+    (611, 483, 0x808080),               # rectangle bottom right is gray
+    (411, 284, 0xFFFF00),               # left of the rectangle bar 3 yellow
+    (612, 284, 0x00FFFF),               # right of the rectangle bar 4 cyan
+    (412, 283, 0xFFFF00),               # above the rectangle bar 3 yellow
+    (412, 484, 0xFFFF00),               # below the rectangle bar 3 yellow
+    (9, 10, 0xFFFFFF),                  # 'K' glyph row 2 left stroke lit
+    (14, 10, 0xFFFFFF),                 # 'K' glyph row 2 right stroke lit
+    (8, 10, 0xFF0000),                  # 'K' glyph row 2 edge not lit
+    (8, 8, 0xFF0000),                   # 'K' glyph row 0 is empty
+)
+PPM_COMMON_PROBES = (
+    (900, 700, DESKTOP_BG),             # background, far from everything
+    (16, 767, DESKTOP_BG),              # background, bottom left corner
+    (500, 16, DESKTOP_BAR),             # title bar fill
+    (500, 31, DESKTOP_BAR),             # title bar last row
+    (500, 32, DESKTOP_BG),              # first row below the bar
+    (9, 10, 0xFFFFFF), (14, 10, 0xFFFFFF),   # 'K' glyph row 2 lit
+    (8, 10, DESKTOP_BAR), (8, 8, DESKTOP_BAR),  # 'K' glyph off pixels
+    (18, 69, 0xFFFFFF),                 # 'h' row 5 col 2 lit
+    (16, 69, DESKTOP_BG),               # 'h' row 5 col 0 off
+    (22, 66, 0xFFFFFF),                 # 'h' row 2 col 6 lit
+    (27, 66, 0xFFFFFF),                 # 'i' row 2 col 3 lit
+    (25, 75, 0xFFFFFF),                 # 'i' row 11 base lit
+    (24, 66, DESKTOP_BG),               # 'i' row 2 col 0 off
+)
+# the echo frame: the cursor sprite at the frozen initial (517,387)
+PPM_ECHO_PROBES = (
+    (517, 387, 0x000000),               # sprite row 0 col 0 outline
+    (519, 392, 0xFFFFFF),               # sprite row 5 col 2 white fill
+    (528, 387, DESKTOP_BG),             # sprite row 0 col 11 transparent
+)
+# the final frame: the cursor moved to (557,411), the old position
+# restored to the background pixel for pixel
+PPM_FINAL_PROBES = (
+    (557, 411, 0x000000),               # sprite row 0 col 0 outline
+    (559, 416, 0xFFFFFF),               # sprite row 5 col 2 white fill
+    (562, 416, 0xFFFFFF),               # sprite row 5 col 5 white fill
+    (568, 411, DESKTOP_BG),             # sprite row 0 col 11 transparent
+    (517, 387, DESKTOP_BG),             # old outline pixel restored
+    (519, 392, DESKTOP_BG),             # old white fill pixel restored
+    (528, 397, DESKTOP_BG),             # old row 10 outline pixel restored
 )
 
 # frozen task-60 verdict values. passed comes from the serial report line;
@@ -116,16 +203,51 @@ COUNTER_SYMBOLS = (("mm_test_selftest_mask", 8), ("mm_test_fail_hits", 4),
                    ("input_test_kbd_count", 8),
                    ("input_test_mouse_count", 8),
                    ("input_test_stage", 8),
-                   ("video_selftest_mask", 8))
+                   ("video_selftest_mask", 8),
+                   ("desktop_test_selftest_mask", 8),
+                   ("desktop_test_stage", 8),
+                   ("desktop_test_keys", 8),
+                   ("desktop_test_cursor_x", 8),
+                   ("desktop_test_cursor_y", 8),
+                   ("desktop_gui_frame_stage", 8))
 EXPECTED_PASSED = 0x5FF
+# ok mode: the WHOLE injection chain (input self test + desktop self
+# test). kbd = 2 + make/break of h and i = 6; mouse = 3 + move/press/
+# release = 6; ticks stays 11 (the desktop loop masks the LVT timer);
+# the desktop counters derive from the frozen contract (keys = 2, the
+# cursor moves 517+40, 387+24).
 EXPECTED_COUNTERS = {"mm_test_selftest_mask": 0, "mm_test_fail_hits": 3,
                      "core_selftest_mask": 0,
                      "irq_test_selftest_mask": 0, "irq_test_ticks": 11,
                      "input_test_selftest_mask": 0,
-                     "input_test_kbd_count": 2,
-                     "input_test_mouse_count": 3,
+                     "input_test_kbd_count": 6,
+                     "input_test_mouse_count": 6,
                      "input_test_stage": 6,
-                     "video_selftest_mask": 0}
+                     "video_selftest_mask": 0,
+                     "desktop_test_selftest_mask": 0,
+                     "desktop_test_stage": 5,
+                     "desktop_test_keys": 2,
+                     "desktop_test_cursor_x": 557,
+                     "desktop_test_cursor_y": 411,
+                     "desktop_gui_frame_stage": 3}
+# skip mode: no GOP, no GUI, no desktop; the input counters stay at
+# their input-exit values and every desktop counter stays zero
+EXPECTED_COUNTERS_SKIP = dict(EXPECTED_COUNTERS,
+                              input_test_kbd_count=2,
+                              input_test_mouse_count=3,
+                              desktop_test_stage=0,
+                              desktop_test_keys=0,
+                              desktop_test_cursor_x=0,
+                              desktop_test_cursor_y=0,
+                              desktop_gui_frame_stage=0)
+# -d int vector delivery expectations, DETERMINISTICALLY derived from
+# the whole injection chain (one delivery per 8042 byte, the task-94
+# measured structure): ok mode v=0x21 = 2 (sendkey a) + 4 (h and i
+# make+break) = 6, v=0x2c = 9 (input move/press/release, 3 bytes per
+# packet) + 9 (desktop move/press/release) = 18. sendkey b is fully
+# drained under the mask, it never delivers. skip mode: input only.
+EXPECTED_VECTORS = {"ok": {"21": 6, "2c": 18},
+                    "skip": {"21": 2, "2c": 9}}
 PASSED_RE = re.compile(r"K64-CPU-SELFTEST passed = (0x[0-9A-Fa-f]+)")
 
 # the IRQ-v2 host injection script, one monitor command per handshake
@@ -134,6 +256,24 @@ PASSED_RE = re.compile(r"K64-CPU-SELFTEST passed = (0x[0-9A-Fa-f]+)")
 # (mouse_count >= 2), so QEMU can never coalesce press+release into one
 # packet. Stage 5 (timer) and 6 (done) need no host action.
 INPUT_STAGE_INJECT = {1: "sendkey b", 2: "sendkey a", 3: "mouse_move 5 3"}
+
+# the DESKTOP-v1 host injection script, one monitor command per
+# handshake stage (desktop/api.inc DESKTOP_STAGE_*), polled only after
+# K64-GUI-OK. Stage 3 is special: the echo frame screendump is captured
+# FIRST (cursor still at the initial position), then the move is sent.
+# Stage 4 splits press/release: the release only after the guest
+# consumed the press packet (mouse_count >= 5 = input exit 3 + move 1
+# + press 1), so QEMU can never coalesce press+release. Stage 5 (done)
+# needs no host action.
+DESKTOP_STAGE_INJECT = {1: "sendkey h", 2: "sendkey i", 3: "mouse_move 40 24"}
+
+# the GUI frame forensic handshake stages (core/contracts.inc
+# K64_GUI_FRAME_*): after K64-GUI-OK the guest publishes READY (1) in
+# desktop_gui_frame_stage and spins a bounded pause window; the host
+# captures screen-gui.ppm and writes RELEASE (2), the guest marks
+# DONE (3) and only then lets desktop_init repaint the pattern frame
+GUI_FRAME_READY = 1
+GUI_FRAME_RELEASE = 2
 
 # forensic evidence for a failed input handshake: the raw mouse packet
 # state, read through the gdbstub while the panicked kernel still lives
@@ -350,6 +490,47 @@ def gdb_read_mem(port, addr, size, timeout=5.0):
                 pass
 
 
+def gdb_write_mem(port, addr, value, size, timeout=5.0):
+    """One little-endian guest memory write via the gdbstub 'M' packet.
+
+    Used by the GUI frame handshake to release the bounded guest spin
+    window after screen-gui.ppm was captured. Same detach discipline
+    as gdb_read_mem: 'D' is sent on EVERY exit path so the VM never
+    stays paused after an error reply.
+    """
+    data = value.to_bytes(size, "little").hex()
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as s:
+        s.settimeout(timeout)
+        try:
+            body = ("M%x,%x:%s" % (addr, size, data)).encode()
+            s.sendall(b"$" + body + b"#%02x" % (sum(body) & 0xFF))
+            buf = b""
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                while True:
+                    m = re.search(rb"\$([^#]*)#([0-9a-fA-F]{2})", buf)
+                    if not m:
+                        break
+                    payload = m.group(1)
+                    buf = buf[m.end():]
+                    if payload == b"OK":
+                        return
+                    if payload[:1] == b"E":
+                        raise OSError(f"gdbstub error reply {payload.decode()!r} "
+                                      f"for M{addr:x},{size:x}")
+            raise OSError(f"gdbstub write M{addr:x},{size:x}: no OK reply "
+                          "before timeout")
+        finally:
+            try:
+                s.sendall(b"$D#44")
+            except OSError:
+                pass
+
+
 def read_counters(port, addrs):
     counters, errors = {}, []
     for name, size in COUNTER_SYMBOLS:
@@ -362,15 +543,17 @@ def read_counters(port, addrs):
     return counters, errors
 
 
-def screendump(art, timeout=15.0):
+def screendump(art, timeout=15.0, name="screen.ppm"):
     """Capture the guest screen through the unix-socket QEMU monitor.
 
-    Returns the raw PPM bytes; screen.ppm stays in the artifact directory
-    as forensic evidence. The command completes before the next (qemu)
-    prompt is printed, so the file is whole when the prompt arrives.
+    Returns the raw PPM bytes; the named file stays in the artifact
+    directory as forensic evidence (screen-echo.ppm for the echo frame,
+    screen.ppm for the final frame). The command completes before the
+    next (qemu) prompt is printed, so the file is whole when the prompt
+    arrives.
     """
     sock_path = os.path.join(art, "monitor.sock")
-    ppm_path = os.path.join(art, "screen.ppm")
+    ppm_path = os.path.join(art, name)
     if os.path.exists(ppm_path):
         os.unlink(ppm_path)
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
@@ -469,17 +652,26 @@ def parse_ppm(data):
     return w, h, px
 
 
-def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None):
+def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None,
+          ppm_echo=None, ppm_gui=None):
     """Pure smoke verdict: (ok, report lines). No I/O in here, so the
     decision can be exercised unit-style against mutated serial/debug
     fixtures (the task-67 sensitivity evidence).
 
-    gui_mode="ok"   the default nine-marker PASS path plus the frozen
-                    28-probe PPM pixel assertions on `ppm` (raw bytes).
+    gui_mode="ok"   the default ten-marker PASS path plus the frozen
+                    frame PPM pixel assertions on THREE captures:
+                    `ppm_gui` (the GUI-G1 pattern frame, captured in
+                    the bounded handshake window before the desktop
+                    repaint), `ppm_echo` (echo frame, cursor at the
+                    initial position) and `ppm` (final frame, cursor
+                    moved and the old position restored), raw PPM bytes.
     gui_mode="skip" the non-fatal GOP fallback path: eight OK markers,
-                    exactly one K64-GUI-SKIP between IRQ and FOUNDATION,
-                    no K64-GUI-OK, no pixel assertions. Never mixed into
-                    the default PASS path.
+                    exactly one K64-GUI-SKIP and one K64-DESKTOP-SKIP
+                    between INPUT and FOUNDATION, no K64-GUI-OK /
+                    K64-DESKTOP-OK, no pixel assertions. Never mixed
+                    into the default PASS path.
+    The -d int vector delivery counts (v=0x21/v=0x2c) are asserted in
+    both modes against the deterministic injection-chain derivation.
     """
     lines = []
     ok = True
@@ -495,7 +687,8 @@ def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None):
         "terminal marker seen (K64-FOUNDATION-OK or K64-CPU-PANIC)")
     positions = []
     markers = (MARKERS if gui_mode == "ok"
-               else tuple(m for m in MARKERS if m != GUI_OK_MARKER))
+               else tuple(m for m in MARKERS
+                          if m not in (GUI_OK_MARKER, DESKTOP_OK_MARKER)))
     for m in markers:
         n = serial.count(m)
         req(n == 1, f"{m} count = {n} (need exactly 1)")
@@ -521,44 +714,69 @@ def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None):
         passed = int(matches[0], 16)
         req(passed == EXPECTED_PASSED,
             f"CPU selftest passed = {passed:#x} (need {EXPECTED_PASSED:#x})")
+    expected = EXPECTED_COUNTERS if gui_mode == "ok" else EXPECTED_COUNTERS_SKIP
     for name, _ in COUNTER_SYMBOLS:
-        want = EXPECTED_COUNTERS[name]
+        want = expected[name]
         if name not in counters:
             req(False, f"{name} unreadable (gdbstub memory read failed)")
         else:
             got = counters[name]
             req(got == want, f"{name} = {got:#x} (need {want:#x})")
 
-    # GUI-G1 verdict, kept separate from the shared checks above
+    # -d int vector delivery evidence: one delivery per 8042 byte, the
+    # expectation derives from the whole injection chain, never from a
+    # runtime observation (the IRQ-v2 deferred item, landed by task 96)
+    for vec, want in EXPECTED_VECTORS[gui_mode].items():
+        got = len(re.findall(r"\bv=" + vec + r"\b", debug))
+        req(got == want,
+            f"-d int v={vec} deliveries = {got} (need {want}, derived)")
+
+    def judge_ppm(raw, probes, label):
+        if raw is None:
+            req(False, f"{label} screendump PPM captured")
+            return
+        try:
+            w, h, px = parse_ppm(raw)
+        except ValueError as e:
+            req(False, f"{label} PPM parse: {e}")
+            return
+        req((w, h) == (PPM_WIDTH, PPM_HEIGHT),
+            f"{label} PPM size {w}x{h} (need {PPM_WIDTH}x{PPM_HEIGHT})")
+        if (w, h) == (PPM_WIDTH, PPM_HEIGHT):
+            for x, y, want in probes:
+                off = (y * w + x) * 3
+                got = (px[off] << 16) | (px[off + 1] << 8) | px[off + 2]
+                req(got == want,
+                    f"{label} pixel ({x},{y}) = {got:#08x} "
+                    f"(need {want:#08x})")
+
+    # DESKTOP-v1 verdict, kept separate from the shared checks above
     if gui_mode == "ok":
         req(GUI_SKIP_MARKER not in serial,
             "no K64-GUI-SKIP in serial (ok mode)")
-        if ppm is None:
-            req(False, "screendump PPM captured")
-        else:
-            try:
-                w, h, px = parse_ppm(ppm)
-            except ValueError as e:
-                req(False, f"PPM parse: {e}")
-            else:
-                req((w, h) == (PPM_WIDTH, PPM_HEIGHT),
-                    f"PPM size {w}x{h} (need {PPM_WIDTH}x{PPM_HEIGHT})")
-                if (w, h) == (PPM_WIDTH, PPM_HEIGHT):
-                    for x, y, want in PPM_PROBES:
-                        off = (y * w + x) * 3
-                        got = (px[off] << 16) | (px[off + 1] << 8) | px[off + 2]
-                        req(got == want,
-                            f"pixel ({x},{y}) = {got:#08x} (need {want:#08x})")
+        req(DESKTOP_SKIP_MARKER not in serial,
+            "no K64-DESKTOP-SKIP in serial (ok mode)")
+        judge_ppm(ppm_gui, PPM_GUI_PROBES, "gui")
+        judge_ppm(ppm_echo, PPM_COMMON_PROBES + PPM_ECHO_PROBES, "echo")
+        judge_ppm(ppm, PPM_COMMON_PROBES + PPM_FINAL_PROBES, "final")
     else:
         req(GUI_OK_MARKER not in serial,
             "no K64-GUI-OK in serial (skip mode)")
+        req(DESKTOP_OK_MARKER not in serial,
+            "no K64-DESKTOP-OK in serial (skip mode)")
         n = serial.count(GUI_SKIP_MARKER)
         req(n == 1, f"{GUI_SKIP_MARKER} count = {n} (need exactly 1)")
+        n = serial.count(DESKTOP_SKIP_MARKER)
+        req(n == 1, f"{DESKTOP_SKIP_MARKER} count = {n} (need exactly 1)")
         p_input = serial.find("K64-INPUT-OK")
         p_skip = serial.find(GUI_SKIP_MARKER)
+        p_dskip = serial.find(DESKTOP_SKIP_MARKER)
         p_found = serial.find("K64-FOUNDATION-OK")
         req(p_input >= 0 and p_skip > p_input and p_found > p_skip,
             "K64-GUI-SKIP sits between K64-INPUT-OK and K64-FOUNDATION-OK")
+        req(p_skip >= 0 and p_dskip > p_skip and p_found > p_dskip,
+            "K64-DESKTOP-SKIP sits between K64-GUI-SKIP and "
+            "K64-FOUNDATION-OK")
     return ok, lines
 
 
@@ -651,6 +869,20 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
     press_sent = False
     release_sent = False
     inject_log = []
+    # DESKTOP-v1 handshake state: polled only after K64-GUI-OK; the
+    # echo frame screendump is captured at stage 3 BEFORE the move is
+    # injected, so the cursor is still at the initial position
+    d_injected = set()
+    d_press_sent = False
+    d_release_sent = False
+    echo_ppm = None
+    # GUI frame forensic handshake state, task 102: after K64-GUI-OK
+    # the foundation publishes READY in desktop_gui_frame_stage and
+    # spins a bounded pause window; capture screen-gui.ppm first, then
+    # write RELEASE. A failed screendump never releases the guest: the
+    # window times out into the EIO panic path, a FAIL, never a hang.
+    gui_ppm = None
+    gui_released = False
 
     def inject(cmd, label):
         # a monitor reply starting with Error/unknown means the command
@@ -670,6 +902,8 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
 
     stage_addr = counter_addrs.get("input_test_stage")
     mouse_addr = counter_addrs.get("input_test_mouse_count")
+    d_stage_addr = counter_addrs.get("desktop_test_stage")
+    gui_stage_addr = counter_addrs.get("desktop_gui_frame_stage")
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             early_exit = True  # QEMU died on its own, e.g. -no-reboot on fault
@@ -703,6 +937,68 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
                     if n >= 2:
                         release_sent = inject("mouse_button 0",
                                               "stage 4 release")
+        # the GUI frame capture runs BEFORE the desktop handshake: the
+        # guest sits in the bounded window and desktop_test_stage stays
+        # 0 until RELEASE is written, so the two never interleave
+        if (not args.gui_skip and gui_stage_addr is not None
+                and not gui_released and "K64-GUI-OK" in serial_now):
+            try:
+                g_stage = gdb_read_mem(args.port, gui_stage_addr, 8)
+            except OSError:
+                g_stage = None
+            if g_stage == GUI_FRAME_READY:
+                if gui_ppm is None:
+                    try:
+                        gui_ppm = screendump(art, name="screen-gui.ppm")
+                        inject_log.append("gui frame: screen-gui.ppm "
+                                          "captured")
+                    except OSError as e:
+                        inject_log.append("gui frame: screendump FAILED: "
+                                          f"{e}")
+                if gui_ppm is not None:
+                    try:
+                        gdb_write_mem(args.port, gui_stage_addr,
+                                      GUI_FRAME_RELEASE, 8)
+                        gui_released = True
+                        inject_log.append("gui frame: RELEASE written")
+                    except OSError as e:
+                        inject_log.append(f"gui frame: release FAILED: {e}")
+        # the desktop handshake runs after the GUI milestone; the same
+        # bounded poll/inject discipline as the input handshake above
+        if (not args.gui_skip and d_stage_addr is not None
+                and "K64-GUI-OK" in serial_now):
+            try:
+                d_stage = gdb_read_mem(args.port, d_stage_addr, 8)
+            except OSError:
+                d_stage = None
+            if d_stage in DESKTOP_STAGE_INJECT and d_stage not in d_injected:
+                if d_stage == 3 and echo_ppm is None:
+                    # the echo leg finished: capture the frame with the
+                    # cursor at (517,387) BEFORE injecting the move
+                    try:
+                        echo_ppm = screendump(art, name="screen-echo.ppm")
+                        inject_log.append("echo frame: screen-echo.ppm "
+                                          "captured")
+                    except OSError as e:
+                        inject_log.append("echo frame: screendump FAILED: "
+                                          f"{e}")
+                if inject(DESKTOP_STAGE_INJECT[d_stage],
+                          f"desktop stage {d_stage}"):
+                    d_injected.add(d_stage)
+            elif d_stage == 4 and mouse_addr is not None:
+                if not d_press_sent:
+                    d_press_sent = inject("mouse_button 1",
+                                          "desktop stage 4 press")
+                elif not d_release_sent:
+                    try:
+                        n = gdb_read_mem(args.port, mouse_addr, 8)
+                    except OSError:
+                        n = 0
+                    # input exit 3 + move 1 + press 1 = 5: the release
+                    # only after the guest consumed the press packet
+                    if n >= 5:
+                        d_release_sent = inject("mouse_button 0",
+                                                "desktop stage 4 release")
         time.sleep(0.5)
     # give the kernel a moment to finish its report, then read the
     # memory-only counters while QEMU (and the halted kernel) still lives
@@ -719,10 +1015,13 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
     # forensic evidence: on any input counter mismatch, dump the raw
     # mouse packet state before killing QEMU
     forensic = []
+    expected = EXPECTED_COUNTERS_SKIP if args.gui_skip else EXPECTED_COUNTERS
     if proc.poll() is None and any(
-            counters.get(n) != EXPECTED_COUNTERS[n]
+            counters.get(n) != expected[n]
             for n in ("input_test_selftest_mask", "input_test_kbd_count",
-                      "input_test_mouse_count", "input_test_stage")):
+                      "input_test_mouse_count", "input_test_stage",
+                      "desktop_test_selftest_mask", "desktop_test_stage",
+                      "desktop_test_keys")):
         for name, size in INPUT_FORENSIC_SYMBOLS:
             if name not in counter_addrs:
                 continue
@@ -759,7 +1058,8 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
     serial = read_log(serial_path)
     debug = read_log(os.path.join(art, "qemu-debug.log"))
     ok, lines = judge(serial, debug, counters, early_exit,
-                      gui_mode="skip" if args.gui_skip else "ok", ppm=ppm)
+                      gui_mode="skip" if args.gui_skip else "ok", ppm=ppm,
+                      ppm_echo=echo_ppm, ppm_gui=gui_ppm)
     print()
     print("=" * 72)
     print(f"run-qemu-debug: smoke verdict: {'PASS' if ok else 'FAIL'}")
@@ -778,6 +1078,10 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
         for entry in forensic:
             print("    " + entry)
     print(f"  terminal marker before timeout : {terminal_seen}")
+    print(f"  gui screendump PPM  : {os.path.join(art, 'screen-gui.ppm')} "
+          f"({'captured' if gui_ppm is not None else 'MISSING'})")
+    print(f"  echo screendump PPM : {os.path.join(art, 'screen-echo.ppm')} "
+          f"({'captured' if echo_ppm is not None else 'MISSING'})")
     print(f"  screendump PPM : {ppm_path} "
           f"({'captured' if ppm is not None else 'MISSING'})")
     if fb_note:
@@ -823,7 +1127,8 @@ def main():
     os.makedirs(art, exist_ok=True)
     # a reused art-dir must not leak a previous session's terminal marker
     # into the smoke poll loop, nor a stale socket into the monitor bind
-    for stale in ("serial.log", "qemu-debug.log", "screen.ppm", "monitor.sock"):
+    for stale in ("serial.log", "qemu-debug.log", "screen.ppm",
+                  "screen-echo.ppm", "screen-gui.ppm", "monitor.sock"):
         p = os.path.join(art, stale)
         if os.path.exists(p):
             os.unlink(p)
