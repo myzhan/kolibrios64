@@ -23,7 +23,8 @@
 | kolibrios64 | `ef6a29b` | docs：IRQ-v2 提交哈希补录 |
 | kolibrios64 | `2bd897b` | 桌面壳：最小交互桌面（QEMU 验证，见 §9） |
 | kolibrios64 | `7080025` | FONT-FIX 字体位序修复 + 独立 oracle 门禁（QEMU 验证，见 §7.10） |
-| kolibrios64 | `e2bcbe7` | docs：FONT-FIX 提交哈希补录（当前 HEAD；FS-v1 改动尚未提交，见 §10） |
+| kolibrios64 | `e2bcbe7` | docs：FONT-FIX 提交哈希补录 |
+| kolibrios64 | `424fed2` | FS-v1：virtio-blk + 只读 FAT16 + 文件 syscall 4..9（QEMU 验证，见 §10；含 APP-v1 轨一 CPU/MM 用户态前置，收口文件不可拆分裁决；当前 HEAD） |
 | fasm2 | `0253b7f` | macOS x64 自举工作流收口（自举里程碑，含 `aad830d` 自举宿主与自宿主测试） |
 
 以上锚点已用 `git log --oneline` 核对。本文档随后续里程碑一并提交，不单独入库。
@@ -1438,7 +1439,7 @@
 
 ---
 
-## 10. FS-v1：VFS + 块设备 + 文件 syscall（提交待补）
+## 10. FS-v1：VFS + 块设备 + 文件 syscall（提交 `424fed2`）
 
 > 状态：已通过独立验证（6/6，任务 134）与审查修复复验（8/8 +
 > 全量终值 6/6，任务 139，含 214 项独立交叉复核）；收口审查
@@ -1449,8 +1450,8 @@
 > 顺序），tools/build-fat16-image.py 确定性映像构建器与
 > run-qemu-debug.py --fs/--fsprobe 编排，tests/stage2-blk /
 > stage2-fs / stage2-fsys 三个新门禁及 stage2-mm / stage2-cpu /
-> stage2-desktop 扩展，本文档。提交哈希待产生后补入锚点表
-> （本次不写未产生的哈希）。
+> stage2-desktop 扩展，本文档。提交哈希 `424fed2`（已补入锚点表；
+> 含 APP-v1 轨一 CPU/MM 用户态前置，收口文件不可拆分裁决）。
 
 ### 10.1 背景与用户裁决：APP-v1 期间插入 FS-v1，先冻结文件契约
 
@@ -1759,7 +1760,7 @@
   blk_backend 的 initramfs ramdisk 回退接缝已预留未启用。
 - **只读限制**：写标志 EPERM、modern-only 设备拒认、非 512B
   扇区/非 FAT16 几何 EIO——均为显式冻结拒绝而非静默降级。
-- FS-v1 提交哈希待产生后补入锚点表（本次不写未产生的哈希）。
+- FS-v1 提交哈希 `424fed2`（已补入锚点表）。
 
 ---
 
@@ -1831,5 +1832,5 @@
 修复补录于其独立验证（7/7）与收口审查（无阻断、无必改）通过之后
 （§7.5 勘误 + §7.10，已随提交 7080025 入库）；FS-v1 章节补录于其
 独立验证（6/6）与审查修复复验（8/8，含 214 项交叉复核）通过之后
-（§10，提交哈希待补）。后续
+（§10，已随提交 424fed2 入库）。后续
 每个里程碑收口时，由变更史官增补对应小节并更新提交锚点表。*
