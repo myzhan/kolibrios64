@@ -116,6 +116,20 @@ FONT_BYTES = 1520
 # sha256 of glyphs 0x20..0x7E of kolibrios/kernel/trunk/gui/charUni.mt
 FONT_SHA256 = 'a61bf766ab3e8ab088e961a39be6116b40b1f29093c73eef86f6cdcef18739f4'
 
+# task-108: the independent bit-order oracle. The charUni.mt truth is
+# LSB-first (bit0 = leftmost pixel), proven by the 32 bit drawChar
+# renderer in kolibrios/kernel/trunk/gui/font.inc: 'bsf eax,edx' finds
+# the LOWEST set bit and multiplies that bit index by the pixel pitch.
+# The two glyphs below are a hand written copy of the RAW charUni.mt
+# bytes ('K' then '1', code point * 16 indexing), pinned by sha256 so
+# the oracle survives an unreachable baseline. It is independent of
+# both the assembly renderer and the Python spec model: a renderer and
+# a model that are wrong in lockstep can no longer pass.
+ORACLE_TRUTH = bytes.fromhex(
+    '00 00 42 22 12 0a 06 06 0a 12 22 42 00 00 00 00'   # 'K' 0x4B
+    '00 00 10 18 14 10 10 10 10 10 10 10 00 00 00 00')  # '1' 0x31
+ORACLE_SHA256 = '2aa1d9ca8e4d38341800d0232b8ff565bfa09db43263c4019a133d33004613ff'
+
 # the frozen GUI-G1 pattern spec, see kernel/video/api.inc
 ST_WIDTH = 1024
 ST_HEIGHT = 768
@@ -481,6 +495,36 @@ def check_font(chk, man, img, org):
         chk.ok(True, 'baseline file absent, the frozen hash pins the subset')
 
 
+def check_font_oracle(chk):
+    """task-108: the LSB-first truth, independent of renderer and model."""
+    chk.start('font bit-order oracle')
+    chk.eq(hashlib.sha256(ORACLE_TRUTH).hexdigest(), ORACLE_SHA256,
+           'the hand written truth copy matches its sha256 pin')
+    baseline = ROOT.parent / 'kolibrios' / 'kernel' / 'trunk' / 'gui' / 'charUni.mt'
+    if baseline.is_file():
+        raw = baseline.read_bytes()
+        chk.eq(len(raw), 22704, 'charUni.mt is 1419 glyphs of 16 bytes')
+        for i, cp in enumerate((0x4B, 0x31)):
+            chk.eq(raw[cp * 16:(cp + 1) * 16],
+                   ORACLE_TRUTH[i * 16:(i + 1) * 16],
+                   "the '%s' truth copy equals the raw charUni.mt glyph"
+                   % chr(cp))
+    else:
+        chk.ok(True, 'baseline absent, the pinned truth copy stands in')
+    k, one = ORACLE_TRUTH[0:16], ORACLE_TRUTH[16:32]
+    # LSB-first decode of the RAW truth: bit0 is the leftmost pixel
+    chk.ok(k[3] & (1 << 1), "truth 'K' row 3 col 1 is lit (LSB-first)")
+    chk.ok(not k[3] & (1 << 6), "truth 'K' row 3 col 6 is off (LSB-first)")
+    chk.ok(one[4] & (1 << 2), "truth '1' row 4 flag col 2 is lit (left)")
+    chk.ok(not one[4] & (1 << 5), "truth '1' row 4 col 5 is off (right)")
+    # mirror discrimination: at these very pixels an MSB-first decode
+    # disagrees with the LSB-first truth, so they can catch a mirror
+    chk.ok(bool(k[3] & (1 << 1)) != bool(k[3] & (0x80 >> 1)),
+           "'K' row 3 col 1 discriminates LSB from MSB")
+    chk.ok(bool(one[4] & (1 << 2)) != bool(one[4] & (0x80 >> 2)),
+           "'1' row 4 col 2 discriminates LSB from MSB")
+
+
 def check_pattern_data(chk, man, img, org):
     chk.start('pattern data')
     at = man['video_st_colors'] - org
@@ -732,8 +776,8 @@ def check_bodies(chk, man, img, org, label):
             (b'\x83\xF8\x7E\x77', 'cmp c, 0x7E / ja skips a high byte'),
             (b'\x83\xE8\x20\x6B\xC0\x10',
              'sub 0x20 / imul 16 forms the glyph index'),
-            (b'\x41\xF6\xC1\x80', 'test r9b, 0x80 reads the MSB first'),
-            (b'\x41\xD0\xE1', 'shl r9b, 1 walks the bitmap row'),
+            (b'\x41\xF6\xC1\x01', 'test r9b, 0x01 reads the LSB first'),
+            (b'\x41\xD0\xE9', 'shr r9b, 1 walks the bitmap row'),
             (b'\x44\x89\x34\x8F',
              'mov [rdi + rcx*4], r14d stores one BGRX pixel'),
             (b'\x41\x83\xFA\x08\x72', 'the column loop runs 8 times'),
@@ -845,7 +889,7 @@ def spec_frame(font):
                      (ch - FONT_FIRST + 1) * FONT_STRIDE]
         for row in range(FONT_HEIGHT):
             for col in range(FONT_WIDTH):
-                if glyph[row] & (0x80 >> col):
+                if glyph[row] & (1 << col):  # LSB-first: bit0 = leftmost
                     x = ST_TEXT_X + index * FONT_WIDTH + col
                     y = ST_TEXT_Y + row
                     rows[y][x] = ST_TEXT_COLOR
@@ -886,6 +930,13 @@ def check_spec_model(chk, man, img, org):
         (14, 10, 0xFFFFFF, "the 'K' glyph row 2 right stroke is lit"),
         (8, 10, 0xFF0000, "the 'K' glyph row 2 edge column is not lit"),
         (8, 8, 0xFF0000, "the 'K' glyph row 0 is empty"),
+        # task-108 mirror-sensitive probes: 'K' row 3 is 0x22, under the
+        # LSB-first truth cols 1 and 5 are lit; an MSB-first renderer
+        # would light cols 2 and 6 instead
+        (9, 11, 0xFFFFFF, "the 'K' glyph row 3 col 1 stroke is lit"),
+        (13, 11, 0xFFFFFF, "the 'K' glyph row 3 col 5 stroke is lit"),
+        (14, 11, 0xFF0000, "the 'K' glyph row 3 col 6 is not lit"),
+        (10, 11, 0xFF0000, "the 'K' glyph row 3 col 2 is not lit"),
     ]
     for x, y, want, why in probes:
         chk.eq(frame[y][x], want, why)
@@ -1028,6 +1079,20 @@ FIXTURES = [
     ('map-fail-passthrough', 'kernel/video/fb.inc',
      '        jnz     .map_fail',
      '        jnz     .done'),
+    # task-108: the renderer walks the bitmap MSB-first again, every
+    # glyph is horizontally mirrored while the data stays correct; the
+    # LSB static pins and the mirror-sensitive probes must catch it
+    ('msb-bitorder', 'kernel/video/text.inc',
+     '        test    r9b, 0x01\n'
+     '        jz      .col_next\n'
+     '        mov     dword [rdi + rcx*4], r14d\n'
+     '.col_next:\n'
+     '        shr     r9b, 1\n',
+     '        test    r9b, 0x80\n'
+     '        jz      .col_next\n'
+     '        mov     dword [rdi + rcx*4], r14d\n'
+     '.col_next:\n'
+     '        shl     r9b, 1\n'),
     # the post-map geometry reload is gone: the published width/height/
     # pitch/format are whatever vmm_map_mmio left in caller-saved r8..r11
     ('stale-geometry', 'kernel/video/fb.inc',
@@ -1106,6 +1171,7 @@ def main(argv):
     man = mans[0]
     check_contract(chk, man)
     check_font(chk, man, images[0], 0)
+    check_font_oracle(chk)
     check_pattern_data(chk, man, images[0], 0)
     check_spec_model(chk, man, images[0], 0)
     check_init_size_model(chk)

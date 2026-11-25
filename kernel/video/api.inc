@@ -222,7 +222,8 @@ end if
 ; the 8x16 ASCII font
 ;
 ; Glyphs 0x20..0x7E of the 32 bit baseline font, 16 bytes per glyph, one
-; byte per row, most significant bit is the leftmost pixel. The glyph
+; byte per row, least significant bit is the leftmost pixel (bit0 =
+; leftmost, the 32 bit drawChar bsf convention). The glyph
 ; index is (c - 0x20) * 16.
 ;
 ; Out of range policy, frozen: a byte outside [0x20,0x7E] draws nothing

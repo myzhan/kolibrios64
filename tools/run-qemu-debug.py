@@ -120,8 +120,9 @@ FORBIDDEN_MARKERS = ("K64-CPU-PANIC", "K64-BOOT-FAIL")
 #                    mouse move): cursor at the initial (517,387)
 #   screen.ppm       after the terminal marker: cursor at (557,411),
 #                    the old position restored to the background
-# The GUI probes are the frozen task-77 pattern spec, the same 28 hand
-# written pixels as the stage2-fb spec model. Common desktop probes
+# The GUI probes are the frozen task-77 pattern spec plus the task-108
+# mirror-sensitive 'K' row 3 pixels, the same 32 hand written pixels as
+# the stage2-fb spec model. Common desktop probes
 # hold in BOTH desktop frames: deep blue background 0x1A2B3C,
 # title bar 0x2C3E50 (0,0,1024,32), "K64 Desktop v0.1" at (8,8) in
 # white on the bar, the echoed "hi" at (16,64) in white on the blue.
@@ -159,6 +160,12 @@ PPM_GUI_PROBES = (
     (14, 10, 0xFFFFFF),                 # 'K' glyph row 2 right stroke lit
     (8, 10, 0xFF0000),                  # 'K' glyph row 2 edge not lit
     (8, 8, 0xFF0000),                   # 'K' glyph row 0 is empty
+    # task-108 mirror-sensitive: 'K' row 3 = 0x22, LSB-first truth lights
+    # cols 1 and 5; an MSB-first renderer would light cols 2 and 6
+    (9, 11, 0xFFFFFF),                  # 'K' glyph row 3 col 1 lit
+    (13, 11, 0xFFFFFF),                 # 'K' glyph row 3 col 5 lit
+    (14, 11, 0xFF0000),                 # 'K' glyph row 3 col 6 not lit
+    (10, 11, 0xFF0000),                 # 'K' glyph row 3 col 2 not lit
 )
 PPM_COMMON_PROBES = (
     (900, 700, DESKTOP_BG),             # background, far from everything
@@ -168,11 +175,24 @@ PPM_COMMON_PROBES = (
     (500, 32, DESKTOP_BG),              # first row below the bar
     (9, 10, 0xFFFFFF), (14, 10, 0xFFFFFF),   # 'K' glyph row 2 lit
     (8, 10, DESKTOP_BAR), (8, 8, DESKTOP_BAR),  # 'K' glyph off pixels
-    (18, 69, 0xFFFFFF),                 # 'h' row 5 col 2 lit
+    # task-108 mirror-sensitive: 'K' row 3 = 0x22 lights cols 1 and 5
+    (9, 11, 0xFFFFFF), (13, 11, 0xFFFFFF),   # 'K' row 3 cols 1/5 lit
+    (14, 11, DESKTOP_BAR), (10, 11, DESKTOP_BAR),  # cols 6/2 not lit
+    # task-108: title '1' (cell x=128) row 4 = 0x14, the flag is on the
+    # LEFT under the LSB-first truth; row 3 = 0x18 stays symmetric
+    (130, 12, 0xFFFFFF),                # '1' row 4 col 2 flag lit
+    (133, 12, DESKTOP_BAR),             # '1' row 4 col 5 not lit
+    (131, 11, 0xFFFFFF), (132, 11, 0xFFFFFF),  # '1' row 3 symmetric lit
+    # task-108: 'h'/'i' probes re-derived from the charUni.mt LSB truth
+    (17, 69, 0xFFFFFF),                 # 'h' row 5 col 1 lit
+    (18, 69, DESKTOP_BG),               # 'h' row 5 col 2 off
     (16, 69, DESKTOP_BG),               # 'h' row 5 col 0 off
-    (22, 66, 0xFFFFFF),                 # 'h' row 2 col 6 lit
-    (27, 66, 0xFFFFFF),                 # 'i' row 2 col 3 lit
-    (25, 75, 0xFFFFFF),                 # 'i' row 11 base lit
+    (17, 66, 0xFFFFFF),                 # 'h' row 2 col 1 lit
+    (22, 66, DESKTOP_BG),               # 'h' row 2 col 6 off
+    (28, 66, 0xFFFFFF),                 # 'i' row 2 col 4 lit
+    (27, 66, DESKTOP_BG),               # 'i' row 2 col 3 off
+    (26, 75, 0xFFFFFF),                 # 'i' row 11 col 2 base lit
+    (25, 75, DESKTOP_BG),               # 'i' row 11 col 1 off
     (24, 66, DESKTOP_BG),               # 'i' row 2 col 0 off
 )
 # the echo frame: the cursor sprite at the frozen initial (517,387)

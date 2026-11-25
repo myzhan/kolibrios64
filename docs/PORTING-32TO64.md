@@ -744,7 +744,7 @@
 - **32 位做法**：`kernel/trunk/gui/charUni.mt` 全量字体文件，按码点
   索引字形。
 - **64 位做法**：提取 0x20..0x7E 共 95 字形 × 16 字节 = 1520 字节
-  嵌入 `font.inc`（每行 1 字节，MSB 为最左像素；源文件 GPLv2，与本
+  嵌入 `font.inc`（每行 1 字节，LSB 为最左像素；源文件 GPLv2，与本
   仓库 LICENSE 一致）。sha256 双重冻结：stage2-fb/check.py 与
   check-gui-judge.py 各钉同一哈希；32 位基线文件不可达时，judge 从
   模块内嵌字节回退推导字体，仍必须过同一 sha256（收口建议修复，
@@ -755,6 +755,13 @@
   `tests/stage2-fb/check.py`（FONT_SHA256）、
   `tests/stage2-fb/check-gui-judge.py`（font_bytes/derived_font）；
   `kolibrios/kernel/trunk/gui/charUni.mt`（32 位基线）。
+- **勘误（FONT-FIX）**：本节原表述「MSB 为最左像素」有误，正确约定
+  为 **LSB-first（bit0 = 最左像素）**，与 32 位基线 drawChar 的 bsf
+  渲染一致。转录数据自始逐字节正确（sha256 冻结值未动），错在解码
+  约定：text.inc 渲染器按 MSB-first 解码，且探针期望与渲染模型从
+  同一错误约定派生，锁步同错自洽全绿，掩盖了全部文字逐字形水平
+  镜像的缺陷（K→ꓘ 形态），直至用户实测常驻桌面才暴露。修复与
+  独立 oracle 门禁见 §7.10。
 
 ### 7.6 draw-only 自检与像素真值裁决（验证口径显式声明）
 
@@ -767,7 +774,8 @@
   记入 video_selftest_mask（1 bars / 2 border / 3 rect / 4 text）。
   **像素真值由外部裁决**：冒烟在终止标记后经 QEMU monitor
   screendump 采帧到 screen.ppm，run-qemu-debug.py 以纯 Python 解析
-  PPM P6，比对 28 个冻结探针。**验证口径：串口标记 + 计数器全绿
+  PPM P6，比对 28 个冻结探针（时为 GUI-G1 计数；FONT-FIX 真值化并
+  扩至 32，见 §7.10）。**验证口径：串口标记 + 计数器全绿
   ≠ 画面正确**——串口证据只证明绘制调用序列与状态，像素正确性
   只能由 screendump 探针裁决。
 - **变更理由**：无 readback 使 FB 保持只写证据、语义最简；外部像素
@@ -806,16 +814,18 @@
   1688、stage2-irq 295（时为 GUI-G1 时计数；IRQ-v2 扩至 317，见
   §8.9）、stage2-fb 449（11 负向夹具全部被抓，含
   size-wrap-unguarded / blit-src-stride / map-fail-passthrough；
-  桌面壳扩至 493，见 §9.7）；
+  桌面壳扩至 493，见 §9.7；FONT-FIX 扩至 508，见 §7.10）；
   check-gui-judge 21（时为 GUI-G1 计数，judge 纯函数正基线 + 12
   负向变异全部被抓；IRQ-v2 扩至 35，见 §8.9；桌面壳扩至 92，
-  见 §9.7）。
+  见 §9.7；FONT-FIX 扩至 96，见 §7.10）。
 - **QEMU TCG 冒烟**（唯一真实执行环境，禁 Rosetta 口径延续 §5.4）：
   128/256 MiB 多轮；8 串口标记按序各恰一次（K64-GUI-OK 位于 IRQ 与
   FOUNDATION 之间）；passed=0x5FF；6 计数器经 gdbstub 读取全为冻结
   值（mm_mask=0、hook_hits=3、core_mask=0、irq_mask=0、ticks=10、
   video_selftest_mask=0；ticks=10 为 GUI-G1 时口径，IRQ-v2 起为 11，
-  见 §8.7）；screendump 1024x768，28 探针全绿。
+  见 §8.7）；screendump 1024x768，28 探针全绿（时为当时口径；该
+  全绿后经 FONT-FIX 证明含锁步自洽成分，探针真值化并扩至 32，
+  见 §7.10）。
 - **--gui-skip 回退场景**（GOP_MAX_MODES=0 加载器）：保留固件 live
   mode 800x600，`K64-GUI-SKIP` + `K64-FOUNDATION-OK`，无 panic、
   无像素断言。
@@ -841,6 +851,76 @@
   与「画错」，口径已在 §7.6 显式写明。
 - 末腿 timer mask 的运行时证据缺口当时留待 IRQ-v2；现已由 IRQ-v2
   masked-oneshot 腿补证收口（见 §8.7）。
+
+### 7.10 FONT-FIX：字体位序锁步缺陷与独立 oracle 门禁（勘误补录）
+
+> 状态：修复已通过独立验证（7/7）与收口审查（无阻断、无必改）；
+> 提交哈希待产生后补入锚点表。本节是对 §7.5/§7.6 的勘误补录：
+> GUI-G1 当时的全绿结论在当时的约定下真实成立，错的是约定本身。
+
+- **32 位做法**：`kolibrios/kernel/trunk/gui/font.inc:316-323`
+  drawChar 用 `bsf eax, edx` 找出行位图的最低置位、乘像素间距落点
+  ——即 **LSB-first：bit0 = 最左像素**。这是字体位序的唯一渲染
+  oracle，charUni.mt 的真值位序由它确定。
+- **64 位做法（缺陷与修复）**：charUni.mt 提取的 95 字形子集数据
+  逐字节正确（FONT_SHA256 `a61bf766…` 冻结值修复前后未动），但
+  text.inc 渲染器按 MSB-first 解码（`test 0x80`/`shl`），且全部
+  探针期望与 Python 渲染模型从同一错误约定派生 → 渲染器、模型、
+  探针**锁步同错而自洽**：spec 模型探针 22/22、GUI 28 探针、
+  judge 92 项曾全过，而实际全部文字逐字形水平镜像（K→ꓘ 形态），
+  由用户实测常驻桌面发现。修复取方案 A（渲染器改 LSB，数据不动）：
+  - `text.inc`：`test r9b, 0x01` / `shr r9b, 1`（静态钉改
+    `41 F6 C1 01` / `41 D0 E9`）；font.inc/api.inc 仅改正注释；
+  - check.py 与 check-gui-judge.py 渲染模型改
+    `glyph[row] & (1 << col)`；
+  - 探针真值化并补镜像敏感点：GUI 28→32、common 15→27。真值化
+    并非全盘翻转：新增 20 点中实测 17 点对镜像敏感；旧 h/i 6 点
+    期望本身是镜像版，按 charUni.mt 真值重推。对称行无鉴别力
+    （如 '1' row3=0x18），实现期真值纠偏一例：'1' 的镜像敏感旗在
+    row4=0x14（探针 (130,12) 亮 / (133,12) 灭），而非初选 row3；
+  - **新增独立 oracle 门禁**（check_font_oracle）：手抄 K/1 原始
+    真值 32 字节 + sha256 `2aa1d9ca…` 钉，直对 charUni.mt 逐字节
+    比对（基线不可达时 pinned 副本顶替），并断言 LSB/MSB 解码在
+    鉴别像素上必然相异——真值不再从渲染器/模型派生；
+  - 负向加固：check.py 新增 `msb-bitorder` 源码 fixture（渲染器
+    回 MSB，静态钉 + 镜像敏感探针必抓）；judge 新增镜像帧负向
+    （逐字节 bit-reverse 渲染 GUI/echo/final 三帧必 FAIL，并断言
+    镜像模型与真值确实相异）。
+- **关键差异与教训**：
+  - **探针期望必须从独立真值源派生**。§7.6 的外部像素裁决补上了
+    「串口全绿 ≠ 画面正确」的缺口，但本例暴露更深一层：当期望
+    本身从被测实现（或与之共享约定的模型）派生时，渲染器与模型
+    可锁步同错，像素裁决退化为自证，产生全绿假象。
+  - **oracle 门禁是防锁步的结构性手段**：真值直接钉在 32 位基线
+    原始字节上（独立于 64 位渲染器与 Python 模型），加上「LSB/MSB
+    解码必然相异」的鉴别断言，使任何一侧回退到错误约定都立即
+    失败。
+  - 数据 sha256 冻结只能防「数据漂移」，防不了「解码约定错」——
+    两者正交，本例数据自始正确。
+- **验证证据**（宿主门禁 + QEMU TCG，全部 0 失败）：
+  - 门禁：stage2-fb 493→508、check-gui-judge 92→96；其余不变
+    （cpu 524 / mm 1688 / irq 317 / input 402 / desktop 386）。
+  - QEMU 128/256 MiB 各 2 次：137 [ok] / 0 FAIL。
+  - 独立真值比对：两轮 ok 的三帧文字区域逐像素比对 charUni.mt
+    LSB 解码，11776 像素 0 mismatch，其中 1224 像素可判别旧镜像
+    （旧 MSB 解码下这些像素必错）。
+  - 三个自制变异全被抓：渲染器 shl 回归（mutA，fb 门禁 FAIL）、
+    模型 MSB 回归（mutB，fb 门禁 FAIL）、真实帧字形镜像（mutC，
+    judge 三帧 FAIL）。
+  - SKIP 与 panic profile 不回归（K64-DESKTOP-SKIP 40 [ok]；坏内核
+    panic reason/message 照旧命中）。
+  - 证据文件：`kolibrios64/kernel/video/text.inc`（修复点注释）、
+    `font.inc`、`api.inc`（注释改正）、`tests/stage2-fb/check.py`
+    （ORACLE_TRUTH/ORACLE_SHA256、check_font_oracle、msb-bitorder
+    fixture）、`check-gui-judge.py`（mirror_font 负向）、
+    `tools/run-qemu-debug.py`（32/27 探针）；
+    `kolibrios/kernel/trunk/gui/font.inc`（drawChar bsf oracle）、
+    `gui/charUni.mt`（真值源）；实测数字来自 build/fontfix-*、
+    build/qa109/（gate-*.log、ok128/ok256、ppm-truth.log、
+    truth-check.log、mutA/B/C 与 mut-replay.log、skip128*.log、
+    fontfix-panic.log；build/ 产物不入库）。
+  - 收口审查：无阻断、无必改；建议项 S1（text.inc/api.inc 补
+    pre-existing 尾换行）由提交环节顺手落实。
 
 ---
 
@@ -1407,5 +1487,7 @@
 其收口审查通过之后（已随提交 983111c 入库）；GUI-G1 章节补录于其收口
 审查通过之后（已随提交 7b2c4b7 入库）；IRQ-v2 章节补录于其独立验证与
 收口审查通过之后（已随提交 ddad22d 入库）；桌面壳章节补录于其独立
-验证与收口审查通过之后（已随提交 2bd897b 入库）。后续
+验证与收口审查通过之后（已随提交 2bd897b 入库）；FONT-FIX 字体位序
+修复补录于其独立验证（7/7）与收口审查（无阻断、无必改）通过之后
+（§7.5 勘误 + §7.10，提交哈希待产生后补入锚点表）。后续
 每个里程碑收口时，由变更史官增补对应小节并更新提交锚点表。*

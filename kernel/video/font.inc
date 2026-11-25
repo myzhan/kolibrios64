@@ -10,7 +10,9 @@
 ;; Extracted from the 32 bit KolibriOS baseline font file
 ;; kolibrios/kernel/trunk/gui/charUni.mt (GPL v2, same license as
 ;; this repository): glyphs 0x20..0x7E, 16 bytes per glyph, one byte
-;; per row, most significant bit is the leftmost pixel. The source
+;; per row, least significant bit is the leftmost pixel (bit0 =
+;; leftmost, the convention of the 32 bit drawChar bsf renderer in
+;; kolibrios/trunk/gui/font.inc). The source
 ;; file indexes glyphs by code point, so the subset starts at file
 ;; offset 0x20*16. 95 glyphs * 16 bytes = 1520 bytes, the glyph index
 ;; here is (c - 0x20)*16.

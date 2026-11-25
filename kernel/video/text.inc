@@ -66,7 +66,10 @@ video_puts:
         imul    rax, rdx
         mov     rdi, qword [video_fb_state + VIDEO_FB_STATE.fb_va]
         add     rdi, rax
-        movzx   r9d, byte [rsi + rbx]   ; bitmap row, MSB is leftmost
+        movzx   r9d, byte [rsi + rbx]   ; bitmap row, LSB is leftmost
+                                        ; (bit0 = leftmost pixel, matching the
+                                        ; 32 bit baseline drawChar bsf oracle
+                                        ; in kolibrios/trunk/gui/font.inc)
         xor     r10d, r10d              ; glyph column
 .col:
         ; clip the column: cursor x + column must stay below width
@@ -75,11 +78,11 @@ video_puts:
         mov     eax, dword [video_fb_state + VIDEO_FB_STATE.width]
         cmp     rcx, rax
         jae     .col_next
-        test    r9b, 0x80
+        test    r9b, 0x01
         jz      .col_next
         mov     dword [rdi + rcx*4], r14d
 .col_next:
-        shl     r9b, 1
+        shr     r9b, 1
         inc     r10d
         cmp     r10d, VIDEO_FONT_WIDTH
         jb      .col

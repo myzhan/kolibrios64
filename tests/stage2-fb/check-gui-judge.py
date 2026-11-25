@@ -4,7 +4,9 @@ by task 89 for the IRQ-v2 INPUT marker/counters, by task 96 for the
 DESKTOP-v1 marker/counters/two desktop frames/vector derivations, and
 by task 102 for the third capture: the GUI-G1 pattern frame
 (screen-gui.ppm) taken inside the bounded foundation handshake window
-before desktop_init repaints it.
+before desktop_init repaints it, and by task 108 for the LSB-first
+font bit order: the frame models decode bit0 as the leftmost pixel
+(the charUni.mt truth) and mirrored MSB-first frames must FAIL.
 
 Proves the extended tools/run-qemu-debug.py judge() catches integration
 defects, in the same negative-fixture spirit as tests/stage2-fb/check.py:
@@ -99,8 +101,15 @@ def draw_text(rows, font, text, x0, y0, color):
                      (ch - fb.FONT_FIRST + 1) * fb.FONT_STRIDE]
         for row in range(fb.FONT_HEIGHT):
             for col in range(fb.FONT_WIDTH):
-                if glyph[row] & (0x80 >> col):
+                if glyph[row] & (1 << col):  # LSB-first: bit0 = leftmost
                     rows[y0 + row][x0 + index * fb.FONT_WIDTH + col] = color
+
+
+def mirror_font(font):
+    """task-108 negative model: every bitmap row byte bit-reversed, so
+    the LSB-first models render each glyph horizontally mirrored (the
+    exact output of the old MSB-first renderer on the correct data)."""
+    return bytes(int(format(b, '08b')[::-1], 2) for b in font)
 
 
 def desktop_frame(font, cursor_xy, echo_text=b'hi'):
@@ -182,8 +191,8 @@ def main():
           == rq.MARKERS.index('K64-GUI-OK') + 1
           and rq.MARKERS.index('K64-FOUNDATION-OK')
           == rq.MARKERS.index('K64-DESKTOP-OK') + 1)
-    check('28 frozen GUI probes', len(rq.PPM_GUI_PROBES) == 28)
-    check('15 common desktop probes', len(rq.PPM_COMMON_PROBES) == 15)
+    check('32 frozen GUI probes', len(rq.PPM_GUI_PROBES) == 32)
+    check('27 common desktop probes', len(rq.PPM_COMMON_PROBES) == 27)
     check('3 echo frame probes', len(rq.PPM_ECHO_PROBES) == 3)
     check('7 final frame probes', len(rq.PPM_FINAL_PROBES) == 7)
     check('the GUI spec model satisfies every GUI probe',
@@ -302,7 +311,7 @@ def main():
     neg('echo cursor pixel corrupted',
         pe=set_pixel(ppm_echo, 517, 387, dt.BG_COLOR))
     neg('echo glyph pixel corrupted',
-        pe=set_pixel(ppm_echo, 18, 69, dt.BG_COLOR))
+        pe=set_pixel(ppm_echo, 17, 69, dt.BG_COLOR))
     neg('echo capture taken after the mouse move', pe=ppm_final)
 
     # ---- the desktop final frame ------------------------------------
@@ -314,6 +323,19 @@ def main():
     neg('final capture taken before the mouse move', p=ppm_echo)
     neg('final PPM geometry 800x600',
         p=b'P6\n800 600\n255\n' + bytes(800 * 600 * 3))
+
+    # ---- task-108: mirrored text frames (MSB-first decode) ----------
+    mirrored = mirror_font(font)
+    check('the mirror model actually differs from the truth',
+          mirrored != font)
+    neg('mirrored GUI text (MSB-first decode)',
+        pg=render_ppm(fb.spec_frame(mirrored)))
+    neg('mirrored echo text (MSB-first decode)',
+        pe=render_ppm(desktop_frame(mirrored,
+                                    (dt.CURSOR_X0, dt.CURSOR_Y0))))
+    neg('mirrored final text (MSB-first decode)',
+        p=render_ppm(desktop_frame(mirrored,
+                                   (dt.ST_CURSOR_X, dt.ST_CURSOR_Y))))
 
     # ---- counter drift ----------------------------------------------
     for name, value in (('video_selftest_mask', 1),
