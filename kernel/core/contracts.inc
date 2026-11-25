@@ -1164,3 +1164,733 @@ end if
 if K64_CORE_ACCOUNT_TABLES <> 3
         err 'the desktop adds no MMIO mapping, the leg7 accounting stays three'
 end if
+
+; ------------------------------------------------------------------
+; APP-v1: the shared K64_* spelling of the CPU user mode contract and
+; the MM user mapping flag mechanism, with the copy comparison against
+; the private CPU_* and MM_* values.
+; Appended by task 113; every assertion above stays untouched.
+; Pure constant math, zero bytes emitted.
+;;
+; GDT layout deviation, reported and pending adjudication: the frozen
+; contract named user selectors 0x20/0x28, but the 16 byte TSS
+; descriptor at 0x18 occupies 0x18..0x27, so 0x20 would overlap it and
+; 56 bytes cannot hold both. The user segments follow the TSS instead:
+; 0x28 data, 0x30 code, GDT 56 bytes, kernel selectors untouched.
+; STAR[63:48] is therefore 0x20 and SYSRET lands on CS 0x33 / SS 0x2B.
+;;
+; MM user VA domain and page table budget: also reported pending
+; adjudication. The loader identity map covers the low 4 GiB with
+; 2 MiB supervisor leaves that are never torn down, so the frozen user
+; VA / +4 table budget pair cannot hold as written. Only the VA
+; independent flag mechanism is frozen here: MM_MAP_US, the two legal
+; US combinations, the public window US refusal and the per level US
+; propagation of newly built table entries. The leg 7 accounting
+; stays frozen at three: this task maps no user page at run time.
+; ------------------------------------------------------------------
+
+; the APP-v1 GDT: 56 bytes, the ring 3 pair after the TSS descriptor
+K64_APP_GDT_SIZE        = 56
+K64_APP_SEL_USER_DATA   = 0x28
+K64_APP_SEL_USER_CODE   = 0x30
+K64_APP_GDT_OFF_USER_DATA = 40
+K64_APP_GDT_OFF_USER_CODE = 48
+K64_APP_GDT_USER_DATA_VALUE = 0x00CFF2000000FFFF
+K64_APP_GDT_USER_CODE_VALUE = 0x00AFFA000000FFFF
+
+; the SYSCALL/SYSRET MSR contract
+K64_APP_EFER_MSR        = 0xC0000080
+K64_APP_EFER_SCE        = 0x00000001
+K64_APP_STAR_MSR        = 0xC0000081
+K64_APP_LSTAR_MSR       = 0xC0000082
+K64_APP_SFMASK_MSR      = 0xC0000084
+K64_APP_STAR_VALUE      = (0x20 shl 48) or (0x08 shl 32)
+K64_APP_SYSRET_CS       = 0x33
+K64_APP_SYSRET_SS       = 0x2B
+K64_APP_SFMASK_VALUE    = 0x200
+
+; the Linux style syscall ABI: RAX number, RDI/RSI/RDX/R10/R8/R9 args,
+; RAX result; RCX/R11 destroyed by SYSCALL itself. Numbers 0..3 are
+; reserved for the task 115 host; an unregistered number is ENOTSUP.
+; FS-v1 M3 (task 133): the table grows 4 -> 16, numbers 4..9 are the
+; frozen file syscalls registered by the fsys module.
+K64_APP_SYS_CALL_MAX    = 16
+K64_APP_SYS_EXIT        = 0
+K64_APP_SYS_BLIT        = 1
+K64_APP_SYS_READ_KEY    = 2
+K64_APP_SYS_POLL        = 3
+K64_APP_SYS_VECTOR      = 0x100
+
+; the MM user mapping flag mechanism, VA independent part
+K64_APP_MM_MAP_US       = 0x004
+K64_APP_MM_MAP_ALLOWED  = 0x8000000000000006
+
+; ---------------- CPU copy comparison ----------------
+
+if K64_APP_GDT_SIZE <> CPU_GDT_SIZE
+        err 'the APP-v1 GDT size disagrees with the CPU copy'
+end if
+if K64_APP_SEL_USER_DATA <> CPU_SEL_USER_DATA | K64_APP_SEL_USER_CODE <> CPU_SEL_USER_CODE
+        err 'the APP-v1 user selectors disagree with the CPU copy'
+end if
+if K64_APP_GDT_OFF_USER_DATA <> CPU_GDT_OFF_USER_DATA | K64_APP_GDT_OFF_USER_CODE <> CPU_GDT_OFF_USER_CODE
+        err 'the APP-v1 user descriptor offsets disagree with the CPU copy'
+end if
+if K64_APP_GDT_USER_DATA_VALUE <> CPU_GDT_USER_DATA_VALUE | K64_APP_GDT_USER_CODE_VALUE <> CPU_GDT_USER_CODE_VALUE
+        err 'the APP-v1 user descriptor values disagree with the CPU copy'
+end if
+if K64_APP_EFER_MSR <> CPU_EFER_MSR | K64_APP_EFER_SCE <> CPU_EFER_SCE
+        err 'the APP-v1 EFER contract disagrees with the CPU copy'
+end if
+if K64_APP_STAR_MSR <> CPU_STAR_MSR | K64_APP_LSTAR_MSR <> CPU_LSTAR_MSR | K64_APP_SFMASK_MSR <> CPU_SFMASK_MSR
+        err 'the APP-v1 MSR numbers disagree with the CPU copy'
+end if
+if K64_APP_STAR_VALUE <> CPU_STAR_VALUE | K64_APP_SYSRET_CS <> CPU_SYSRET_CS | K64_APP_SYSRET_SS <> CPU_SYSRET_SS
+        err 'the APP-v1 STAR/SYSRET derivation disagrees with the CPU copy'
+end if
+if K64_APP_SFMASK_VALUE <> CPU_SFMASK_VALUE
+        err 'the APP-v1 SFMASK disagrees with the CPU copy'
+end if
+if K64_APP_SYS_CALL_MAX <> CPU_SYS_CALL_MAX | K64_APP_SYS_VECTOR <> CPU_SYS_VECTOR
+        err 'the APP-v1 syscall table shape disagrees with the CPU copy'
+end if
+if K64_APP_SYS_EXIT <> CPU_SYS_EXIT | K64_APP_SYS_BLIT <> CPU_SYS_BLIT | K64_APP_SYS_READ_KEY <> CPU_SYS_READ_KEY | K64_APP_SYS_POLL <> CPU_SYS_POLL
+        err 'the APP-v1 reserved syscall numbers disagree with the CPU copy'
+end if
+
+; ---------------- MM copy comparison ----------------
+
+if K64_APP_MM_MAP_US <> MM_MAP_US
+        err 'the APP-v1 US flag disagrees with the MM copy'
+end if
+if K64_APP_MM_MAP_ALLOWED <> MM_MAP_ALLOWED
+        err 'the APP-v1 allowed flag set disagrees with the MM copy'
+end if
+if K64_APP_MM_MAP_US <> MM_PTE_US
+        err 'the APP-v1 US flag is the PTE US bit itself'
+end if
+
+; ---------------- frozen derivations ----------------
+
+if K64_APP_GDT_SIZE <> 56
+        err 'the APP-v1 GDT stays 56 bytes'
+end if
+if K64_APP_GDT_OFF_USER_CODE + 8 <> K64_APP_GDT_SIZE
+        err 'the APP-v1 GDT ends right after the user code descriptor'
+end if
+if ((K64_APP_GDT_USER_DATA_VALUE shr 45) and 3) <> 3 | ((K64_APP_GDT_USER_CODE_VALUE shr 45) and 3) <> 3
+        err 'both APP-v1 user descriptors are DPL3'
+end if
+if ((K64_APP_STAR_VALUE shr 32) and 0xFFFF) <> CPU_SEL_CODE
+        err 'STAR 47:32 stays the ring 0 code selector'
+end if
+if K64_APP_SYSRET_CS <> (K64_APP_SEL_USER_CODE or 3) | K64_APP_SYSRET_SS <> (K64_APP_SEL_USER_DATA or 3)
+        err 'SYSRET lands on the user selectors with RPL 3'
+end if
+if K64_APP_SYSRET_CS <> (((K64_APP_STAR_VALUE shr 48) + 16) or 3) | K64_APP_SYSRET_SS <> (((K64_APP_STAR_VALUE shr 48) + 8) or 3)
+        err 'SYSRET selectors derive from the STAR base by the SDM rule'
+end if
+if K64_APP_SFMASK_VALUE <> CPU_RFLAGS_IF
+        err 'SFMASK clears exactly IF'
+end if
+if K64_APP_SYS_VECTOR < CPU_IDT_VECTORS
+        err 'the syscall frame sentinel sits past every IDT vector'
+end if
+if K64_APP_MM_MAP_ALLOWED <> (MM_MAP_RW or MM_MAP_NX or MM_MAP_US)
+        err 'the allowed set is exactly RW, NX and US'
+end if
+
+; no new page tables at run time: the leg 7 baseline stays frozen
+if K64_CORE_ACCOUNT_TABLES <> 3
+        err 'APP-v1 maps no user page yet, the leg7 accounting stays three'
+end if
+
+; ==================================================================
+; FS-v1 M1 blk contract, task 131, pure append after the APP-v1 block.
+;
+; The shared K64_BLK_* spelling of the frozen block layer values; the
+; private BLK_* copy lives in kernel/blk/api.inc and the stage2-blk
+; gate compares both against hand written expectations and the pure
+; Python model tests/stage2-blk/virtqueue_model.py. Emits no bytes.
+; ==================================================================
+
+; ---------------- status codes, the shared set ----------------
+
+if K64_OK <> BLK_OK | K64_EINVAL <> BLK_EINVAL | K64_ENOMEM <> BLK_ENOMEM
+        err 'the BLK status codes disagree with the shared contract'
+end if
+if K64_ENOENT <> BLK_ENOENT | K64_EEXIST <> BLK_EEXIST | K64_EPERM <> BLK_EPERM
+        err 'the BLK status codes disagree with the shared contract'
+end if
+if K64_ENOTSUP <> BLK_ENOTSUP | K64_ENOTREADY <> BLK_ENOTREADY | K64_EALREADY <> BLK_EALREADY
+        err 'the BLK status codes disagree with the shared contract'
+end if
+if K64_EIO <> BLK_EIO | K64_EOVERFLOW <> BLK_EOVERFLOW | K64_EFAULT <> BLK_EFAULT | K64_EBUSY <> BLK_EBUSY
+        err 'the BLK status codes disagree with the shared contract'
+end if
+
+; ---------------- geometry, the shared set ----------------
+
+K64_BLK_PAGE_SIZE  = 0x1000
+K64_BLK_PHYS_LIMIT = 0x100000000
+K64_BLK_KERNEL_BASE = 0xFFFFFFFF80000000
+
+if K64_BLK_PAGE_SIZE <> BLK_PAGE_SIZE | K64_PAGE_SIZE <> BLK_PAGE_SIZE
+        err 'the BLK page size disagrees with the shared contract'
+end if
+if K64_BLK_PHYS_LIMIT <> BLK_PHYS_LIMIT | K64_PHYS_LIMIT <> BLK_PHYS_LIMIT
+        err 'the BLK physical limit disagrees with the shared contract'
+end if
+if K64_BLK_KERNEL_BASE <> BLK_KERNEL_BASE
+        err 'the BLK kernel base disagrees with the shared contract'
+end if
+if BLK_BOOTINFO_KERNEL_PHYS_START <> MM_BOOTINFO.kernel_phys_start
+        err 'the BLK BootInfo offset disagrees with the MM copy'
+end if
+if BLK_BOOTINFO_INITRAMFS_ADDR <> MM_BOOTINFO.initramfs_addr | BLK_BOOTINFO_INITRAMFS_SIZE <> MM_BOOTINFO.initramfs_size
+        err 'the BLK initramfs fallback offsets disagree with the MM copy'
+end if
+
+; ---------------- PCI identity and the CF8/CFC mechanism ----------------
+
+K64_BLK_PCI_VENDOR    = 0x1AF4
+K64_BLK_PCI_DEVICE    = 0x1001
+K64_BLK_PCI_SUBVENDOR = 0x1AF4
+K64_BLK_PCI_SUBDEVICE = 0x0002
+K64_BLK_PCI_REVISION  = 0x00
+K64_BLK_PCI_ADDR_PORT = 0xCF8
+K64_BLK_PCI_DATA_PORT = 0xCFC
+
+if K64_BLK_PCI_VENDOR <> BLK_PCI_VENDOR | K64_BLK_PCI_DEVICE <> BLK_PCI_DEVICE
+        err 'the BLK PCI identity disagrees with the module copy'
+end if
+if K64_BLK_PCI_SUBVENDOR <> BLK_PCI_SUBVENDOR | K64_BLK_PCI_SUBDEVICE <> BLK_PCI_SUBDEVICE | K64_BLK_PCI_REVISION <> BLK_PCI_REVISION
+        err 'the BLK PCI subsystem identity disagrees with the module copy'
+end if
+if K64_BLK_PCI_ADDR_PORT <> BLK_PCI_ADDR_PORT | K64_BLK_PCI_DATA_PORT <> BLK_PCI_DATA_PORT
+        err 'the BLK PCI mechanism ports disagree with the module copy'
+end if
+
+; ---------------- legacy PIO BAR0 map, MSI-X disabled ----------------
+
+K64_BLK_PIO_HOST_FEATURES  = 0x00
+K64_BLK_PIO_GUEST_FEATURES = 0x04
+K64_BLK_PIO_QUEUE_PFN      = 0x08
+K64_BLK_PIO_QUEUE_NUM      = 0x0C
+K64_BLK_PIO_QUEUE_SEL      = 0x0E
+K64_BLK_PIO_QUEUE_NOTIFY   = 0x10
+K64_BLK_PIO_STATUS         = 0x12
+K64_BLK_PIO_ISR            = 0x13
+K64_BLK_PIO_CONFIG_OFF     = 0x14
+
+if K64_BLK_PIO_HOST_FEATURES <> BLK_PIO_HOST_FEATURES | K64_BLK_PIO_GUEST_FEATURES <> BLK_PIO_GUEST_FEATURES
+        err 'the BLK PIO feature registers disagree with the module copy'
+end if
+if K64_BLK_PIO_QUEUE_PFN <> BLK_PIO_QUEUE_PFN | K64_BLK_PIO_QUEUE_NUM <> BLK_PIO_QUEUE_NUM
+        err 'the BLK PIO queue registers disagree with the module copy'
+end if
+if K64_BLK_PIO_QUEUE_SEL <> BLK_PIO_QUEUE_SEL | K64_BLK_PIO_QUEUE_NOTIFY <> BLK_PIO_QUEUE_NOTIFY
+        err 'the BLK PIO select/notify registers disagree with the module copy'
+end if
+if K64_BLK_PIO_STATUS <> BLK_PIO_STATUS | K64_BLK_PIO_ISR <> BLK_PIO_ISR | K64_BLK_PIO_CONFIG_OFF <> BLK_PIO_CONFIG_OFF
+        err 'the BLK PIO status/isr/config registers disagree with the module copy'
+end if
+
+; ---------------- device status and request contract ----------------
+
+K64_BLK_STATUS_ACK       = 0x01
+K64_BLK_STATUS_DRIVER    = 0x02
+K64_BLK_STATUS_DRIVER_OK = 0x04
+K64_BLK_STATUS_FAILED    = 0x80
+K64_BLK_T_IN             = 0
+K64_BLK_S_OK             = 0
+K64_BLK_S_IOERR          = 1
+K64_BLK_S_UNSUPP         = 2
+K64_BLK_SECTOR_SIZE      = 512
+K64_BLK_HEADER_SIZE      = 16
+K64_BLK_STATUS_SIZE      = 1
+
+if K64_BLK_STATUS_ACK <> BLK_STATUS_ACK | K64_BLK_STATUS_DRIVER <> BLK_STATUS_DRIVER
+        err 'the BLK device status bits disagree with the module copy'
+end if
+if K64_BLK_STATUS_DRIVER_OK <> BLK_STATUS_DRIVER_OK | K64_BLK_STATUS_FAILED <> BLK_STATUS_FAILED
+        err 'the BLK device status bits disagree with the module copy'
+end if
+if K64_BLK_T_IN <> BLK_T_IN | K64_BLK_S_OK <> BLK_S_OK | K64_BLK_S_IOERR <> BLK_S_IOERR | K64_BLK_S_UNSUPP <> BLK_S_UNSUPP
+        err 'the BLK request types/status disagree with the module copy'
+end if
+if K64_BLK_SECTOR_SIZE <> BLK_SECTOR_SIZE | K64_BLK_HEADER_SIZE <> BLK_HEADER_SIZE | K64_BLK_STATUS_SIZE <> BLK_STATUS_SIZE
+        err 'the BLK request geometry disagrees with the module copy'
+end if
+
+; ---------------- split virtqueue, legacy layout ----------------
+
+K64_BLK_DESC_F_NEXT  = 0x1
+K64_BLK_DESC_F_WRITE = 0x2
+K64_BLK_VRING_ALIGN  = 4096
+K64_BLK_DESC_SIZE    = 16
+K64_BLK_QNUM_MAX     = 256
+K64_BLK_DMA_SECTORS  = 8
+
+if K64_BLK_DESC_F_NEXT <> BLK_DESC_F_NEXT | K64_BLK_DESC_F_WRITE <> BLK_DESC_F_WRITE
+        err 'the BLK descriptor flags disagree with the module copy'
+end if
+if K64_BLK_VRING_ALIGN <> BLK_VRING_ALIGN | K64_BLK_DESC_SIZE <> BLK_DESC_SIZE
+        err 'the BLK virtqueue geometry disagrees with the module copy'
+end if
+if K64_BLK_QNUM_MAX <> BLK_QNUM_MAX | K64_BLK_DMA_SECTORS <> BLK_DMA_SECTORS
+        err 'the BLK queue/bounce limits disagree with the module copy'
+end if
+if BLK_VRING_MAX_TOTAL > BLK_VRING_PAGES * K64_BLK_PAGE_SIZE
+        err 'the BLK vring reservation does not cover the worst layout'
+end if
+
+; ---------------- frozen self test evidence ----------------
+
+K64_BLK_TEST_CAPACITY   = 16384
+K64_BLK_TEST_DATA_LBA   = 101
+K64_BLK_TEST_ROM_PREFIX = 0x08610C602AA2E000
+K64_BLK_TEST_READS_FINAL = 7
+
+if K64_BLK_TEST_CAPACITY <> BLK_TEST_CAPACITY | K64_BLK_TEST_DATA_LBA <> BLK_TEST_DATA_LBA
+        err 'the BLK test geometry disagrees with the module copy'
+end if
+if K64_BLK_TEST_ROM_PREFIX <> BLK_TEST_ROM_PREFIX | K64_BLK_TEST_READS_FINAL <> BLK_TEST_READS_FINAL
+        err 'the BLK test evidence disagrees with the module copy'
+end if
+
+; the blk stage runs after core_selftest and maps no MMIO: the leg 7
+; accounting baseline stays frozen at three, exactly like APP-v1 above
+if K64_CORE_ACCOUNT_TABLES <> 3
+        err 'FS-v1 M1 adds no page table budget, the leg7 accounting stays three'
+end if
+
+; ==================================================================
+; FS-v1 M2 fs contract, task 132, pure append after the BLK block.
+;
+; The shared K64_FS_* spelling of the frozen read-only FAT16 values;
+; the private FS_* copy lives in kernel/fs/api.inc and the stage2-fs
+; gate compares both against hand written expectations and the pure
+; Python oracle tests/stage2-fs/fat16_model.py. Emits no bytes.
+; ==================================================================
+
+; ---------------- status codes, the shared set ----------------
+
+if K64_OK <> FS_OK | K64_EINVAL <> FS_EINVAL | K64_ENOMEM <> FS_ENOMEM
+        err 'the FS status codes disagree with the shared contract'
+end if
+if K64_ENOENT <> FS_ENOENT | K64_EEXIST <> FS_EEXIST | K64_EPERM <> FS_EPERM
+        err 'the FS status codes disagree with the shared contract'
+end if
+if K64_ENOTSUP <> FS_ENOTSUP | K64_ENOTREADY <> FS_ENOTREADY | K64_EALREADY <> FS_EALREADY
+        err 'the FS status codes disagree with the shared contract'
+end if
+if K64_EIO <> FS_EIO | K64_EOVERFLOW <> FS_EOVERFLOW | K64_EFAULT <> FS_EFAULT | K64_EBUSY <> FS_EBUSY
+        err 'the FS status codes disagree with the shared contract'
+end if
+
+; ---------------- geometry, the shared set ----------------
+
+K64_FS_PAGE_SIZE   = 0x1000
+K64_FS_KERNEL_BASE = 0xFFFFFFFF80000000
+
+if K64_FS_PAGE_SIZE <> FS_PAGE_SIZE | K64_PAGE_SIZE <> FS_PAGE_SIZE
+        err 'the FS page size disagrees with the shared contract'
+end if
+if K64_FS_KERNEL_BASE <> FS_KERNEL_BASE
+        err 'the FS kernel base disagrees with the shared contract'
+end if
+
+; ---------------- on-disk geometry, 512 byte sectors only ----------------
+
+K64_FS_SECTOR_SIZE        = 512
+K64_FS_SECTOR_SHIFT       = 9
+K64_FS_ENTRY_SIZE         = 32
+K64_FS_ENTRY_SHIFT        = 5
+K64_FS_ENTRIES_PER_SECTOR = 16
+
+if K64_FS_SECTOR_SIZE <> FS_SECTOR_SIZE | K64_FS_SECTOR_SHIFT <> FS_SECTOR_SHIFT
+        err 'the FS sector geometry disagrees with the module copy'
+end if
+if K64_FS_SECTOR_SIZE <> K64_BLK_SECTOR_SIZE
+        err 'the FS sector size disagrees with the block layer'
+end if
+if K64_FS_ENTRY_SIZE <> FS_ENTRY_SIZE | K64_FS_ENTRY_SHIFT <> FS_ENTRY_SHIFT
+        err 'the FS directory entry geometry disagrees with the module copy'
+end if
+if K64_FS_ENTRIES_PER_SECTOR <> FS_ENTRIES_PER_SECTOR
+        err 'the FS entries per sector disagree with the module copy'
+end if
+
+; BPB field offsets inside the boot sector
+K64_FS_BPB_BPS          = 11
+K64_FS_BPB_SPC          = 13
+K64_FS_BPB_RESERVED     = 14
+K64_FS_BPB_NFATS        = 16
+K64_FS_BPB_ROOT_ENTRIES = 17
+K64_FS_BPB_TOTAL16      = 19
+K64_FS_BPB_SPF          = 22
+K64_FS_BPB_TOTAL32      = 32
+K64_FS_BPB_SIG          = 510
+K64_FS_BPB_SIG_VALUE    = 0xAA55
+
+if K64_FS_BPB_BPS <> FS_BPB_BPS | K64_FS_BPB_SPC <> FS_BPB_SPC
+        err 'the FS BPB offset map disagrees with the module copy'
+end if
+if K64_FS_BPB_RESERVED <> FS_BPB_RESERVED | K64_FS_BPB_NFATS <> FS_BPB_NFATS
+        err 'the FS BPB offset map disagrees with the module copy'
+end if
+if K64_FS_BPB_ROOT_ENTRIES <> FS_BPB_ROOT_ENTRIES | K64_FS_BPB_TOTAL16 <> FS_BPB_TOTAL16
+        err 'the FS BPB offset map disagrees with the module copy'
+end if
+if K64_FS_BPB_SPF <> FS_BPB_SPF | K64_FS_BPB_TOTAL32 <> FS_BPB_TOTAL32
+        err 'the FS BPB offset map disagrees with the module copy'
+end if
+if K64_FS_BPB_SIG <> FS_BPB_SIG | K64_FS_BPB_SIG_VALUE <> FS_BPB_SIG_VALUE
+        err 'the FS boot signature contract disagrees with the module copy'
+end if
+
+; FAT16 cluster count range and chain markers
+K64_FS_FAT16_MIN_CLUSTERS = 4085
+K64_FS_FAT16_MAX_CLUSTERS = 65524
+K64_FS_FAT16_BAD          = 0xFFF7
+K64_FS_FAT16_EOC_MIN      = 0xFFF8
+
+if K64_FS_FAT16_MIN_CLUSTERS <> FS_FAT16_MIN_CLUSTERS | K64_FS_FAT16_MAX_CLUSTERS <> FS_FAT16_MAX_CLUSTERS
+        err 'the FS FAT16 cluster range disagrees with the module copy'
+end if
+if K64_FS_FAT16_BAD <> FS_FAT16_BAD | K64_FS_FAT16_EOC_MIN <> FS_FAT16_EOC_MIN
+        err 'the FS chain markers disagree with the module copy'
+end if
+
+; directory entry attributes and first byte markers
+K64_FS_ATTR_READ_ONLY = 0x01
+K64_FS_ATTR_VOLUME_ID = 0x08
+K64_FS_ATTR_LFN       = 0x0F
+K64_FS_ATTR_DIRECTORY = 0x10
+K64_FS_DIR_END        = 0x00
+K64_FS_DIR_DELETED    = 0xE5
+K64_FS_DIR_KANJI      = 0x05
+
+if K64_FS_ATTR_READ_ONLY <> FS_ATTR_READ_ONLY | K64_FS_ATTR_VOLUME_ID <> FS_ATTR_VOLUME_ID
+        err 'the FS attribute masks disagree with the module copy'
+end if
+if K64_FS_ATTR_LFN <> FS_ATTR_LFN | K64_FS_ATTR_DIRECTORY <> FS_ATTR_DIRECTORY
+        err 'the FS attribute masks disagree with the module copy'
+end if
+if K64_FS_DIR_END <> FS_DIR_END | K64_FS_DIR_DELETED <> FS_DIR_DELETED | K64_FS_DIR_KANJI <> FS_DIR_KANJI
+        err 'the FS directory markers disagree with the module copy'
+end if
+
+; ---------------- fd table and request limits ----------------
+
+K64_FS_MAX_FDS   = 8
+K64_FS_FD_SIZE   = 64
+K64_FS_PATH_MAX  = 128
+K64_FS_COMP_MAX  = 12
+
+if K64_FS_MAX_FDS <> FS_MAX_FDS | K64_FS_FD_SIZE <> FS_FD_SIZE
+        err 'the FS fd table limits disagree with the module copy'
+end if
+if K64_FS_PATH_MAX <> FS_PATH_MAX | K64_FS_COMP_MAX <> FS_COMP_MAX
+        err 'the FS request limits disagree with the module copy'
+end if
+
+K64_FS_FD_IN_USE   = 0
+K64_FS_FD_IS_DIR   = 8
+K64_FS_FD_CLUSTER  = 16
+K64_FS_FD_SIZE_OFF = 24
+K64_FS_FD_POS      = 32
+
+if K64_FS_FD_IN_USE <> FS_FD_IN_USE | K64_FS_FD_IS_DIR <> FS_FD_IS_DIR
+        err 'the FS fd slot layout disagrees with the module copy'
+end if
+if K64_FS_FD_CLUSTER <> FS_FD_CLUSTER | K64_FS_FD_SIZE_OFF <> FS_FD_SIZE_OFF | K64_FS_FD_POS <> FS_FD_POS
+        err 'the FS fd slot layout disagrees with the module copy'
+end if
+
+; the whole first FAT is cached at init, four whole pages
+K64_FS_FAT_CACHE_SECTORS = 32
+
+if K64_FS_FAT_CACHE_SECTORS <> FS_FAT_CACHE_SECTORS
+        err 'the FS FAT cache budget disagrees with the module copy'
+end if
+
+; open flags and seek whence, the mount is read only
+K64_FS_O_RDONLY  = 0
+K64_FS_O_WRONLY  = 1
+K64_FS_O_RDWR    = 2
+K64_FS_O_ACCMODE = 3
+K64_FS_SEEK_SET  = 0
+K64_FS_SEEK_CUR  = 1
+K64_FS_SEEK_END  = 2
+
+if K64_FS_O_RDONLY <> FS_O_RDONLY | K64_FS_O_WRONLY <> FS_O_WRONLY | K64_FS_O_RDWR <> FS_O_RDWR | K64_FS_O_ACCMODE <> FS_O_ACCMODE
+        err 'the FS open flags disagree with the module copy'
+end if
+if K64_FS_SEEK_SET <> FS_SEEK_SET | K64_FS_SEEK_CUR <> FS_SEEK_CUR | K64_FS_SEEK_END <> FS_SEEK_END
+        err 'the FS seek whence values disagree with the module copy'
+end if
+
+; the fixed readdir entry and the stat output
+K64_FS_DIRENT_SIZE = 32
+K64_FS_STAT_SIZE   = 64
+
+if K64_FS_DIRENT_SIZE <> FS_DIRENT_SIZE | K64_FS_STAT_SIZE <> FS_STAT_SIZE
+        err 'the FS output record sizes disagree with the module copy'
+end if
+
+; ---------------- frozen self test evidence ----------------
+
+K64_FS_TEST_IBM_SIZE    = 132
+K64_FS_TEST_TETRIS_SIZE = 494
+K64_FS_TEST_BIG_SIZE    = 8229
+K64_FS_TEST_ROM_PREFIX  = 0x08610C602AA2E000
+K64_FS_TEST_BIG_PREFIX  = 0x342D261F18110A03
+
+if K64_FS_TEST_IBM_SIZE <> FS_TEST_IBM_SIZE | K64_FS_TEST_TETRIS_SIZE <> FS_TEST_TETRIS_SIZE | K64_FS_TEST_BIG_SIZE <> FS_TEST_BIG_SIZE
+        err 'the FS test file sizes disagree with the module copy'
+end if
+if K64_FS_TEST_ROM_PREFIX <> FS_TEST_ROM_PREFIX | K64_FS_TEST_BIG_PREFIX <> FS_TEST_BIG_PREFIX
+        err 'the FS test prefixes disagree with the module copy'
+end if
+if K64_FS_TEST_ROM_PREFIX <> K64_BLK_TEST_ROM_PREFIX
+        err 'the FS and BLK ROM prefixes disagree'
+end if
+
+K64_FS_TEST_SPC          = 2
+K64_FS_TEST_RESERVED     = 1
+K64_FS_TEST_NFATS        = 2
+K64_FS_TEST_SPF          = 32
+K64_FS_TEST_ROOT_ENTRIES = 512
+K64_FS_TEST_CLUSTERS     = 8143
+K64_FS_TEST_TOTAL        = 16384
+K64_FS_TEST_FAT_LBA      = 1
+K64_FS_TEST_ROOT_LBA     = 65
+K64_FS_TEST_DATA_LBA     = 97
+
+if K64_FS_TEST_SPC <> FS_TEST_SPC | K64_FS_TEST_RESERVED <> FS_TEST_RESERVED | K64_FS_TEST_NFATS <> FS_TEST_NFATS
+        err 'the FS test geometry disagrees with the module copy'
+end if
+if K64_FS_TEST_SPF <> FS_TEST_SPF | K64_FS_TEST_ROOT_ENTRIES <> FS_TEST_ROOT_ENTRIES | K64_FS_TEST_CLUSTERS <> FS_TEST_CLUSTERS
+        err 'the FS test geometry disagrees with the module copy'
+end if
+if K64_FS_TEST_TOTAL <> FS_TEST_TOTAL | K64_FS_TEST_FAT_LBA <> FS_TEST_FAT_LBA
+        err 'the FS test geometry disagrees with the module copy'
+end if
+if K64_FS_TEST_ROOT_LBA <> FS_TEST_ROOT_LBA | K64_FS_TEST_DATA_LBA <> FS_TEST_DATA_LBA
+        err 'the FS test geometry disagrees with the module copy'
+end if
+if K64_FS_TEST_TOTAL <> K64_BLK_TEST_CAPACITY
+        err 'the FS test geometry disagrees with the frozen BLK evidence'
+end if
+; the BLK ROM leg reads IBM.CH8 directly: cluster 4 of the FS geometry
+if K64_BLK_TEST_DATA_LBA <> K64_FS_TEST_DATA_LBA + 2 * K64_FS_TEST_SPC
+        err 'the BLK ROM LBA is not cluster 4 of the FS test geometry'
+end if
+
+; leg failure bits of fs_test_mask
+K64_FS_ST_BPB    = 0x01
+K64_FS_ST_IBM    = 0x02
+K64_FS_ST_TETRIS = 0x04
+K64_FS_ST_SEEK   = 0x08
+K64_FS_ST_NEG    = 0x10
+K64_FS_ST_BIG    = 0x20
+K64_FS_ST_STAT   = 0x40
+K64_FS_ST_COUNT  = 0x80
+
+if K64_FS_ST_BPB <> FS_ST_BPB | K64_FS_ST_IBM <> FS_ST_IBM | K64_FS_ST_TETRIS <> FS_ST_TETRIS | K64_FS_ST_SEEK <> FS_ST_SEEK
+        err 'the FS leg bits disagree with the module copy'
+end if
+if K64_FS_ST_NEG <> FS_ST_NEG | K64_FS_ST_BIG <> FS_ST_BIG | K64_FS_ST_STAT <> FS_ST_STAT | K64_FS_ST_COUNT <> FS_ST_COUNT
+        err 'the FS leg bits disagree with the module copy'
+end if
+
+; the deterministic sector fetch totals of the frozen leg sequence
+K64_FS_TEST_READS_FINAL     = 24
+K64_FS_TEST_READS_FINAL_BIG = 48
+
+if K64_FS_TEST_READS_FINAL <> FS_TEST_READS_FINAL | K64_FS_TEST_READS_FINAL_BIG <> FS_TEST_READS_FINAL_BIG
+        err 'the FS counter evidence disagrees with the module copy'
+end if
+
+; the fs stage runs after the blk stage, still after core_selftest,
+; and maps no MMIO: the leg 7 accounting baseline stays frozen at three
+if K64_CORE_ACCOUNT_TABLES <> 3
+        err 'FS-v1 M2 adds no page table budget, the leg7 accounting stays three'
+end if
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; FS-v1 M3 (task 133): the file syscall contract, the frozen user VA
+;; domain, its page table budget and the fs error mapping. Pure tail
+;; append after the FS section; nothing above this line changed except
+;; the two frozen SYS_CALL_MAX copies (4 -> 16, adjudicated by task 133).
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+; ---------------- syscall numbers 4..9 ----------------
+
+K64_FSYS_SYS_OPEN    = 4
+K64_FSYS_SYS_READ    = 5
+K64_FSYS_SYS_CLOSE   = 6
+K64_FSYS_SYS_SEEK    = 7
+K64_FSYS_SYS_STAT    = 8
+K64_FSYS_SYS_READDIR = 9
+
+if K64_FSYS_SYS_OPEN <> FSYS_SYS_OPEN | K64_FSYS_SYS_READ <> FSYS_SYS_READ | K64_FSYS_SYS_CLOSE <> FSYS_SYS_CLOSE
+        err 'the FSYS syscall numbers disagree with the module copy'
+end if
+if K64_FSYS_SYS_SEEK <> FSYS_SYS_SEEK | K64_FSYS_SYS_STAT <> FSYS_SYS_STAT | K64_FSYS_SYS_READDIR <> FSYS_SYS_READDIR
+        err 'the FSYS syscall numbers disagree with the module copy'
+end if
+if K64_FSYS_SYS_READDIR >= K64_APP_SYS_CALL_MAX
+        err 'the syscall table must cover the file syscalls'
+end if
+
+; ---------------- the frozen user VA domain ----------------
+; Task 120 plan B, extracted from user/chip8/api.inc: the user image
+; lives above the 4 GiB identity map. The domain is one 4 MiB window,
+; [0x100400000, 0x100800000): code [base, +16KiB) US (RO+X), data
+; [0x100600000, +2MiB) US|RW|NX, stack the top 16 KiB US|RW|NX.
+
+K64_FSYS_USER_VA_BASE    = 0x100400000
+K64_FSYS_USER_VA_LIMIT   = 0x100800000
+K64_FSYS_USER_CODE_BASE  = 0x100400000
+K64_FSYS_USER_CODE_SIZE  = 0x4000
+K64_FSYS_USER_DATA_BASE  = 0x100600000
+K64_FSYS_USER_DATA_SIZE  = 0x200000
+K64_FSYS_USER_STACK_SIZE = 0x4000
+
+if K64_FSYS_USER_VA_BASE <> MM_USER_VA_BASE | K64_FSYS_USER_VA_LIMIT <> MM_USER_VA_LIMIT
+        err 'the FSYS user domain disagrees with the mm copy'
+end if
+if K64_FSYS_USER_VA_BASE <> FSYS_USER_VA_BASE | K64_FSYS_USER_VA_LIMIT <> FSYS_USER_VA_LIMIT
+        err 'the FSYS user domain disagrees with the module copy'
+end if
+if K64_FSYS_USER_CODE_BASE <> MM_USER_CODE_BASE | K64_FSYS_USER_CODE_SIZE <> MM_USER_CODE_SIZE
+        err 'the FSYS code domain disagrees with the mm copy'
+end if
+if K64_FSYS_USER_DATA_BASE <> MM_USER_DATA_BASE | K64_FSYS_USER_DATA_SIZE <> MM_USER_DATA_SIZE
+        err 'the FSYS data domain disagrees with the mm copy'
+end if
+if K64_FSYS_USER_STACK_SIZE <> MM_USER_STACK_SIZE
+        err 'the FSYS stack size disagrees with the mm copy'
+end if
+
+; ---------------- the frozen page table budget ----------------
+; Adjudication of the +4 dispute: the loader identity already owns
+; PML4[0] -> one PDPT whose entries 0..3 point at the four 2 MiB-leaf
+; PDs. The user domain sits in PDPT[4], an empty slot of that EXISTING
+; PDPT, so no new PDPT and no large page split is ever needed. The
+; whole domain costs exactly 1 PD (at PDPT[4]) + 2 PTs (code PD[2],
+; data/stack PD[3]): +3 table pages, frozen.
+;
+; anchor 0: PML4[0] is shared with the identity map and starts without
+; US. vmm_map_user_page ORs US into that one PML4 slot on its success
+; path only; the identity levels below keep no US, so every identity
+; VA stays supervisor-only. This is the single documented exception to
+; "existing entries are never rewritten", owned by the user mapper.
+
+K64_FSYS_TABLE_BUDGET   = 3
+K64_FSYS_PML4_SLOT      = 0
+K64_FSYS_PDPT_INDEX     = 4
+K64_FSYS_PROBE_PAGES    = 9
+K64_FSYS_PROBE_MASK     = 0x7FF
+
+if K64_FSYS_TABLE_BUDGET <> MM_USER_TABLE_BUDGET | K64_FSYS_TABLE_BUDGET <> FSYS_TABLE_BUDGET
+        err 'the FSYS table budget disagrees with the frozen copies'
+end if
+if K64_FSYS_PML4_SLOT <> MM_USER_PML4_SLOT | K64_FSYS_PDPT_INDEX <> MM_USER_PDPT_INDEX
+        err 'the FSYS domain placement disagrees with the mm copy'
+end if
+if K64_FSYS_PROBE_PAGES <> FSYS_PROBE_PAGES | K64_FSYS_PROBE_MASK <> FSYS_FP_MASK_ALL
+        err 'the FSYS probe footprint disagrees with the module copy'
+end if
+
+; ---------------- the frozen error mapping ----------------
+; The fs module keeps its FS_E* codes internally; the adapter maps
+; them onto the five code K64 set, never the raw 32-bit values:
+;   EINVAL->EINVAL  ENOENT->ENOENT  ENOTSUP->ENOTSUP  EIO->EIO
+;   EFAULT->EFAULT  EPERM->ENOTSUP (read-only v1)     ENOMEM->EIO
+;   ENOTREADY->EIO  EEXIST->EINVAL  EALREADY->EINVAL
+;   EOVERFLOW->EINVAL  EBUSY->EIO  out of table->EIO
+
+K64_FSYS_MAP_EPERM     = K64_ENOTSUP
+K64_FSYS_MAP_ENOMEM    = K64_EIO
+K64_FSYS_MAP_ENOTREADY = K64_EIO
+K64_FSYS_MAP_EEXIST    = K64_EINVAL
+K64_FSYS_MAP_EALREADY  = K64_EINVAL
+K64_FSYS_MAP_EOVERFLOW = K64_EINVAL
+K64_FSYS_MAP_EBUSY     = K64_EIO
+
+if FSYS_EINVAL <> K64_EINVAL | FSYS_ENOENT <> K64_ENOENT | FSYS_ENOTSUP <> K64_ENOTSUP
+        err 'the FSYS errno set disagrees with the K64 contract'
+end if
+if FSYS_EIO <> K64_EIO | FSYS_EFAULT <> K64_EFAULT
+        err 'the FSYS errno set disagrees with the K64 contract'
+end if
+
+; the fsys data region is three pages (state, bounce, syscall stack)
+; and its stage runs after core_selftest like blk/fs: the probe user
+; domain tables and the data protection allocate late, the leg 7
+; accounting baseline stays frozen at three
+K64_FSYS_DATA_PAGES = 3
+
+if K64_FSYS_DATA_PAGES <> FSYS_DATA_PAGES_TOTAL
+        err 'the FSYS data budget disagrees with the module copy'
+end if
+if K64_CORE_ACCOUNT_TABLES <> 3
+        err 'FS-v1 M3 adds no early page table budget, the leg7 accounting stays three'
+end if
+
+; ---------------- task 138 review fixes, frozen revisions ----------------
+; Pure tail append inside the FS-v1 M3 section; no other section moved.
+;
+; W1/S1 full width syscall returns: READ, READDIR and SEEK return the
+; full 64 bit result in rax (byte counts and offsets >= 2 GiB return
+; verbatim, e.g. SEEK_SET 0x100000000 returns 0x100000000). The movsxd
+; sign extension serves the negative errno path only; a successful
+; result never passes through it. fs_seek itself already accepts and
+; returns the full signed i64 offset.
+;
+; S2 POSIX partial reads: READ and READDIR count delivered bytes only
+; (the total advances after a successful copy_to_user, never before).
+; Once N > 0 bytes were delivered, a later EIO or EFAULT returns N,
+; never -errno; only a failure before the first delivered byte returns
+; the negative errno. EOF keeps returning the count, 0 at a fresh EOF.
+;
+; W2 fs_init geometry guard: after the FAT16 cluster range check the
+; cached FAT must cover every entry, clusters + 2 <= spf * 256 (512 B
+; sectors, 2 B entries). A corrupt BPB violating it is EIO with
+; fs_ready left 0; the read path algorithm itself is untouched.
+;
+; W3 user domain teardown, the APP-v1 app exit path groundwork:
+; vmm_unmap_user_page(rcx = VA) serves [MM_USER_VA_BASE,
+; MM_USER_VA_LIMIT) only; vmm_unmap_page keeps the public window and
+; keeps refusing the user domain. Contract: outside the domain EPERM,
+; misaligned EINVAL, no leaf ENOENT, non 4 KiB leaf ENOTSUP, effective
+; US clear EPERM, not ready ENOTREADY. On success rdx carries the
+; unmapped physical address (the caller still owns the frame and frees
+; it through pmm_free_page). The leaf is cleared and invlpg'd first;
+; then bottom up an all zero PT is unlinked from its PD and an all
+; zero PD is unlinked from PDPT[4], each through mm_pmm_drop_table
+; with table_drops incremented by the caller (the helper never
+; counts). The identity PDPT/PML4 are never reclaimed and the anchor 0
+; US bit of PML4[0] stays set (one way). Any intermediate unlink is
+; followed by a CR3 reload to flush cached walks. Net table invariant:
+; after a full map+unmap cycle of the frozen footprint, allocs - drops
+; returns to the pre-map baseline and exactly K64_FSYS_TABLE_BUDGET
+; tables were released. fsys_probe tears down on EVERY exit path after
+; the snapshot: nine leaves unmapped (ENOENT tolerated for partial
+; failures), tables reclaimed, frames freed, fsys_pages zeroed,
+; fsys_pages_held back to 0; the guest evidence page is snapshotted
+; into the bounce page before teardown so the QEMU judge keeps its
+; byte-for-byte evidence. The frozen counter snapshots (34/58, 24/48)
+; and the probe mask/exit code verdicts are unchanged.
+;
+; S3 RSP0 discipline: every fsys_probe failure path after a successful
+; cpu_set_rsp0 restores the saved foundation TSS.RSP0 before returning,
+; including the EXIT registration failure path.
+
+if K64_FSYS_TABLE_BUDGET <> 3
+        err 'the W3 teardown must release exactly the frozen +3 budget'
+end if

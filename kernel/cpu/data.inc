@@ -124,7 +124,8 @@ if (cpu_tss and (CPU_TSS_ALIGN - 1)) <> 0
 end if
 
 ; ------------------------------------------------------------------
-; GDT, 40 bytes: null, 64-bit code, 64-bit data, 16 byte TSS descriptor
+; GDT, 56 bytes: null, 64-bit code, 64-bit data, 16 byte TSS descriptor,
+; ring 3 data, ring 3 code
 ; ------------------------------------------------------------------
 
 align CPU_GDT_ALIGN
@@ -143,10 +144,14 @@ cpu_gdt_tss:
         db      0
         db      (cpu_tss shr 24) and 0xFF
         dq      (cpu_tss shr 32)
+cpu_gdt_user_data:
+        dq      CPU_GDT_USER_DATA_VALUE
+cpu_gdt_user_code:
+        dq      CPU_GDT_USER_CODE_VALUE
 cpu_gdt_end:
 
 if cpu_gdt_end - cpu_gdt <> CPU_GDT_SIZE
-        err 'GDT must stay 40 bytes'
+        err 'GDT must stay 56 bytes'
 end if
 if cpu_gdt_code - cpu_gdt <> CPU_GDT_OFF_CODE
         err 'code descriptor offset'
@@ -156,6 +161,12 @@ if cpu_gdt_data - cpu_gdt <> CPU_GDT_OFF_DATA
 end if
 if cpu_gdt_tss - cpu_gdt <> CPU_GDT_OFF_TSS
         err 'TSS descriptor offset'
+end if
+if cpu_gdt_user_data - cpu_gdt <> CPU_GDT_OFF_USER_DATA
+        err 'user data descriptor offset'
+end if
+if cpu_gdt_user_code - cpu_gdt <> CPU_GDT_OFF_USER_CODE
+        err 'user code descriptor offset'
 end if
 if (CPU_TSS_LIMIT shr 16) <> 0
         err 'the TSS limit must fit the low limit field'
@@ -213,7 +224,12 @@ end if
 ; expectation (vector, the RIP the hardware must have saved, the RIP to resume
 ; at, and the two masked hardware facts) and one result waiting to be
 ; collected. The IRQ handler pointer is the one asynchronous fact: zero means
-; no handler, and only cpu_irq_set_handler ever writes it.
+; no handler, and only cpu_irq_set_handler ever writes it. The syscall state
+; follows the same rules: cpu_syscall_ready is written only by
+; cpu_syscall_init, the handler table only by cpu_syscall_set_handler and
+; the user fault pointer only by cpu_user_fault_set_handler. The scratch
+; RSP slot belongs to cpu_syscall_entry alone: one CPU, IF = 0 for the whole
+; entry, so a syscall can never nest.
 ; ------------------------------------------------------------------
 
 align 8
@@ -264,6 +280,17 @@ cpu_bootinfo_va:
 cpu_boot_cr3:
         dq      0
 cpu_boot_stack:
+        dq      0
+cpu_syscall_ready:
+        db      0
+        db      0
+        dw      0
+        dd      0
+cpu_user_fault_handler:
+        dq      0
+cpu_syscall_handlers:
+        dq      CPU_SYS_CALL_MAX dup 0
+cpu_syscall_scratch_rsp:
         dq      0
 
 ; ------------------------------------------------------------------
@@ -367,4 +394,13 @@ if (cpu_trap_expect_rip and 7) <> 0
 end if
 if (cpu_irq_handler and 7) <> 0
         err 'the IRQ handler pointer must stay qword aligned'
+end if
+if (cpu_user_fault_handler and 7) <> 0
+        err 'the user fault handler pointer must stay qword aligned'
+end if
+if (cpu_syscall_handlers and 7) <> 0
+        err 'the syscall handler table must stay qword aligned'
+end if
+if (cpu_syscall_scratch_rsp and 7) <> 0
+        err 'the syscall scratch RSP slot must stay qword aligned'
 end if

@@ -379,6 +379,33 @@ include 'video/video.asm'
 DESKTOP_HOSTED = 1
 include 'desktop/desktop.asm'
 
+; FS-v1 M1: the block layer drives virtio-blk-pci-transitional through
+; the legacy PIO BAR0 with a polled virtqueue, read only; it calls only
+; the CPU console and never wires an interrupt. BLK_HOSTED keeps
+; blk.asm from emitting its standalone format/org pair. Its data region
+; (vring + DMA pages inside the identity domain) is protected RW/NX by
+; the foundation blk stage; the core files still close the image.
+BLK_HOSTED = 1
+include 'blk/blk.asm'
+
+; FS-v1 M2: the read-only FAT16 mount over blk_read, 8.3 short names,
+; a static eight slot fd table and a deterministic sector cache; it
+; calls only blk_read and the CPU console, never wires an interrupt
+; and has no write path. FS_HOSTED keeps fs.asm from emitting its
+; standalone format/org pair. Its data region is protected RW/NX by
+; the foundation fs stage; the core files still close the image.
+FS_HOSTED = 1
+include 'fs/fs.asm'
+
+; FS-v1 M3: the file syscall adapter over the frozen M2 fs API, the
+; user pointer safety layer (full-range domain validation + bounce
+; copies) and the Ring 3 fsprobe leg. FSYS_HOSTED keeps fsys.asm from
+; emitting its standalone format/org pair. Its data region (state,
+; bounce page, private syscall stack) is protected RW/NX by the
+; foundation fsys stage; the core files still close the image.
+FSYS_HOSTED = 1
+include 'fsys/fsys.asm'
+
 include 'core/contracts.inc'
 include 'core/foundation.inc'
 include 'core/selftest.inc'

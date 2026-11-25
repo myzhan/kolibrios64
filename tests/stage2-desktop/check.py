@@ -1024,10 +1024,18 @@ def check_selftest(rep, img):
 
 def check_sources(rep, root):
     module = root / 'kernel' / 'desktop'
-    files = sorted(p.name for p in module.glob('*'))
-    rep.equal('source.file_set', files, [
-        'api.inc', 'cursor.inc', 'data.inc', 'desktop.asm',
-        'desktop.inc', 'echo.inc', 'selftest.inc'])
+    # the frozen seven-file module set. Whitelist style (task 138 W4):
+    # only directory entries (e.g. the assets/ tree of the desktop-v2
+    # track) and the known wallpaper.inc of that track are exempt; any
+    # other foreign file stays in the list and fails file_set instead
+    # of silently passing a name filter. The 386-check verdict here
+    # stays unchanged.
+    module_files = ['api.inc', 'cursor.inc', 'data.inc', 'desktop.asm',
+                    'desktop.inc', 'echo.inc', 'selftest.inc']
+    exempt = {'wallpaper.inc'}
+    files = sorted(p.name for p in module.glob('*')
+                   if p.is_file() and p.name not in exempt)
+    rep.equal('source.file_set', files, module_files)
 
     api = (module / 'api.inc').read_text(encoding='utf-8')
     rep.check('source.api_standalone',
@@ -1044,6 +1052,8 @@ def check_sources(rep, root):
               not re.search(r"^\s*rb\b", data_text, re.M))
 
     for path in sorted(module.glob('*')):
+        if not path.is_file() or path.name in exempt:
+            continue
         text = path.read_text(encoding='utf-8')
         rep.check('source.%s.no_tabs' % path.name, '\t' not in text)
         rep.check('source.%s.trailing_newline' % path.name, text.endswith('\n'))

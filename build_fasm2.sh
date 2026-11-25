@@ -147,6 +147,11 @@ assemble() {
 
 mkdir -p "$outdir"
 
+# FS-v1 M3: prebuild the Ring 3 fsprobe image that kernel/fsys/fsys.inc
+# embeds with a file directive; it must exist before the kernel pass.
+mkdir -p "$root/build/user-fsprobe"
+assemble user/fsprobe/fsprobe.asm "$root/build/user-fsprobe/fsprobe.bin"
+
 assemble kernel/boot/bootx64.asm "$outdir/BOOTX64.EFI"
 assemble kernel/kernel64.asm "$outdir/KERNEL64.BIN"
 

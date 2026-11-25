@@ -78,12 +78,30 @@ PTE_NX = 0x8000000000000000
 
 MAP_RW = PTE_RW
 MAP_NX = PTE_NX
-MAP_ALLOWED = MAP_RW | MAP_NX
+# APP-v1 (task 113): US joins the allowed set; the public window itself
+# still refuses every user mapping, and the protect path keeps RW|NX only
+MAP_US = PTE_US
+MAP_ALLOWED = MAP_RW | MAP_NX | MAP_US
+PROTECT_ALLOWED = MAP_RW | MAP_NX
 
 # MMIO mapping: fixed leaf flags, the LAPIC window and the core test slot
 MMIO_LAPIC_VA = 0xFFFFC00002000000
 MMIO_FLAGS = PTE_PCD | PTE_RW | PTE_NX
 CORE_TEST_SLOT = 386
+
+# FS-v1 M3 (task 133): the adjudicated user VA domain, the task 120
+# plan B layout above the identity map, and its frozen table budget
+USER_VA_BASE = 0x100400000
+USER_VA_LIMIT = 0x100800000
+USER_VA_SIZE = USER_VA_LIMIT - USER_VA_BASE
+USER_CODE_BASE = USER_VA_BASE
+USER_CODE_SIZE = 0x4000
+USER_DATA_BASE = 0x100600000
+USER_DATA_SIZE = 0x200000
+USER_STACK_SIZE = 0x4000
+USER_PML4_SLOT = 0
+USER_PDPT_INDEX = 4
+USER_TABLE_BUDGET = 3
 
 # BootInfo feature flags and the GOP handover formats
 BOOTINFO_FLAG_MAP = 0x01
@@ -245,7 +263,8 @@ EXPECT_CONSTANTS = {
     'MM_HEAP_INITIAL': 0x10000,
     'MM_PTE_NX': 0x8000000000000000,
     'MM_PTE_ADDR_MASK': 0x000FFFFFFFFFF000,
-    'MM_MAP_ALLOWED': 0x8000000000000002,
+    'MM_MAP_ALLOWED': 0x8000000000000006,
+    'MM_MAP_US': 0x004,
     'MM_BOOTINFO_SIZE': 208,
     'MM_INIT_PARAMS_size': 64,
     'MM_EFI_DESC_MIN_SIZE': 40,
@@ -276,6 +295,17 @@ EXPECT_CONSTANTS = {
     'MM_BOOTINFO_FLAG_INITRAMFS': 0x08,
     'MM_BOOTINFO_FLAG_KNOWN': 0x0F,
     'MM_GOP_PIXEL_FORMAT_MAX': 2,
+    'MM_USER_VA_BASE': 0x100400000,
+    'MM_USER_VA_LIMIT': 0x100800000,
+    'MM_USER_VA_SIZE': 0x400000,
+    'MM_USER_CODE_BASE': 0x100400000,
+    'MM_USER_CODE_SIZE': 0x4000,
+    'MM_USER_DATA_BASE': 0x100600000,
+    'MM_USER_DATA_SIZE': 0x200000,
+    'MM_USER_STACK_SIZE': 0x4000,
+    'MM_USER_PML4_SLOT': 0,
+    'MM_USER_PDPT_INDEX': 4,
+    'MM_USER_TABLE_BUDGET': 3,
 }
 
 EXPECT_QUERY_FLAGS = {
@@ -304,7 +334,7 @@ mm_pmm_drop_table mm_pmm_recount mm_vmm_resolve mm_vmm_protect_pass mm_heap_grow
 MM_PAGE_SHIFT MM_PAGE_SIZE MM_PHYS_LIMIT MM_PFN_COUNT MM_BITMAP_BYTES
 MM_KERNEL_BASE MM_WINDOW_BASE MM_WINDOW_LIMIT MM_WINDOW_SIZE MM_HEAP_BASE
 MM_HEAP_LIMIT MM_HEAP_MAX MM_HEAP_INITIAL MM_PTE_NX MM_PTE_ADDR_MASK
-MM_MAP_ALLOWED MM_BOOTINFO_SIZE MM_INIT_PARAMS_size MM_EFI_DESC_MIN_SIZE
+MM_MAP_ALLOWED MM_MAP_US MM_BOOTINFO_SIZE MM_INIT_PARAMS_size MM_EFI_DESC_MIN_SIZE
 MM_MAP_MAX_SIZE MM_MAP_MAX_DESCS MM_IMAGE_MAX MM_CR3_PIN_MAX MM_TABLE_WALK_MAX
 MM_OK MM_EINVAL MM_ENOMEM MM_ENOENT MM_EEXIST MM_EPERM MM_ENOTSUP
 MM_ENOTREADY MM_EALREADY MM_EIO MM_EOVERFLOW MM_EFAULT MM_EBUSY
@@ -348,12 +378,17 @@ vmm_map_mmio MM_MMIO_LAPIC_VA MM_MMIO_FLAGS MM_CORE_TEST_SLOT
 mmio_count mmio_table
 MM_BOOTINFO_FLAG_MAP MM_BOOTINFO_FLAG_FRAMEBUFFER MM_BOOTINFO_FLAG_RSDP
 MM_BOOTINFO_FLAG_INITRAMFS MM_BOOTINFO_FLAG_KNOWN MM_GOP_PIXEL_FORMAT_MAX
+vmm_map_user_page MM_USER_VA_BASE MM_USER_VA_LIMIT MM_USER_VA_SIZE
+MM_USER_CODE_BASE MM_USER_CODE_SIZE MM_USER_DATA_BASE MM_USER_DATA_SIZE
+MM_USER_STACK_SIZE MM_USER_PML4_SLOT MM_USER_PDPT_INDEX MM_USER_TABLE_BUDGET
+umap_count umap_table vmm_unmap_user_page
 """.split()
 
 PUBLIC_ENTRIES = [
     'pmm_init', 'pmm_alloc_page', 'pmm_free_page', 'pmm_get_stats',
     'pmm_selftest',
     'vmm_init', 'vmm_query', 'vmm_map_page', 'vmm_map_mmio', 'vmm_unmap_page',
+    'vmm_map_user_page', 'vmm_unmap_user_page',
     'vmm_boot_protect',
     'vmm_selftest', 'heap_init', 'heap_alloc', 'heap_free', 'heap_get_stats',
     'heap_selftest', 'mm_selftest',
@@ -578,7 +613,7 @@ def check_image(chk, man, img, org, label):
     chk.start('image %s' % label)
     chk.eq(bytes(struct.pack('<Q', man['magic'])), b'K64MMP01',
            'manifest magic')
-    chk.eq(man['version'], 1, 'manifest version')
+    chk.eq(man['version'], 3, 'manifest version')
     chk.eq(man['org'], org, 'manifest org')
 
     data_start, data_end = man['data_start'], man['data_end']
@@ -1348,6 +1383,25 @@ def check_pmm(chk, mem, man):
     mem.restore(pristine)
 
 
+def map_flag_rule(flags):
+    """The flag matrix of vmm_map_page, independent of the VA window:
+    only RW/NX/US, never writable plus executable, and a user mapping is
+    pure US (RO+X code) or US|RW|NX (data, stack), nothing else."""
+    if flags & ~MAP_ALLOWED & MASK64:
+        return EINVAL
+    if flags & MAP_RW and not flags & MAP_NX:
+        return EINVAL
+    if flags & MAP_US and flags not in (MAP_US, MAP_US | MAP_RW | MAP_NX):
+        return EINVAL
+    return OK
+
+
+def table_entry_flags(flags):
+    """APP-v1: a freshly built intermediate entry carries P|RW plus the
+    leaf US bit; existing entries are never rewritten."""
+    return PTE_P | PTE_RW | (flags & PTE_US)
+
+
 class Vmm:
     """vmm.inc on one root page: map, unmap and the accounting."""
 
@@ -1373,14 +1427,17 @@ class Vmm:
             return ENOTREADY
         if va < self.window_base or va >= self.window_limit:
             return EPERM
+        # APP-v1: the public window never takes a user mapping, and the
+        # window test runs before the alignment and flag checks
+        if flags & MAP_US:
+            return EPERM
         if va & (PAGE_SIZE - 1):
             return EINVAL
         if pa & (PAGE_SIZE - 1):
             return EINVAL
-        if flags & ~MAP_ALLOWED:
-            return EINVAL
-        if flags & MAP_RW and not flags & MAP_NX:
-            return EINVAL
+        status = map_flag_rule(flags)
+        if status != OK:
+            return status
         # ownership: handed out by the public allocator and not pinned
         pfn = pa >> PAGE_SHIFT
         if (pfn >= PFN_COUNT or pfn not in self.pmm.allocated
@@ -1399,7 +1456,7 @@ class Vmm:
                 if page is None:
                     return self._drop(ENOMEM, new)
                 if new:
-                    self.mem.setq(slot, page | PTE_P | PTE_RW)
+                    self.mem.setq(slot, page | table_entry_flags(flags))
                 else:
                     publish = slot
                 new.append(page)
@@ -1415,7 +1472,67 @@ class Vmm:
             return self._drop(EEXIST, new)
         self.mem.setq(slot, pa | PTE_P | flags)
         if new:
-            self.mem.setq(publish, new[0] | PTE_P | PTE_RW)   # atomic publish
+            self.mem.setq(publish, new[0] | table_entry_flags(flags))
+        self.table_allocs += len(new)
+        return OK
+
+    def map_user(self, va, pa, flags):
+        """vmm_map_user_page: the frozen user domain mirror of map.
+
+        The domain test replaces the window test, US is mandatory, the
+        flag matrix / ownership / offline build / rollback are the same,
+        and anchor 0 opens the shared PML4 slot US on success only.
+        """
+        if not self.ready:
+            return ENOTREADY
+        if va < USER_VA_BASE or va >= USER_VA_LIMIT:
+            return EPERM
+        if not flags & MAP_US:
+            return EPERM
+        if va & (PAGE_SIZE - 1):
+            return EINVAL
+        if pa & (PAGE_SIZE - 1):
+            return EINVAL
+        status = map_flag_rule(flags)
+        if status != OK:
+            return status
+        pfn = pa >> PAGE_SHIFT
+        if (pfn >= PFN_COUNT or pfn not in self.pmm.allocated
+                or pfn in self.pmm.pinned):
+            return EPERM
+        if pa & ~self.pa_mask & MASK64:
+            return EOVERFLOW
+        base = self.root
+        publish = 0
+        new = []
+        for shift in (39, 30, 21):
+            slot = base + ((va >> shift) & 0x1FF) * 8
+            entry = self.mem.q(slot)
+            if not entry & PTE_P:
+                page = self.pmm.alloc_table()
+                if page is None:
+                    return self._drop(ENOMEM, new)
+                if new:
+                    self.mem.setq(slot, page | table_entry_flags(flags))
+                else:
+                    publish = slot
+                new.append(page)
+                base = page
+            else:
+                if entry & PTE_PS:
+                    return self._drop(ENOTSUP, new)
+                base = entry & self.pa_mask
+                if base >= PHYS_LIMIT:
+                    return self._drop(ENOTSUP, new)
+        slot = base + ((va >> 12) & 0x1FF) * 8
+        if self.mem.q(slot) & PTE_P:
+            return self._drop(EEXIST, new)
+        self.mem.setq(slot, pa | PTE_P | flags)
+        if new:
+            self.mem.setq(publish, new[0] | table_entry_flags(flags))
+        # anchor 0: the shared identity PML4 slot gains US, success only
+        slot0 = self.root + ((va >> 39) & 0x1FF) * 8
+        self.mem.setq(slot0, self.mem.q(slot0) | PTE_US)
         self.table_allocs += len(new)
         return OK
 
@@ -1433,6 +1550,45 @@ class Vmm:
             return ENOTSUP, 0
         self.mem.setq(rec['slot'], 0)
         return OK, rec['pa']
+
+    def unmap_user(self, va):
+        """vmm_unmap_user_page (task 138 W3): tear the frozen user domain
+        down. The domain test replaces the window test, the effective US
+        must be set, and an emptied PT / PD is unlinked and handed back
+        through drop_table (counted here, the helper does not count).
+        The identity PDPT and PML4 are never reclaimed; anchor 0 stays."""
+        if not self.ready:
+            return ENOTREADY, 0
+        if va < USER_VA_BASE or va >= USER_VA_LIMIT:
+            return EPERM, 0
+        if va & (PAGE_SIZE - 1):
+            return EINVAL, 0
+        status, rec = walk(self.mem, self.root, self.pa_mask, va)
+        if status != OK:
+            return status, 0
+        if rec['page_size'] != PAGE_SIZE:
+            return ENOTSUP, 0
+        if rec['us'] != 1:
+            return EPERM, 0
+        self.mem.setq(rec['slot'], 0)
+        pa = rec['pa']
+        pt = rec['slot'] & ~(PAGE_SIZE - 1)
+        if any(self.mem.q(pt + i * 8) for i in range(512)):
+            return OK, pa                       # the PT keeps other leaves
+        # locate the PD through PML4[slot] -> PDPT[index], identity VAs
+        pml4 = self.mem.q(self.root + ((va >> 39) & 0x1FF) * 8) & self.pa_mask
+        pdpt_slot = pml4 + ((va >> 30) & 0x1FF) * 8
+        pd = self.mem.q(pdpt_slot) & self.pa_mask
+        self.mem.setq(pd + ((va >> 21) & 0x1FF) * 8, 0)
+        if self.pmm.drop_table(pt) != OK:
+            return EIO, 0
+        self.table_drops += 1
+        if not any(self.mem.q(pd + i * 8) for i in range(512)):
+            self.mem.setq(pdpt_slot, 0)         # the PDPT itself stays
+            if self.pmm.drop_table(pd) != OK:
+                return EIO, 0
+            self.table_drops += 1
+        return OK, pa
 
     def map_mmio(self, va, pa):
         """vmm_map_mmio: fixed PCD|RW|NX leaf, reverse ownership.
@@ -1517,7 +1673,7 @@ def map_machine(mem, root):
 def check_map(chk, mem, man):
     chk.start('map')
     count = mem.q(man['map_count'])
-    chk.eq(count, 26, 'the probe carries twenty six map cases')
+    chk.eq(count, 29, 'the probe carries twenty nine map cases')
     base = man['map_table']
     root = man['fx2_base']
     pdpt = mem.q(root + 0x180 * 8) & PA_MASK
@@ -1624,6 +1780,367 @@ def check_map(chk, mem, man):
            'a pinned physical page cannot be mapped')
     chk.eq(bytes(mem.image), before, 'and the refusal writes nothing')
     chk.eq(vmm.table_allocs, 0, 'no table was built for the pinned page')
+
+
+def check_map_us(chk, mem, man):
+    """APP-v1 (task 113): the US flag matrix, the table US propagation
+    rule and the public window refusal, against hand written expectations."""
+    chk.start('map user flags')
+    # the flag matrix, independent of the window: pure US and US|RW|NX
+    # are the only legal user mixes, W^X still holds for every mapping
+    matrix = (
+        (0, OK, 'read only executable'),
+        (MAP_RW, EINVAL, 'writable executable'),
+        (MAP_NX, OK, 'read only non executable'),
+        (MAP_RW | MAP_NX, OK, 'writable non executable'),
+        (MAP_US, OK, 'user code'),
+        (MAP_US | MAP_RW, EINVAL, 'user writable executable'),
+        (MAP_US | MAP_NX, EINVAL, 'user non executable without RW'),
+        (MAP_US | MAP_RW | MAP_NX, OK, 'user data'),
+    )
+    for flags, want, why in matrix:
+        chk.eq(map_flag_rule(flags), want, 'flag rule: %s' % why)
+    for bit, name in ((PTE_P, 'P'), (PTE_PWT, 'PWT'), (PTE_PCD, 'PCD'),
+                      (PTE_PS, 'PS'), (PTE_G, 'G'), (PTE_PAT, 'PAT')):
+        chk.eq(map_flag_rule(MAP_NX | bit), EINVAL,
+               'flag rule refuses the %s bit' % name)
+        chk.eq(map_flag_rule(MAP_US | bit), EINVAL,
+               'flag rule refuses US plus %s' % name)
+
+    # a fresh intermediate entry carries the leaf US, supervisor mappings
+    # keep plain P|RW links
+    for flags, want in ((0, PTE_P | PTE_RW),
+                        (MAP_NX, PTE_P | PTE_RW),
+                        (MAP_RW | MAP_NX, PTE_P | PTE_RW),
+                        (MAP_US, PTE_P | PTE_RW | PTE_US),
+                        (MAP_US | MAP_RW | MAP_NX, PTE_P | PTE_RW | PTE_US)):
+        chk.eq(table_entry_flags(flags), want,
+               'table link flags for %#x' % flags)
+
+    # the window refusal dominates: every US mix, legal or not, is EPERM
+    # inside the public window and writes nothing
+    root = man['fx2_base']
+    pristine = mem.snapshot()
+    for flags in (MAP_US, MAP_US | MAP_RW, MAP_US | MAP_NX,
+                  MAP_US | MAP_RW | MAP_NX, MAP_US | PTE_G):
+        mem.restore(pristine)
+        pmm, vmm = map_machine(mem, root)
+        before = bytes(mem.image)
+        chk.eq(vmm.map(WINDOW_BASE + 0x5000, 0x900000, flags), EPERM,
+               'the window refuses US mix %#x' % flags)
+        chk.eq(bytes(mem.image), before,
+               'the US refusal %#x writes nothing' % flags)
+        chk.eq(vmm.table_allocs, 0,
+               'the US refusal %#x builds no table' % flags)
+
+    # boot_protect keeps the supervisor matrix: no US mix is accepted
+    boot = {'kernel_start': KERNEL_START, 'kernel_end': KERNEL_END}
+    for flags in (MAP_US, MAP_US | MAP_RW, MAP_US | MAP_NX,
+                  MAP_US | MAP_RW | MAP_NX):
+        chk.eq(boot_protect(mem, boot, man['kern_pml4'], KERNEL_BASE, 1,
+                            flags), EINVAL,
+               'boot_protect refuses US mix %#x' % flags)
+    mem.restore(pristine)
+
+
+def path_us(mem, root, va):
+    """The effective US of a VA: AND of the US bits along the whole path,
+    exactly what the CPU requires for a Ring 3 access."""
+    base = root
+    us = 1
+    for shift in (39, 30, 21, 12):
+        entry = mem.q(base + ((va >> shift) & 0x1FF) * 8)
+        if not entry & PTE_P:
+            return 0
+        us &= 1 if entry & PTE_US else 0
+        if shift != 12:
+            if entry & PTE_PS:
+                return us
+            base = entry & PA_MASK
+    return us
+
+
+def check_map_user(chk, mem, man):
+    """FS-v1 M3 (task 133): vmm_map_user_page against the frozen domain,
+    the mandatory US, the unchanged combination rules and the +3 budget."""
+    chk.start('map user domain')
+    # placement premises, the same math the kernel asserts at assembly
+    # time, written out independently here
+    chk.ok(USER_VA_BASE >= PHYS_LIMIT,
+           'the user domain sits above the identity map')
+    chk.eq(USER_VA_BASE % 0x200000, 0, 'the domain base is 2 MiB aligned')
+    chk.eq(USER_VA_LIMIT % 0x200000, 0, 'the domain limit is 2 MiB aligned')
+    chk.eq((USER_VA_BASE >> 39) & 0x1FF, 0,
+           'the domain lives in PML4 slot 0')
+    chk.eq((USER_VA_BASE >> 30) & 0x1FF, 4,
+           'the domain uses PDPT index 4, clear of identity 0..3')
+    chk.eq((USER_VA_LIMIT - 1) >> 30, USER_VA_BASE >> 30,
+           'the domain fits one PDPT entry')
+    chk.ok(WINDOW_BASE >= USER_VA_LIMIT,
+           'the domain never overlaps the public window')
+    chk.eq(USER_TABLE_BUDGET, 3,
+           'the frozen budget is 1 PD + 2 PT, the identity PDPT is reused')
+
+    count = mem.q(man['umap_count'])
+    chk.eq(count, 19, 'the probe carries nineteen user map cases')
+    base = man['umap_table']
+    root = man['fx2_base']
+    pdpt_low = mem.q(root) & PA_MASK
+    pristine = mem.snapshot()
+    negative = 0
+    seen = set()
+    for index in range(count):
+        row = base + index * 9 * 8
+        tag = mem.read_bytes(row, 8).decode('ascii', 'replace').rstrip('\x00')
+        va, pa = mem.q(row + 8), mem.q(row + 16)
+        flags = mem.q(row + 24)
+        want_status = signed(mem.q(row + 32))
+        hook = mem.q(row + 40)
+        want_tables = mem.q(row + 48)
+        want_leaf = mem.q(row + 56)
+        want_present = mem.q(row + 64)
+        seen.add(tag)
+
+        mem.restore(pristine)
+        pmm, vmm = map_machine(mem, root)
+        pmm.fail = hook
+        pre_tables = 0
+        if tag in ('UP2ND', 'UPEXIST'):
+            chk.eq(vmm.map_user(USER_CODE_BASE, 0x900000, MAP_US), OK,
+                   '%s precondition map succeeds' % tag)
+            pre_tables = vmm.table_allocs
+        if tag == 'UPBIG1G':
+            mem.setq(pdpt_low + 4 * 8,
+                     0x40000000 | PTE_P | PTE_RW | PTE_PS)
+        was_status, was_rec = walk(mem, root, PA_MASK, va)
+        before = bytes(mem.image)
+        status = vmm.map_user(va, pa, flags)
+        chk.eq(status, want_status, '%s status' % tag)
+        chk.eq(vmm.table_allocs, want_tables + pre_tables,
+               '%s new table pages' % tag)
+
+        if want_present:
+            status, rec = walk(mem, root, PA_MASK, va)
+            chk.eq(status, OK, '%s leaf is reachable' % tag)
+            chk.eq(mem.q(rec['slot']), want_leaf, '%s leaf entry' % tag)
+            chk.eq(rec['page_size'], PAGE_SIZE, '%s leaf is 4 KiB' % tag)
+            chk.eq(rec['pa'], pa, '%s leaf maps the requested page' % tag)
+            chk.eq(want_leaf & PTE_US != 0, True,
+                   '%s leaf carries US' % tag)
+            chk.eq(want_leaf & PTE_RW != 0, flags & MAP_RW != 0,
+                   '%s leaf takes the requested RW' % tag)
+            chk.eq(want_leaf & PTE_NX != 0, flags & MAP_NX != 0,
+                   '%s leaf takes the requested NX' % tag)
+            chk.eq(path_us(mem, root, va), 1,
+                   '%s the whole path is user accessible' % tag)
+            chk.ok(mem.q(root) & PTE_US,
+                   '%s anchor 0 opened the shared PML4 slot' % tag)
+            # the identity chain below the PML4 keeps its supervisor bytes
+            for slot in range(4):
+                chk.eq(mem.q(pdpt_low + slot * 8),
+                       image_q(pristine[0], man, pdpt_low + slot * 8),
+                       '%s identity PDPT slot %d untouched' % (tag, slot))
+            chk.eq(len(pmm.pinned), want_tables + pre_tables,
+                   '%s table pages were pinned' % tag)
+            chk.eq(len(pmm.allocated), 1,
+                   '%s only the data page stays allocated' % tag)
+        else:
+            negative += 1
+            chk.eq(bytes(mem.image), before,
+                   '%s changes no byte, anchor 0 included' % tag)
+            chk.eq(len(pmm.pinned), pre_tables,
+                   '%s keeps no new table page' % tag)
+            chk.eq(vmm.table_drops, max(0, pmm.hits - (1 if hook else 0)),
+                   '%s dropped every table it built' % tag)
+            status, rec = walk(mem, root, PA_MASK, va)
+            chk.eq((status, rec['pte']), (was_status, was_rec['pte']),
+                   '%s leaves the leaf entry untouched' % tag)
+    chk.ok(negative >= 12, 'the user map set contains failing cases')
+    chk.ok({'UPCODE', 'UPDATA', 'UPSTACK', 'UPWLOW', 'UPWLIM', 'UPWIN',
+            'UPNOUS', 'UPRWEX', 'UPVAAL', 'UPUNOWN', 'UPBIG1G'} <= seen,
+           'the user map set covers every contract refusal')
+
+    # the full fsprobe footprint: 4 code + 1 data + 4 stack leaf pages,
+    # exactly +3 table pages, and the identity stays supervisor only
+    mem.restore(pristine)
+    pmm = Pmm(mem, pool_pfns(POOL_PAGES) | set(range(0x900, 0x909)))
+    pmm.next_hint = 0x900
+    for _ in range(9):
+        pmm.alloc_page()
+    pmm.next_hint = POOL_BASE >> PAGE_SHIFT
+    vmm = Vmm(mem, pmm, root)
+    footprint = ([(USER_CODE_BASE + i * PAGE_SIZE, MAP_US)
+                  for i in range(4)]
+                 + [(USER_DATA_BASE, MAP_US | MAP_RW | MAP_NX)]
+                 + [(USER_VA_LIMIT - (4 - i) * PAGE_SIZE,
+                     MAP_US | MAP_RW | MAP_NX) for i in range(4)])
+    for i, (va, flags) in enumerate(footprint):
+        chk.eq(vmm.map_user(va, 0x900000 + i * PAGE_SIZE, flags), OK,
+               'footprint page %d maps' % i)
+    chk.eq(vmm.table_allocs, USER_TABLE_BUDGET,
+           'the whole footprint costs exactly the frozen +3 budget')
+    chk.eq(len(pmm.pinned), USER_TABLE_BUDGET,
+           'the budget pages stay pinned')
+    chk.eq(vmm.table_drops, 0, 'the footprint build never rolls back')
+    for i, (va, flags) in enumerate(footprint):
+        status, rec = walk(mem, root, PA_MASK, va)
+        chk.eq(status, OK, 'footprint page %d is reachable' % i)
+        chk.eq(rec['pa'], 0x900000 + i * PAGE_SIZE,
+               'footprint page %d maps its frame' % i)
+        chk.eq(path_us(mem, root, va), 1,
+               'footprint page %d is user accessible' % i)
+    # anchor 0 widened the shared PML4 slot only: every identity level
+    # below keeps its supervisor bytes, so low VAs stay supervisor only
+    chk.ok(mem.q(root) & PTE_US, 'the shared PML4 slot carries US')
+    for slot in range(4):
+        chk.eq(mem.q(pdpt_low + slot * 8),
+               struct.unpack_from('<Q', pristine[0],
+                                  pdpt_low + slot * 8 - man['org'])[0],
+               'identity PDPT slot %d keeps its bytes' % slot)
+    chk.eq(path_us(mem, root, 0x100000), 0,
+           'an identity VA stays supervisor only after anchor 0')
+
+    # a hooked build succeeds on retry, a pinned data page is refused
+    mem.restore(pristine)
+    pmm, vmm = map_machine(mem, root)
+    pmm.fail = 1
+    chk.eq(vmm.map_user(USER_CODE_BASE, 0x900000, MAP_US), ENOMEM,
+           'a hooked user build fails')
+    pmm.fail = 0
+    chk.eq(vmm.map_user(USER_CODE_BASE, 0x900000, MAP_US), OK,
+           'the user retry succeeds')
+    chk.eq(vmm.table_allocs, 2, 'the retry builds the PD and the PT')
+    mem.restore(pristine)
+    pmm, vmm = map_machine(mem, root)
+    pmm.pinned.add(0x900)
+    before = bytes(mem.image)
+    chk.eq(vmm.map_user(USER_CODE_BASE, 0x900000, MAP_US), EPERM,
+           'a pinned physical page cannot be a user page')
+    chk.eq(bytes(mem.image), before, 'and the refusal writes nothing')
+    mem.restore(pristine)
+
+
+def check_unmap_user(chk, mem, man):
+    """FS-v1 task 138 W3: vmm_unmap_user_page tears the frozen user domain
+    down: leaf clear + invlpg, empty PT/PD reclaim through drop_table,
+    the +3 budget returns to the baseline, the identity stays intact."""
+    chk.start('unmap user domain')
+    root = man['fx2_base']
+    pdpt_low = mem.q(root) & PA_MASK
+    pristine = mem.snapshot()
+    footprint = ([(USER_CODE_BASE + i * PAGE_SIZE, MAP_US)
+                  for i in range(4)]
+                 + [(USER_DATA_BASE, MAP_US | MAP_RW | MAP_NX)]
+                 + [(USER_VA_LIMIT - (4 - i) * PAGE_SIZE,
+                     MAP_US | MAP_RW | MAP_NX) for i in range(4)])
+
+    def build():
+        pmm = Pmm(mem, pool_pfns(POOL_PAGES) | set(range(0x900, 0x909)))
+        pmm.next_hint = 0x900
+        for _ in range(9):
+            pmm.alloc_page()
+        pmm.next_hint = POOL_BASE >> PAGE_SHIFT
+        vmm = Vmm(mem, pmm, root)
+        for i, (va, flags) in enumerate(footprint):
+            vmm.map_user(va, 0x900000 + i * PAGE_SIZE, flags)
+        return pmm, vmm
+
+    # the full fsprobe footprint comes back: 9 leaves, 3 tables, 9 frames
+    mem.restore(pristine)
+    pmm, vmm = build()
+    chk.eq(vmm.table_allocs, USER_TABLE_BUDGET, 'the footprint costs +3')
+    for i, (va, flags) in enumerate(footprint):
+        status, pa = vmm.unmap_user(va)
+        chk.eq(status, OK, 'teardown page %d unmaps' % i)
+        chk.eq(pa, 0x900000 + i * PAGE_SIZE,
+               'teardown page %d reports its frame in rdx' % i)
+        chk.eq(walk(mem, root, PA_MASK, va)[0], ENOENT,
+               'teardown page %d is gone' % i)
+    chk.eq(vmm.table_allocs - vmm.table_drops, 0,
+           'the net table count is back at the pre-map baseline')
+    chk.eq(vmm.table_drops, USER_TABLE_BUDGET,
+           'exactly the frozen +3 budget was reclaimed')
+    chk.eq(len(pmm.pinned), 0, 'no table page stays pinned')
+    chk.eq(mem.q(pdpt_low + 4 * 8), 0, 'the user PDPT slot is clear again')
+    for va, _ in footprint:
+        chk.eq(vmm.unmap_user(va), (ENOENT, 0),
+               'a second unmap of the same VA reports ENOENT')
+    chk.ok(mem.q(root) & PTE_US, 'anchor 0 US is one way and stays set')
+    for slot in range(4):
+        chk.eq(mem.q(pdpt_low + slot * 8),
+               image_q(pristine[0], man, pdpt_low + slot * 8),
+               'identity PDPT slot %d keeps its bytes' % slot)
+    chk.eq(path_us(mem, root, 0x100000), 0,
+           'the identity stays supervisor only after the teardown')
+    for i in range(9):
+        chk.eq(pmm.free(0x900000 + i * PAGE_SIZE), OK,
+               'released frame %d goes back to the allocator' % i)
+    chk.eq(pmm.free_count(), POOL_PAGES + 9,
+           'every pool page is available again after the teardown')
+
+    # a staged teardown keeps the shared tables alive until the last leaf
+    mem.restore(pristine)
+    pmm, vmm = build()
+    for i in range(4):
+        chk.eq(vmm.unmap_user(USER_CODE_BASE + i * PAGE_SIZE)[0], OK,
+               'staged code page %d unmaps' % i)
+    chk.eq(vmm.table_drops, 1, 'the emptied code PT is reclaimed')
+    chk.ok(mem.q(pdpt_low + 4 * 8) != 0, 'the PD survives its other children')
+    chk.eq(vmm.unmap_user(USER_DATA_BASE)[0], OK, 'staged data page unmaps')
+    chk.eq(vmm.table_drops, 1, 'the shared data+stack PT stays')
+    for i in range(3):
+        va = USER_VA_LIMIT - (4 - i) * PAGE_SIZE
+        chk.eq(vmm.unmap_user(va)[0], OK, 'staged stack page %d unmaps' % i)
+        chk.eq(vmm.table_drops, 1, 'the stack PT keeps its last leaves')
+    chk.eq(vmm.unmap_user(USER_VA_LIMIT - PAGE_SIZE)[0], OK,
+           'the last stack page unmaps')
+    chk.eq(vmm.table_drops, USER_TABLE_BUDGET,
+           'the last leaf reclaims the stack PT and the PD together')
+    chk.eq(mem.q(pdpt_low + 4 * 8), 0, 'the user PDPT slot ends clear')
+
+    # refusals: domain, alignment, absence, supervisor leaf, large leaf
+    mem.restore(pristine)
+    pmm, vmm = map_machine(mem, root)
+    vmm.ready = False
+    chk.eq(vmm.unmap_user(USER_CODE_BASE), (ENOTREADY, 0),
+           'an offline vmm refuses the user unmap')
+    vmm.ready = True
+    chk.eq(vmm.unmap_user(USER_VA_BASE - PAGE_SIZE), (EPERM, 0),
+           'below the domain is refused')
+    chk.eq(vmm.unmap_user(USER_VA_LIMIT), (EPERM, 0),
+           'the domain limit is exclusive')
+    chk.eq(vmm.unmap_user(WINDOW_BASE), (EPERM, 0),
+           'the public window is not the user domain')
+    chk.eq(vmm.unmap_user(USER_CODE_BASE + 8), (EINVAL, 0),
+           'an unaligned VA is refused')
+    chk.eq(vmm.unmap_user(USER_CODE_BASE), (ENOENT, 0),
+           'an absent leaf reports ENOENT')
+    chk.eq(vmm.map_user(USER_CODE_BASE, 0x900000, MAP_US), OK,
+           'a user leaf maps for the supervisor test')
+    status, rec = walk(mem, root, PA_MASK, USER_CODE_BASE)
+    mem.setq(rec['slot'], mem.q(rec['slot']) & ~PTE_US)
+    before = bytes(mem.image)
+    chk.eq(vmm.unmap_user(USER_CODE_BASE), (EPERM, 0),
+           'a supervisor leaf inside the domain is refused')
+    chk.eq(bytes(mem.image), before, 'and the refusal writes nothing')
+    mem.restore(pristine)
+    pmm, vmm = map_machine(mem, root)
+    mem.setq(pdpt_low + 4 * 8, 0x40000000 | PTE_P | PTE_RW | PTE_PS | PTE_US)
+    before = bytes(mem.image)
+    chk.eq(vmm.unmap_user(USER_CODE_BASE), (ENOTSUP, 0),
+           'a 1 GiB leaf is never torn down')
+    chk.eq(bytes(mem.image), before, 'the large leaf refusal writes nothing')
+
+    # a failing table drop reports EIO with rdx = 0
+    mem.restore(pristine)
+    pmm, vmm = build()
+    pt = walk(mem, root, PA_MASK, USER_CODE_BASE)[1]['slot'] & ~(PAGE_SIZE - 1)
+    for i in range(3):
+        vmm.unmap_user(USER_CODE_BASE + i * PAGE_SIZE)
+    pmm.pinned.discard(pt >> PAGE_SHIFT)
+    chk.eq(vmm.unmap_user(USER_CODE_BASE + 3 * PAGE_SIZE), (EIO, 0),
+           'a failing PT drop reports EIO and no frame')
+    mem.restore(pristine)
 
 
 def check_map_mmio(chk, mem, man):
@@ -2079,7 +2596,7 @@ def protect_pass(mem, boot, root, va, count, flags, apply_it):
             return ENOTSUP, []                # a large page cannot be split
         if rec['pa'] != boot['kernel_start'] + (cursor - KERNEL_BASE):
             return EIO, []                    # the leaf maps another frame
-        entry = (rec['pte'] & ~MAP_ALLOWED & MASK64) | flags
+        entry = (rec['pte'] & ~PROTECT_ALLOWED & MASK64) | flags
         plan.append((rec['slot'], entry))
     if apply_it:
         for slot, entry in plan:
@@ -2094,7 +2611,8 @@ def boot_protect(mem, boot, root, va, count, flags):
         return ENOTREADY
     if count == 0 or va & (PAGE_SIZE - 1):
         return EINVAL
-    if flags & ~MAP_ALLOWED & MASK64:
+    # the protect path keeps the pre APP-v1 matrix: RW and NX only
+    if flags & ~PROTECT_ALLOWED & MASK64:
         return EINVAL
     end = KERNEL_BASE + (boot['kernel_end'] - boot['kernel_start'])
     if va < KERNEL_BASE or va >= end:
@@ -2337,6 +2855,105 @@ def check_bodies(chk, man, img, org, label):
     chk.ok(rip_field('vmm_map_page', 'vmm_state', VMM_STATE_SIZE),
            'map reads the vmm state')
 
+    # APP-v1 (task 113): the window refuses US before the flag matrix,
+    # the US combination rule only accepts pure US and US|RW|NX, and both
+    # table build anchors fold the leaf US into the fresh entry
+    body = bodies['vmm_map_page'][1]
+    guard = body.find(b'\x49\xF7\xC5\x04\x00\x00\x00\x0F\x85')
+    chk.ok(guard >= 0,
+           'map tests the leaf US at the window (test r13,4 / jnz)')
+    combo = body.find(b'\x48\xA9\x04\x00\x00\x00\x74')
+    chk.ok(combo >= 0, 'map branches on the US bit (test rax,4 / jz)')
+    chk.ok(b'\x48\xC7\xC1\x04\x00\x00\x00\x48\x39\xC8\x74' in body,
+           'map accepts pure US (mov rcx,4 / cmp rax,rcx / je)')
+    mix = body.find(b'\x48\xB9\x06\x00\x00\x00\x00\x00\x00\x80\x48\x39\xC8')
+    chk.ok(mix >= 0 and (body[mix + 13] == 0x75
+                         or body[mix + 13:mix + 15] == b'\x0F\x85'),
+           'map accepts US|RW|NX and refuses every other US mix')
+    chk.ok(guard >= 0 and combo >= 0 and guard < combo,
+           'the window US refusal runs before the flag matrix')
+    anchor = (b'\x48\x83\xC8\x03\x4C\x89\xE9\x48\x83\xE1\x04'
+              b'\x48\x09\xC8\x48\x89\x06')
+    chk.eq(body.count(anchor), 2,
+           'both table anchors fold the leaf US into the fresh entry')
+    chk.ok(b'\x4C\x89\xE9\x48\x83\xE1\x04' not in bodies['vmm_map_mmio'][1],
+           'mmio table links never carry US')
+
+    # FS-v1 M3 (task 133): vmm_map_user_page pins the frozen domain, the
+    # mandatory US, the same offline build discipline and anchor 0
+    body = bodies['vmm_map_user_page'][1]
+    chk.ok(b'\x41\x0F\x01\x3F' in body,
+           'user map invalidates the leaf (invlpg [r15])')
+    chk.ok('mm_pmm_alloc_table' in calls('vmm_map_user_page'),
+           'user map builds tables through the allocator')
+    chk.ok('mm_pmm_drop_table' in calls('vmm_map_user_page'),
+           'user map rolls tables back through drop_table')
+    chk.ok(rip('vmm_map_user_page', 'bitmap_allocated'),
+           'user map checks the allocated bitmap')
+    chk.ok(rip('vmm_map_user_page', 'bitmap_pinned'),
+           'user map checks the pinned bitmap')
+    chk.ok(rip_field('vmm_map_user_page', 'vmm_state', VMM_STATE_SIZE),
+           'user map reads the vmm state')
+    chk.ok(b'\x48\xB8\x00\x00\x40\x00\x01\x00\x00\x00' in body,
+           'user map pins the frozen domain base 0x100400000')
+    chk.ok(b'\x48\xB8\x00\x00\x80\x00\x01\x00\x00\x00' in body,
+           'user map pins the frozen domain limit 0x100800000')
+    chk.ok(b'\x49\xF7\xC5\x04\x00\x00\x00\x0F\x84' in body,
+           'user map requires US (test r13,4 / jz .permitted)')
+    chk.eq(body.count(anchor), 2,
+           'user map carries both table US anchors')
+    # anchor 0: or qword [rbx+rax*8], 4 opens the shared PML4 slot
+    chk.ok(b'\x48\x83\x0C\xC3\x04' in body,
+           'user map anchor 0 opens the shared PML4 slot US')
+    chk.ok(b'\x48\x83\x0C\xC3\x04' not in bodies['vmm_map_page'][1],
+           'the window mapper never rewrites an existing PML4 entry')
+
+    # FS-v1 task 138 W3: vmm_unmap_user_page pins the frozen domain, the
+    # effective US requirement, the leaf clear + invlpg, the empty table
+    # reclaim through drop_table (counted) and the CR3 flush
+    addr, body = bodies['vmm_unmap_user_page']
+    chk.ok(b'\x41\x0F\x01\x3C\x24' in body,
+           'user unmap invalidates the leaf (invlpg [r12])')
+    chk.ok('mm_vmm_resolve' in calls('vmm_unmap_user_page'),
+           'user unmap resolves the leaf')
+    chk.eq(calls('vmm_unmap_user_page').count('mm_pmm_drop_table'), 2,
+           'user unmap reclaims the PT and the PD through drop_table')
+    chk.ok('mm_pmm_alloc_table' not in calls('vmm_unmap_user_page'),
+           'user unmap never builds a table')
+    chk.ok(b'\x48\xB8\x00\x00\x40\x00\x01\x00\x00\x00' in body,
+           'user unmap pins the frozen domain base 0x100400000')
+    chk.ok(b'\x48\xB8\x00\x00\x80\x00\x01\x00\x00\x00' in body,
+           'user unmap pins the frozen domain limit 0x100800000')
+    chk.ok(b'\x48\x83\x7C\x24\x38\x01' in body,
+           'user unmap requires the effective US (cmp qword [rsp+56],1)')
+    chk.ok(b'\x48\xC7\x06\x00\x00\x00\x00' in body,
+           'user unmap clears the leaf (mov qword [rsi],0)')
+    chk.eq(body.count(b'\x81\xF9\x00\x02\x00\x00'), 2,
+           'user unmap scans the PT and the PD for 512 empty entries')
+    chk.ok(b'\x0F\x20\xD8' in body and b'\x0F\x22\xD8' in body,
+           'user unmap reloads CR3 after an intermediate unlink')
+    chk.ok(b'\x4C\x89\xEA' in body,
+           'user unmap returns the released frame in rdx (mov rdx,r13)')
+    chk.ok(b'\x31\xD2' in body, 'user unmap zeroes rdx on every failure')
+    # both reclaimed tables increment the frozen table_drops field
+    drops_at = man['vmm_state'] + 48
+    incs = 0
+    for i in range(len(body) - 3):
+        if body[i:i + 3] == b'\x48\xFF\x05' and i + 7 <= len(body):
+            disp = struct.unpack_from('<i', body, i + 3)[0]
+            if addr + i + 7 + disp == drops_at:
+                incs += 1
+        if body[i:i + 4] == b'\x48\xFF\x04\x25' and i + 8 <= len(body):
+            if struct.unpack_from('<I', body, i + 4)[0] == drops_at:
+                incs += 1
+    chk.eq(incs, 2, 'user unmap counts both reclaimed tables in table_drops')
+    for pattern, what in ((b'\xB8\xFF\xFF\xFF\xFF', 'EINVAL'),
+                          (b'\xB8\xFB\xFF\xFF\xFF', 'EPERM'),
+                          (b'\xB8\xFA\xFF\xFF\xFF', 'ENOTSUP'),
+                          (b'\xB8\xF9\xFF\xFF\xFF', 'ENOTREADY'),
+                          (b'\xB8\xF7\xFF\xFF\xFF', 'EIO')):
+        chk.ok(pattern in body, 'user unmap can return %s' % what)
+
     # vmm_map_mmio: the fixed PCD|RW|NX leaf, the reverse ownership check
     # against the eligible bitmap, the EALREADY leaf test, both alignment
     # checks, the heap limit and the core test slot compare, and the same
@@ -2418,6 +3035,18 @@ def check_bodies(chk, man, img, org, label):
            'the protect pass resolves every page')
     chk.eq(calls('vmm_boot_protect').count('mm_vmm_protect_pass'), 2,
            'boot_protect verifies then applies')
+
+    # APP-v1: the protect path clears RW and NX only, never the US bit of
+    # an existing leaf, and its argument matrix stays RW|NX (no US)
+    chk.ok(b'\x48\xB9\x02\x00\x00\x00\x00\x00\x00\x80'
+           b'\x48\xF7\xD1\x48\x21\xC8' in bodies['mm_vmm_protect_pass'][1],
+           'the protect pass masks RW|NX, not the widened MM_MAP_ALLOWED')
+    chk.ok(b'\x48\xBA\x02\x00\x00\x00\x00\x00\x00\x80'
+           b'\x48\xF7\xD2\x48\x85\xD0' in bodies['vmm_boot_protect'][1],
+           'boot_protect validates against RW|NX, a kernel leaf never takes US')
+    chk.ok(b'\x48\xB9\x06\x00\x00\x00\x00\x00\x00\x80'
+           not in bodies['mm_vmm_protect_pass'][1],
+           'the protect pass never loads the widened allowed set')
 
     # free page: the three bitmaps and the frozen error codes
     for symbol in ('bitmap_eligible', 'bitmap_pinned', 'bitmap_allocated'):
@@ -2504,8 +3133,8 @@ def check_bodies(chk, man, img, org, label):
 # section 8: negative fixtures, a weakened module must be caught
 # ------------------------------------------------------------------
 # Each fixture copies kernel/mm and tests/stage2-mm into a sandbox, applies
-# one single site mutation to vmm.inc or bootmap.inc and re-runs this
-# checker against the sandbox. The host model transcribes the contract
+# one single site mutation to vmm.inc, api.inc or bootmap.inc and re-runs
+# this checker against the sandbox. The host model transcribes the contract
 # instead of executing the assembly, so the detection comes from the
 # static byte assertions of section 6: every mutated clause is pinned
 # there and must report FAIL.
@@ -2568,6 +3197,107 @@ FIXTURES = [
     ('bootmap-size', 'kernel/mm/bootmap.inc',
      '        cmp     qword [rdi + MM_BOOTINFO.gop_framebuffer_size], rax\n'
      '        jb      .invalid\n',
+     ''),
+    # APP-v1 (task 113): open the public window to user mappings
+    ('us-window-open', 'kernel/mm/vmm.inc',
+     '        test    r13, MM_MAP_US\n'
+     '        jnz     .permitted\n',
+     ''),
+    # drop the first US propagation anchor (the offline build link)
+    ('us-anchor1-drop', 'kernel/mm/vmm.inc',
+     '        ; APP-v1 anchor 1: a new intermediate entry carries the leaf US\n'
+     '        mov     rcx, r13\n'
+     '        and     rcx, MM_PTE_US\n'
+     '        or      rax, rcx\n',
+     ''),
+    # drop the second US propagation anchor (the atomic publish)
+    ('us-anchor2-drop', 'kernel/mm/vmm.inc',
+     '        ; APP-v1 anchor 2: the publish entry carries the leaf US too\n'
+     '        mov     rcx, r13\n'
+     '        and     rcx, MM_PTE_US\n'
+     '        or      rax, rcx\n',
+     ''),
+    # widen the legal user mix so US|RW slips through the combination
+    # rule (the anchor carries the map_page only test/jz preamble so the
+    # identical rule inside vmm_map_user_page is never touched)
+    ('us-combo-drift', 'kernel/mm/vmm.inc',
+     '        test    rax, MM_MAP_US\n'
+     '        jz      .flags_ok\n'
+     '        mov     rcx, MM_MAP_US\n'
+     '        cmp     rax, rcx\n'
+     '        je      .flags_ok\n'
+     '        mov     rcx, MM_MAP_US or MM_MAP_RW or MM_MAP_NX\n',
+     '        test    rax, MM_MAP_US\n'
+     '        jz      .flags_ok\n'
+     '        mov     rcx, MM_MAP_US\n'
+     '        cmp     rax, rcx\n'
+     '        je      .flags_ok\n'
+     '        mov     rcx, MM_MAP_US or MM_MAP_RW\n'),
+    # drop US from the allowed flag set in the contract constant
+    ('us-allowed-drift', 'kernel/mm/api.inc',
+     'MM_MAP_ALLOWED = MM_MAP_RW or MM_MAP_NX or MM_MAP_US',
+     'MM_MAP_ALLOWED = MM_MAP_RW or MM_MAP_NX'),
+    # let the protect pass clear the US bit of an existing leaf
+    ('protect-mask-drift', 'kernel/mm/vmm.inc',
+     '        mov     rcx, MM_MAP_RW or MM_MAP_NX\n',
+     '        mov     rcx, MM_MAP_ALLOWED\n'),
+    # let boot_protect accept US flags on a kernel leaf
+    ('boot-protect-us-open', 'kernel/mm/vmm.inc',
+     '        mov     rdx, MM_MAP_RW or MM_MAP_NX\n',
+     '        mov     rdx, MM_MAP_ALLOWED\n'),
+    # FS-v1 M3 (task 133): make US optional inside the user domain
+    ('user-us-optional', 'kernel/mm/vmm.inc',
+     '        test    r13, MM_MAP_US\n'
+     '        jz      .permitted\n',
+     ''),
+    # drop anchor 0, so the shared PML4 slot stays supervisor and every
+    # Ring 3 access to a freshly mapped user page would fault
+    ('user-anchor0-drop', 'kernel/mm/vmm.inc',
+     '        ; anchor 0: the shared identity PML4 slot gains US once, on the\n'
+     '        ; success path only; the identity levels below stay supervisor\n'
+     '        mov     rbx, qword [mm_vmm_state + MM_VMM_STATE.root_phys]\n'
+     '        mov     rax, r15\n'
+     '        shr     rax, 39\n'
+     '        and     eax, 0x1FF\n'
+     '        or      qword [rbx + rax*8], MM_PTE_US\n',
+     ''),
+    # widen the frozen domain limit to the public window limit (the
+    # r15 compare keeps the anchor unique to vmm_map_user_page now that
+    # vmm_unmap_user_page pins the same limit with r12)
+    ('user-domain-drift', 'kernel/mm/vmm.inc',
+     '        mov     rax, MM_USER_VA_LIMIT\n'
+     '        cmp     r15, rax\n',
+     '        mov     rax, MM_WINDOW_LIMIT\n'
+     '        cmp     r15, rax\n'),
+    # FS-v1 task 138 W3: drop the effective US requirement, so a
+    # supervisor leaf planted inside the domain could be torn down
+    ('unmap-user-us-drop', 'kernel/mm/vmm.inc',
+     '        cmp     qword [rsp+32+24], 1      ; effective US must be set\n'
+     '        jne     .permitted\n',
+     ''),
+    # drop the leaf invalidation of the user teardown
+    ('unmap-user-invlpg-drop', 'kernel/mm/vmm.inc',
+     '        invlpg  [r12]\n'
+     '        mov     r13, qword [rsp+32+48]',
+     '        mov     r13, qword [rsp+32+48]'),
+    # keep the emptied PT pinned forever: the reclaim call disappears
+    ('unmap-user-pt-drop-removed', 'kernel/mm/vmm.inc',
+     '        mov     qword [rbx + rax*8], 0    ; unlink the empty PT\n'
+     '        mov     rcx, r14\n'
+     '        call    mm_pmm_drop_table\n',
+     '        mov     qword [rbx + rax*8], 0    ; unlink the empty PT\n'
+     '        mov     rcx, r14\n'),
+    # widen the user teardown domain to the public window limit (the
+    # r12 compare is unique to vmm_unmap_user_page)
+    ('unmap-user-domain-drift', 'kernel/mm/vmm.inc',
+     '        mov     rax, MM_USER_VA_LIMIT\n'
+     '        cmp     r12, rax\n',
+     '        mov     rax, MM_WINDOW_LIMIT\n'
+     '        cmp     r12, rax\n'),
+    # drop the CR3 flush after an intermediate unlink
+    ('unmap-user-flush-drop', 'kernel/mm/vmm.inc',
+     '        mov     rax, cr3\n'
+     '        mov     cr3, rax\n',
      ''),
 ]
 
@@ -2639,6 +3369,9 @@ def main(argv):
     check_fixtures(chk, mem, man)
     check_query(chk, mem, man)
     check_map(chk, mem, man)
+    check_map_us(chk, mem, man)
+    check_map_user(chk, mem, man)
+    check_unmap_user(chk, mem, man)
     check_map_mmio(chk, mem, man)
     check_unmap(chk, mem, man)
     check_protect(chk, mem, man)

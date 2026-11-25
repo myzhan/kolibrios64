@@ -94,23 +94,35 @@ CPU_INIT_FLAGS_VALUE    = 0
 CPU_INIT_RESERVED_VALUE = 0
 
 ; ------------------------------------------------------------------
-; selectors and the GDT, 40 bytes
+; selectors and the GDT, 56 bytes
+;
+; APP-v1 layout note (deviation reported, pending adjudication): the
+; frozen contract named user selectors 0x20/0x28, but the 16 byte TSS
+; descriptor at 0x18 occupies 0x18..0x27, so 0x20 would overlap it. The
+; user segments follow the TSS instead: 0x28 data, 0x30 code. The GDT
+; stays 56 bytes and the kernel selectors 0x08/0x10/0x18 stay untouched.
 ; ------------------------------------------------------------------
 
 CPU_SEL_NULL        = 0x00
 CPU_SEL_CODE        = 0x08
 CPU_SEL_DATA        = 0x10
 CPU_SEL_TSS         = 0x18
+CPU_SEL_USER_DATA   = 0x28
+CPU_SEL_USER_CODE   = 0x30
 
 CPU_GDT_ALIGN       = 16
-CPU_GDT_SIZE        = 40
+CPU_GDT_SIZE        = 56
 CPU_GDT_OFF_NULL    = 0
 CPU_GDT_OFF_CODE    = 8
 CPU_GDT_OFF_DATA    = 16
 CPU_GDT_OFF_TSS     = 24
+CPU_GDT_OFF_USER_DATA = 40
+CPU_GDT_OFF_USER_CODE = 48
 CPU_GDT_NULL_VALUE  = 0x0000000000000000
 CPU_GDT_CODE_VALUE  = 0x00AF9A000000FFFF     ; base 0, limit 4 GiB, L=1, DPL0
 CPU_GDT_DATA_VALUE  = 0x00CF92000000FFFF     ; base 0, limit 4 GiB, DPL0
+CPU_GDT_USER_DATA_VALUE = 0x00CFF2000000FFFF ; base 0, limit 4 GiB, DPL3
+CPU_GDT_USER_CODE_VALUE = 0x00AFFA000000FFFF ; base 0, limit 4 GiB, L=1, DPL3
 ; the CPU sets the accessed bit (access byte bit 0, qword bit 40) when the
 ; segment is loaded: retfq for CS, mov for DS/ES/SS. Runtime compares must
 ; mask it off; the image is built with it clear.
@@ -283,6 +295,65 @@ CPU_CR4_PAE         = 0x00000020
 CPU_CR4_CET         = 0x00800000
 CPU_EFER_MSR        = 0xC0000080
 CPU_EFER_LMA        = 0x00000400
+CPU_EFER_SCE        = 0x00000001
+CPU_STAR_MSR        = 0xC0000081
+CPU_LSTAR_MSR       = 0xC0000082
+CPU_SFMASK_MSR      = 0xC0000084
+
+; STAR, derived from the GDT above (SDM volume 2, SYSCALL/SYSRET):
+;  - bits 47:32 = the SYSCALL CS, and SYSCALL loads SS = CS + 8, so 0x08
+;    selects the ring 0 code/data pair 0x08/0x10;
+;  - bits 63:48 = the SYSRET base: 64-bit SYSRET loads CS = base + 16 with
+;    RPL forced to 3 and SS = base + 8 with RPL forced to 3, so base 0x20
+;    yields CS = 0x33 and SS = 0x2B, exactly the two ring 3 selectors.
+CPU_STAR_VALUE      = (0x20 shl 48) or (0x08 shl 32)
+CPU_SYSRET_CS       = 0x33                  ; (0x20 + 16) | 3
+CPU_SYSRET_SS       = 0x2B                  ; (0x20 + 8) | 3
+CPU_SFMASK_VALUE    = CPU_RFLAGS_IF         ; SYSCALL clears IF, nothing else
+
+; ------------------------------------------------------------------
+; the syscall ABI, contract APP-v1 (Linux style)
+;
+; RAX = the syscall number, arguments in RDI, RSI, RDX, R10, R8, R9,
+; the return value in RAX. RCX and R11 are destroyed by the SYSCALL
+; instruction itself (return RIP and RFLAGS). Numbers 0..3 are reserved
+; for the host layer of task 115; an unregistered number returns
+; CPU_ENOTSUP in RAX.
+;
+;   cpu_syscall_init()
+;     ring 0 and IF = 0 only. Sets EFER.SCE (read modify write, every
+;     other EFER bit preserved), STAR, LSTAR and SFMASK, and reads every
+;     MSR back: a mismatch is EIO. A second successful call is EALREADY.
+;
+;   cpu_syscall_set_handler(rcx = number, rdx = handler VA or 0)
+;     ring 0 and IF = 0 only. The number must be below CPU_SYS_CALL_MAX,
+;     a non zero handler must be canonical in the kernel half; EINVAL
+;     otherwise. A slot that already holds a non zero handler is EALREADY;
+;     zero clears the slot. The handler takes RCX = the 184 byte frame
+;     under the MS x64 ABI and returns the syscall result in RAX.
+;
+;   cpu_user_fault_set_handler(rcx = handler VA or 0)
+;     the single user fault hook of the trap dispatcher, same rules as
+;     cpu_irq_set_handler. The handler takes RCX = the user frame; the
+;     stub restores and iretqs, so it may rewrite frame.RIP to resume.
+;
+;   cpu_syscall_entry
+;     the LSTAR target, not callable: SYSCALL arrives with the user RSP
+;     and IF cleared by SFMASK. The entry switches to TSS.RSP0, builds
+;     the 184 byte frame with VECTOR = CPU_SYS_VECTOR, dispatches through
+;     the handler table and returns with SYSRETQ. No STI anywhere.
+; ------------------------------------------------------------------
+
+; FS-v1 M3 (task 133): the table grows to 16 slots. Numbers 0..3 stay
+; the frozen APP-v1 set, 4..9 are the frozen file syscalls of the fsys
+; module, 10..15 stay unregistered (ENOTSUP). The dispatch boundary is
+; the table size, not the highest registered number.
+CPU_SYS_CALL_MAX    = 16
+CPU_SYS_EXIT        = 0
+CPU_SYS_BLIT        = 1
+CPU_SYS_READ_KEY    = 2
+CPU_SYS_POLL        = 3
+CPU_SYS_VECTOR      = 0x100                 ; frame sentinel, past the IDT
 
 ; ------------------------------------------------------------------
 ; bounded diagnostics over COM1
@@ -582,14 +653,56 @@ end if
 if CPU_GDT_OFF_DATA <> CPU_SEL_DATA
         err 'data selector must be the GDT slot offset'
 end if
-if CPU_GDT_OFF_TSS + CPU_TSS_DESC_SIZE <> CPU_GDT_SIZE
-        err 'GDT must end right after the TSS descriptor'
+if CPU_GDT_OFF_USER_DATA <> CPU_SEL_USER_DATA
+        err 'user data selector must be the GDT slot offset'
+end if
+if CPU_GDT_OFF_USER_CODE <> CPU_SEL_USER_CODE
+        err 'user code selector must be the GDT slot offset'
+end if
+if CPU_GDT_OFF_TSS + CPU_TSS_DESC_SIZE <> CPU_GDT_OFF_USER_DATA
+        err 'the user data descriptor must follow the TSS descriptor'
+end if
+if CPU_GDT_OFF_USER_CODE + 8 <> CPU_GDT_SIZE
+        err 'GDT must end right after the user code descriptor'
 end if
 if (CPU_GDT_CODE_VALUE and CPU_GDT_DESC_ACCESSED) <> 0
         err 'the code descriptor is built with the accessed bit clear'
 end if
 if (CPU_GDT_DATA_VALUE and CPU_GDT_DESC_ACCESSED) <> 0
         err 'the data descriptor is built with the accessed bit clear'
+end if
+if (CPU_GDT_USER_DATA_VALUE and CPU_GDT_DESC_ACCESSED) <> 0
+        err 'the user data descriptor is built with the accessed bit clear'
+end if
+if (CPU_GDT_USER_CODE_VALUE and CPU_GDT_DESC_ACCESSED) <> 0
+        err 'the user code descriptor is built with the accessed bit clear'
+end if
+if ((CPU_GDT_USER_DATA_VALUE shr 45) and 3) <> 3
+        err 'the user data descriptor must be DPL3'
+end if
+if ((CPU_GDT_USER_CODE_VALUE shr 45) and 3) <> 3
+        err 'the user code descriptor must be DPL3'
+end if
+if ((CPU_STAR_VALUE shr 32) and 0xFFFF) <> CPU_SEL_CODE
+        err 'STAR 47:32 must select the ring 0 code segment'
+end if
+if (((CPU_STAR_VALUE shr 48) + 16) or 3) <> CPU_SYSRET_CS
+        err 'SYSRET CS must be the STAR base plus 16 with RPL 3'
+end if
+if (((CPU_STAR_VALUE shr 48) + 8) or 3) <> CPU_SYSRET_SS
+        err 'SYSRET SS must be the STAR base plus 8 with RPL 3'
+end if
+if CPU_SYSRET_CS <> (CPU_SEL_USER_CODE or 3)
+        err 'SYSRET CS must land on the user code selector'
+end if
+if CPU_SYSRET_SS <> (CPU_SEL_USER_DATA or 3)
+        err 'SYSRET SS must land on the user data selector'
+end if
+if CPU_SFMASK_VALUE <> CPU_RFLAGS_IF
+        err 'SFMASK must clear exactly IF'
+end if
+if CPU_SYS_VECTOR < CPU_IDT_VECTORS
+        err 'the syscall frame sentinel must sit past every IDT vector'
 end if
 if CPU_GDTR_SIZE <> 10
         err 'GDTR must be the packed 10 byte form'

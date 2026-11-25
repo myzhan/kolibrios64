@@ -5,8 +5,8 @@
 ;;                                                              ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;
-;; Layout probe for the stage 2 CPU module, task 27, task 38, task 43 and
-;; task 69.
+;; Layout probe for the stage 2 CPU module, task 27, task 38, task 43,
+;; task 69 and task 113.
 ;;
 ;; This file is a test harness, not part of the kernel. It assembles
 ;; kernel/cpu/cpu.asm exactly as the kernel will include it, appends a manifest
@@ -39,7 +39,7 @@ include '../../kernel/cpu/cpu.asm'
 align 8
 cpu_probe:
         dq      'K64CPUP1'                  ; magic
-        dq      4                           ; manifest version
+        dq      5                           ; manifest version
         dq      cpu_gdt
         dq      cpu_gdt_end - cpu_gdt
         dq      cpu_gdt_null
@@ -112,8 +112,33 @@ cpu_probe:
         dq      cpu_irq_set_handler
         dq      cpu_irq_handler
         dq      CPU_IRQ_VECTOR_MIN
+        ; APP-v1, task 113: the user segments, the syscall path and its state
+        dq      cpu_gdt_user_data
+        dq      cpu_gdt_user_code
+        dq      cpu_syscall_init
+        dq      cpu_syscall_set_handler
+        dq      cpu_user_fault_set_handler
+        dq      cpu_syscall_entry
+        dq      cpu_syscall_ready
+        dq      cpu_user_fault_handler
+        dq      cpu_syscall_handlers
+        dq      cpu_syscall_scratch_rsp
+        dq      CPU_GDT_USER_DATA_VALUE
+        dq      CPU_GDT_USER_CODE_VALUE
+        dq      CPU_SEL_USER_DATA
+        dq      CPU_SEL_USER_CODE
+        dq      CPU_STAR_VALUE
+        dq      CPU_SYSRET_CS
+        dq      CPU_SYSRET_SS
+        dq      CPU_SFMASK_VALUE
+        dq      CPU_SYS_CALL_MAX
+        dq      CPU_SYS_VECTOR
+        dq      CPU_EFER_SCE
+        dq      CPU_STAR_MSR
+        dq      CPU_LSTAR_MSR
+        dq      CPU_SFMASK_MSR
 cpu_probe_end:
 
-if (cpu_probe_end - cpu_probe) <> 74 * 8
+if (cpu_probe_end - cpu_probe) <> 98 * 8
         err 'the manifest must keep its fixed entry count'
 end if

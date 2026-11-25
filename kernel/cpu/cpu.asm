@@ -12,6 +12,7 @@
 ;;   gdt_tss.inc     cpu_gdt_init, cpu_set_rsp0
 ;;   idt_traps.inc   256 stubs, cpu_trap_expect, cpu_trap_finish, dispatch,
 ;;                   cpu_irq_set_handler
+;;   syscall.inc     cpu_syscall_init, the handler registrations, the entry
 ;;   panic.inc       bounded COM1 output, cpu_panic, halt
 ;;   selftest.inc    cpu_selftest
 ;;   this file       cpu_init
@@ -35,6 +36,7 @@ cpu_code_start:
 include 'api.inc'
 include 'gdt_tss.inc'
 include 'idt_traps.inc'
+include 'syscall.inc'
 include 'panic.inc'
 include 'selftest.inc'
 
@@ -155,6 +157,11 @@ cpu_init:
         test    eax, eax
         jnz     .fail
         call    cpu_idt_init
+        test    eax, eax
+        jnz     .fail
+        ; the SYSCALL MSRs come last: the entry they arm needs the GDT,
+        ; TSS.RSP0 and the IDT to be live already
+        call    cpu_syscall_init
         test    eax, eax
         jnz     .fail
         ; keep the handover facts for diagnostics, they are read only after

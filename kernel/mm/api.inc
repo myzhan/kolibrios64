@@ -85,6 +85,103 @@ if (MM_WINDOW_LIMIT shr 47) <> 0x1FFFF
 end if
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; frozen user VA domain, FS-v1 M3 adjudication of the task 120 plan B
+; layout (user/chip8/api.inc): code 16 KiB at 0x100400000 (US, RO+X),
+; data 2 MiB at 0x100600000 (US|RW|NX) with the 16 KiB user stack at the
+; very top of the data region, stack top 0x100800000 exclusive.
+;
+; The whole domain lives above the low 4 GiB identity map: PML4 slot 0,
+; PDPT index 4. The loader identity already owns the slot 0 PDPT (its
+; entries 0..3 point at the four 2 MiB leaf PDs), so index 4 is an empty
+; slot of that existing PDPT and no identity 2 MiB leaf ever needs
+; splitting. The self consistent page table budget is exactly +3 pages
+; for the full domain wiring: 1 PD at PDPT[4] + 1 PT for the code 2 MiB
+; + 1 PT shared by data+stack. The original +4 draft double counted the
+; identity PDPT; adjudicated here and frozen by the stage2-mm gate.
+; The shared PML4 slot 0 entry gains US once on the first successful
+; user map (anchor 0 of vmm_map_user_page): US is ANDed along the path
+; and the identity PDPT/PD entries stay supervisor, so the low 4 GiB
+; identity keeps its supervisor-only effective access.
+;
+; vmm_unmap_user_page (FS-v1 task 138 W3) is the teardown counterpart
+; and the foundation of the APP-v1 app exit path: rcx = VA inside the
+; frozen domain, page aligned. It clears a 4 KiB leaf whose effective
+; US is set, invlpg's it, and returns the released physical address in
+; rdx; an emptied PT (and then an emptied PD) is unlinked and handed
+; back through mm_pmm_drop_table, incrementing table_drops here, so the
+; net allocs-drops invariant of the +3 budget returns to the pre-map
+; baseline. The identity PDPT and PML4 are never reclaimed and the
+; anchor 0 US bit stays set (one way). Refusals: ENOTREADY offline,
+; EPERM outside the domain or effective US clear, EINVAL unaligned,
+; ENOENT absent leaf (tolerated by idempotent teardown loops), ENOTSUP
+; large leaf, EIO on a failing table drop; every failure zeroes rdx.
+
+MM_USER_VA_BASE      = 0x100400000      ; inclusive
+MM_USER_VA_LIMIT     = 0x100800000      ; exclusive, also the user stack top
+MM_USER_VA_SIZE      = MM_USER_VA_LIMIT - MM_USER_VA_BASE
+MM_USER_CODE_BASE    = MM_USER_VA_BASE
+MM_USER_CODE_SIZE    = 0x4000           ; 16 KiB, US read only executable
+MM_USER_DATA_BASE    = 0x100600000
+MM_USER_DATA_SIZE    = 0x200000         ; 2 MiB, US|RW|NX, stack at the top
+MM_USER_STACK_SIZE   = 0x4000           ; 16 KiB at [LIMIT-16K, LIMIT)
+MM_USER_PML4_SLOT    = 0                ; shared with the identity map
+MM_USER_PDPT_INDEX   = 4                ; empty slot of the identity PDPT
+MM_USER_TABLE_BUDGET = 3                ; 1 PD + 2 PT, frozen
+
+if MM_USER_VA_BASE mod 0x200000 | MM_USER_VA_LIMIT mod 0x200000
+        display "user VA domain bounds must be 2 MiB aligned", 13, 10
+        err
+end if
+if MM_USER_VA_BASE < MM_PHYS_LIMIT
+        display "user VA domain must sit above the identity map", 13, 10
+        err
+end if
+if (MM_USER_VA_BASE shr 47) <> 0
+        display "user VA domain must be canonical low half", 13, 10
+        err
+end if
+if ((MM_USER_VA_BASE shr 39) and 0x1FF) <> MM_USER_PML4_SLOT
+        display "user VA domain must live in PML4 slot 0", 13, 10
+        err
+end if
+if ((MM_USER_VA_BASE shr 30) and 0x1FF) <> MM_USER_PDPT_INDEX
+        display "user VA domain must use PDPT index 4, clear of identity 0..3", 13, 10
+        err
+end if
+if ((MM_USER_VA_LIMIT - 1) shr 30) <> (MM_USER_VA_BASE shr 30)
+        display "user VA domain must fit one PDPT entry", 13, 10
+        err
+end if
+if MM_USER_CODE_BASE <> MM_USER_VA_BASE | MM_USER_CODE_SIZE <> 0x4000
+        display "user code region must start the domain with 16 KiB", 13, 10
+        err
+end if
+if MM_USER_DATA_BASE <> MM_USER_VA_BASE + 0x200000 | MM_USER_DATA_SIZE <> 0x200000
+        display "user data region must be the second 2 MiB of the domain", 13, 10
+        err
+end if
+if MM_USER_DATA_BASE + MM_USER_DATA_SIZE <> MM_USER_VA_LIMIT
+        display "user data region must end at the domain limit", 13, 10
+        err
+end if
+if MM_USER_STACK_SIZE <> MM_USER_CODE_SIZE
+        display "user stack budget must stay 16 KiB", 13, 10
+        err
+end if
+if ((MM_USER_CODE_BASE shr 21) and 0x1FF) = ((MM_USER_DATA_BASE shr 21) and 0x1FF)
+        display "user code and data must use distinct PD entries", 13, 10
+        err
+end if
+if ((MM_USER_VA_LIMIT - 1) shr 21) <> (MM_USER_DATA_BASE shr 21)
+        display "user stack must share the data PD entry", 13, 10
+        err
+end if
+if MM_USER_TABLE_BUDGET <> 3
+        display "user domain table budget is frozen at +3 pages", 13, 10
+        err
+end if
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; status codes, EAX is signed
 
 MM_OK         = 0
@@ -120,10 +217,18 @@ MM_PTE_NX    = 0x8000000000000000
 MM_PTE_ADDR_MASK = 0x000FFFFFFFFFF000
 
 ; the only flags vmm_map accepts; P is implied and both RW+executable and
-; any cache attribute are rejected, see the mapping rules in vmm.inc
+; any cache attribute are rejected, see the mapping rules in vmm.inc.
+; APP-v1 adds US: a user mapping is either pure US (read only executable
+; code) or US|RW|NX (data, stack), every other US mix is EINVAL, and the
+; public window never accepts US at all (EPERM). FS-v1 M3 adjudicates the
+; user VA domain below: it sits above the low 4 GiB identity map in an
+; empty slot of the identity PDPT, so no identity 2 MiB leaf ever needs
+; splitting and the +3 table budget holds; vmm_map_user_page serves the
+; domain, vmm_map_page keeps refusing US in the public window.
 MM_MAP_RW = MM_PTE_RW
 MM_MAP_NX = MM_PTE_NX
-MM_MAP_ALLOWED = MM_MAP_RW or MM_MAP_NX
+MM_MAP_US = MM_PTE_US
+MM_MAP_ALLOWED = MM_MAP_RW or MM_MAP_NX or MM_MAP_US
 
 ; effective query flags, encoded with the PTE bit values themselves;
 ; only P/RW/US/NX are reported, RW/US are the path AND, NX the path OR

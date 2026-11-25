@@ -82,7 +82,7 @@ end macro
 align 8
 mm_probe_manifest:
         dq      'K64MMP01'                  ; magic
-        dq      1                           ; manifest version
+        dq      3                           ; manifest version, task 133 adds the user VA domain
         dq      MM_PROBE_BASE               ; link base of this image
 
 ; mutable state, so the checker can locate it inside the data block
@@ -168,6 +168,7 @@ mm_probe_manifest:
         dq      MM_PTE_NX
         dq      MM_PTE_ADDR_MASK
         dq      MM_MAP_ALLOWED
+        dq      MM_MAP_US
         dq      MM_BOOTINFO_SIZE
         dq      MM_INIT_PARAMS_size
         dq      MM_EFI_DESC_MIN_SIZE
@@ -316,6 +317,23 @@ mm_probe_manifest:
         dq      MM_BOOTINFO_FLAG_INITRAMFS
         dq      MM_BOOTINFO_FLAG_KNOWN
         dq      MM_GOP_PIXEL_FORMAT_MAX
+
+; FS-v1 M3 (task 133): the adjudicated user VA domain and its mapper
+        dq      vmm_map_user_page
+        dq      MM_USER_VA_BASE
+        dq      MM_USER_VA_LIMIT
+        dq      MM_USER_VA_SIZE
+        dq      MM_USER_CODE_BASE
+        dq      MM_USER_CODE_SIZE
+        dq      MM_USER_DATA_BASE
+        dq      MM_USER_DATA_SIZE
+        dq      MM_USER_STACK_SIZE
+        dq      MM_USER_PML4_SLOT
+        dq      MM_USER_PDPT_INDEX
+        dq      MM_USER_TABLE_BUDGET
+        dq      mm_umap_count
+        dq      mm_umap_table
+        dq      vmm_unmap_user_page
 
 ; ------------------------------------------------------------------
 ; low address space, MM_PB_LOW_ARENA
@@ -1168,14 +1186,17 @@ mm_qry_table:
 ; Every case starts from a fresh copy of the image, so a mapping made by
 ; one case never leaks into the next one. An empty flag set is a read only
 ; executable page and must be accepted; RW together with execute is the one
-; combination the contract refuses.
+; combination the contract refuses. APP-v1 (task 113): US joins the allowed
+; flag set, but the public window itself refuses every US mix with EPERM
+; before the flag matrix runs, so all US cases below are negative.
 ; ------------------------------------------------------------------
 
 MM_MAP_RWX = 0x2
 MM_MAP_NXX = 0x8000000000000000
+MM_MAP_USX = 0x4
 
 mm_map_count:
-        dq      26
+        dq      29
 mm_map_table:
         dq      'MPEXIST', MM_WINDOW_BASE + 0x1000, 0x00900000, MM_MAP_RWX or MM_MAP_NXX, -4, 0, 0, 0, 0
         dq      'MP0TAB', MM_WINDOW_BASE + 0x3000, 0x00900000, MM_MAP_RWX or MM_MAP_NXX, 0, 0, 0
@@ -1198,7 +1219,12 @@ mm_map_table:
         dq      'MPROEX', MM_WINDOW_BASE + 0x5000, 0x00900000, 0, 0, 0, 0
         dq      0x00900000 + 1, 1
         dq      'MPFLRW', MM_WINDOW_BASE + 0x5000, 0x00900000, MM_MAP_RWX, -1, 0, 0, 0, 0
-        dq      'MPFLUS', MM_WINDOW_BASE + 0x5000, 0x00900000, MM_MAP_NXX or 4, -1, 0, 0, 0, 0
+        dq      'MPFLUS', MM_WINDOW_BASE + 0x5000, 0x00900000, MM_MAP_NXX or MM_MAP_USX, -5, 0, 0, 0, 0
+        ; APP-v1: pure US, US|RW and US|RW|NX are legal flag mixes, yet the
+        ; public window refuses them all with EPERM (window test runs first)
+        dq      'MPUSRO', MM_WINDOW_BASE + 0x5000, 0x00900000, MM_MAP_USX, -5, 0, 0, 0, 0
+        dq      'MPUSRW', MM_WINDOW_BASE + 0x5000, 0x00900000, MM_MAP_USX or MM_MAP_RWX, -5, 0, 0, 0, 0
+        dq      'MPUSRWNX', MM_WINDOW_BASE + 0x5000, 0x00900000, MM_MAP_USX or MM_MAP_RWX or MM_MAP_NXX, -5, 0, 0, 0, 0
         dq      'MPFLG', MM_WINDOW_BASE + 0x5000, 0x00900000, MM_MAP_NXX or 0x100, -1, 0, 0, 0, 0
         dq      'MPFLPAT', MM_WINDOW_BASE + 0x5000, 0x00900000, MM_MAP_NXX or 0x1000, -1, 0, 0, 0, 0
         dq      'MPFLPWT', MM_WINDOW_BASE + 0x5000, 0x00900000, MM_MAP_NXX or 0x8, -1, 0, 0, 0, 0
@@ -1291,6 +1317,63 @@ mm_mmio_table:
         dq      'MMIORL1T', MM_MMIO_LAPIC_VA, 0xFEE00000, -2, 1, 0, 0, 0
         ; a physical address beyond the CPU width, non eligible by range
         dq      'MMIOOVFL', MM_MMIO_LAPIC_VA, 0x10000000000000, -10, 0, 0, 0, 0
+
+; ------------------------------------------------------------------
+; user domain map table, read by check.py (FS-v1 M3, task 133)
+;
+; 9 qwords per entry, the same shape as the map table:
+;   +0  tag
+;   +8  virtual address
+;   +16 physical address
+;   +24 mapping flags
+;   +32 expected status
+;   +40 test hook: fail the N-th page table allocation, 0 to disable
+;   +48 expected number of newly built page tables (this call only)
+;   +56 expected raw leaf entry
+;   +64 expected leaf present, 1 or 0
+;
+; The fx2 root models the loader shape: PML4[0] is present and points
+; at the identity PDPT whose entries 0..3 are taken, so the user domain
+; at PDPT index 4 builds exactly one PD plus one PT per 2 MiB region.
+; UP2ND/UPEXIST map the code base page first (check.py precondition),
+; UPBIG1G plants a 1 GiB PS leaf at PDPT[4] before the call.
+; ------------------------------------------------------------------
+
+mm_umap_count:
+        dq      19
+mm_umap_table:
+        ; accepted: code, data and the top stack page, two tables each
+        dq      'UPCODE', MM_USER_CODE_BASE, 0x00900000, MM_MAP_USX, 0, 0, 2
+        dq      0x00900000 + 0x005, 1
+        dq      'UPDATA', MM_USER_DATA_BASE, 0x00900000, MM_MAP_USX or MM_MAP_RWX or MM_MAP_NXX, 0, 0, 2
+        dq      0x00900000 + 0x8000000000000007, 1
+        dq      'UPSTACK', MM_USER_VA_LIMIT - 0x1000, 0x00900000, MM_MAP_USX or MM_MAP_RWX or MM_MAP_NXX, 0, 0, 2
+        dq      0x00900000 + 0x8000000000000007, 1
+        ; the second code page reuses the fresh PT: no new table
+        dq      'UP2ND', MM_USER_CODE_BASE + 0x1000, 0x00900000, MM_MAP_USX, 0, 0, 0
+        dq      0x00900000 + 0x005, 1
+        ; an existing user leaf reports EEXIST and keeps its bytes
+        dq      'UPEXIST', MM_USER_CODE_BASE, 0x00900000, MM_MAP_USX, -4, 0, 0, 0, 0
+        ; outside the frozen domain, including the public window
+        dq      'UPWLOW', MM_USER_VA_BASE - 0x1000, 0x00900000, MM_MAP_USX, -5, 0, 0, 0, 0
+        dq      'UPWLIM', MM_USER_VA_LIMIT, 0x00900000, MM_MAP_USX, -5, 0, 0, 0, 0
+        dq      'UPWIN', MM_WINDOW_BASE + 0x5000, 0x00900000, MM_MAP_USX, -5, 0, 0, 0, 0
+        ; US is mandatory inside the domain
+        dq      'UPNOUS', MM_USER_CODE_BASE, 0x00900000, MM_MAP_NXX, -5, 0, 0, 0, 0
+        dq      'UPNUS2', MM_USER_CODE_BASE, 0x00900000, MM_MAP_RWX or MM_MAP_NXX, -5, 0, 0, 0, 0
+        ; the combination rules are the APP-v1 ones, unchanged
+        dq      'UPRWEX', MM_USER_CODE_BASE, 0x00900000, MM_MAP_USX or MM_MAP_RWX, -1, 0, 0, 0, 0
+        dq      'UPNXRO', MM_USER_CODE_BASE, 0x00900000, MM_MAP_USX or MM_MAP_NXX, -1, 0, 0, 0, 0
+        dq      'UPGFL', MM_USER_CODE_BASE, 0x00900000, MM_MAP_USX or 0x100, -1, 0, 0, 0, 0
+        ; alignment and ownership, identical to the window mapper
+        dq      'UPVAAL', MM_USER_CODE_BASE + 0x800, 0x00900000, MM_MAP_USX, -1, 0, 0, 0, 0
+        dq      'UPPAAL', MM_USER_CODE_BASE, 0x00900123, MM_MAP_USX, -1, 0, 0, 0, 0
+        dq      'UPUNOWN', MM_USER_CODE_BASE, 0x00902000, MM_MAP_USX, -5, 0, 0, 0, 0
+        ; hooked builds roll every fresh table back
+        dq      'UPROLL1', MM_USER_CODE_BASE, 0x00900000, MM_MAP_USX, -2, 1, 0, 0, 0
+        dq      'UPROLL2', MM_USER_CODE_BASE, 0x00900000, MM_MAP_USX, -2, 2, 0, 0, 0
+        ; a 1 GiB PS leaf planted at PDPT[4] is never split
+        dq      'UPBIG1G', MM_USER_CODE_BASE, 0x00900000, MM_MAP_USX, -6, 0, 0, 0, 0
 
 mm_probe_end:
 

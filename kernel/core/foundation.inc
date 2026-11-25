@@ -23,8 +23,16 @@
 ;;   or the geometry is not the frozen 1024x768) -> the DESKTOP-v1 stage
 ;;   (desktop_init -> vmm_boot_protect over the desktop data region ->
 ;;   desktop_selftest -> K64-DESKTOP-OK, or K64-DESKTOP-SKIP when the
-;;   GUI stage skipped) -> K64-FOUNDATION-OK -> the resident desktop
-;;   event loop, or halt when the desktop skipped.
+;;   GUI stage skipped) -> the FS-v1 M1 stage (blk_init ->
+;;   vmm_boot_protect over the blk data region -> blk_selftest ->
+;;   K64-BLK-OK, mandatory device, no skip) -> the FS-v1 M2 stage
+;;   (fs_init -> vmm_boot_protect over the fs data region ->
+;;   fs_selftest -> K64-FS-OK, mandatory image, no skip) -> the FS-v1
+;;   M3 stage (fsys_init -> vmm_boot_protect over the fsys data region
+;;   -> fsys_probe, the Ring 3 leg that tears its user domain footprint
+;;   back down -> K64-FSPROBE-OK, mandatory, no skip) ->
+;;   K64-FOUNDATION-OK -> the resident desktop event loop, or halt
+;;   when the desktop skipped.
 ;;
 ;; Nothing here ever executes STI itself; the STI windows of the whole
 ;; kernel belong to irq_selftest and the resident desktop_run loop,
@@ -329,6 +337,103 @@ k64_foundation_init:
         k64_report kmsg_desktop_skip, .fail
 .desktop_done:
 
+        ; ---------------- FS-v1 M1: the block layer ----------------
+        ; Runs AFTER core_selftest like the input/GUI/desktop stages:
+        ; the blk data region protection allocates its page tables
+        ; after the leg 7 accounting baseline, so the frozen 3/3/3
+        ; table delta stays untouched. The virtio-blk transitional
+        ; device is mandatory in the smoke matrix: a missing device or
+        ; a failed bring-up is a real fault that panics, there is no
+        ; skip marker. IF stays 0, no interrupt line is wired, the
+        ; used ring is polled with a bounded pause budget.
+        mov     qword [rbp-16], kmsg_fail_blk
+        mov     rcx, [rbp-8]            ; BootInfo, identity mapped
+        call    blk_init
+        test    eax, eax
+        jnz     .fail
+
+        ; the blk data region becomes RW/NX like the other blocks; the
+        ; vring/DMA pages stay device reachable through the untouched
+        ; loader identity map of the low RAM
+        mov     qword [rbp-16], kmsg_fail_protect
+        mov     rcx, blk_data_start
+        mov     rdx, (blk_data_end - blk_data_start) / K64_PAGE_SIZE
+        mov     r8, MM_MAP_RW or MM_MAP_NX
+        call    vmm_boot_protect
+        test    eax, eax
+        jnz     .fail
+
+        ; on failure the blk self test has already printed its leg
+        ; mask, the foundation takes the standard fatal path
+        mov     qword [rbp-16], kmsg_fail_blk
+        call    blk_selftest
+        test    eax, eax
+        jnz     .fail
+
+        k64_report kmsg_blk_ok, .fail
+
+        ; ---------------- FS-v1 M2: the read-only FAT16 mount ----------------
+        ; Runs right after the blk stage, still after the leg 7
+        ; accounting baseline: the fs data region protection allocates
+        ; its page tables late, the frozen 3/3/3 delta stays untouched.
+        ; fs_init mounts the frozen FAT16 image through blk_read; an
+        ; illegal BPB is the fs self test failure path (EIO), never a
+        ; module panic. IF stays 0 and no interrupt line is wired.
+        mov     qword [rbp-16], kmsg_fail_fs
+        call    fs_init
+        test    eax, eax
+        jnz     .fail
+
+        ; the fs data region becomes RW/NX like the other blocks
+        mov     qword [rbp-16], kmsg_fail_protect
+        mov     rcx, fs_data_start
+        mov     rdx, (fs_data_end - fs_data_start) / K64_PAGE_SIZE
+        mov     r8, MM_MAP_RW or MM_MAP_NX
+        call    vmm_boot_protect
+        test    eax, eax
+        jnz     .fail
+
+        ; on failure the fs self test has already printed its leg
+        ; mask, the foundation takes the standard fatal path
+        mov     qword [rbp-16], kmsg_fail_fs
+        call    fs_selftest
+        test    eax, eax
+        jnz     .fail
+
+        k64_report kmsg_fs_ok, .fail
+
+        ; ---------------- FS-v1 M3: the file syscall layer ----------------
+        ; Runs after the fs stage, still after the leg 7 accounting
+        ; baseline: the fsys data protection and the probe user domain
+        ; tables allocate late, the frozen 3/3/3 delta stays untouched.
+        ; fsys_init registers the file handlers 4..9; fsys_probe maps
+        ; the frozen nine page footprint, runs the Ring 3 fsprobe
+        ; program and restores the frozen fs/blk sector counters, so
+        ; the judge keeps the M1/M2 evidence. IF stays 0 throughout.
+        mov     qword [rbp-16], kmsg_fail_fsys
+        call    fsys_init
+        test    eax, eax
+        jnz     .fail
+
+        ; the fsys data region becomes RW/NX like the other blocks;
+        ; the private syscall stack inside it stays writable
+        mov     qword [rbp-16], kmsg_fail_protect
+        mov     rcx, fsys_data_start
+        mov     rdx, (fsys_data_end - fsys_data_start) / K64_PAGE_SIZE
+        mov     r8, MM_MAP_RW or MM_MAP_NX
+        call    vmm_boot_protect
+        test    eax, eax
+        jnz     .fail
+
+        ; the Ring 3 probe reports its own verdict through the exit
+        ; code and the evidence mask; a failure takes the fatal path
+        mov     qword [rbp-16], kmsg_fail_fsys
+        call    fsys_probe
+        test    eax, eax
+        jnz     .fail
+
+        k64_report kmsg_fsysprobe_ok, .fail
+
         k64_report kmsg_foundation_ok, .fail
         ; FOUNDATION-OK stays the terminal judge marker, printed BEFORE
         ; the resident loop: a successful desktop never returns from
@@ -385,3 +490,18 @@ kmsg_fail_input       db 'foundation: input bring-up failed', 0
 kmsg_desktop_ok       db 'K64-DESKTOP-OK', 13, 10, 0
 kmsg_desktop_skip     db 'K64-DESKTOP-SKIP', 13, 10, 0
 kmsg_fail_desktop     db 'foundation: desktop bring-up failed', 0
+
+; FS-v1 M1 messages, same read only convention; there is no blk skip
+; marker, the virtio-blk device is mandatory in the smoke matrix
+kmsg_blk_ok           db 'K64-BLK-OK', 13, 10, 0
+kmsg_fail_blk         db 'foundation: blk bring-up failed', 0
+
+; FS-v1 M2 messages, same read only convention; there is no fs skip
+; marker, the frozen FAT16 image is mandatory in the smoke matrix
+kmsg_fs_ok            db 'K64-FS-OK', 13, 10, 0
+kmsg_fail_fs          db 'foundation: fs bring-up failed', 0
+
+; FS-v1 M3 messages, same read only convention; there is no fsys skip
+; marker, the Ring 3 fsprobe leg is mandatory in the smoke matrix
+kmsg_fsysprobe_ok     db 'K64-FSPROBE-OK', 13, 10, 0
+kmsg_fail_fsys        db 'foundation: fsys bring-up failed', 0

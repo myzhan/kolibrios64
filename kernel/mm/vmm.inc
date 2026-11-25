@@ -293,12 +293,20 @@ vmm_query:
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; map one 4 KiB page inside the public window
 ; in
-; rcx = virtual address, rdx = physical address, r8 = MM_MAP_RW/MM_MAP_NX
+; rcx = virtual address, rdx = physical address,
+; r8 = MM_MAP_RW/MM_MAP_NX/MM_MAP_US
 ; out
 ; eax = status, rdx = 0
 ; note
 ; the physical page must have been handed out by pmm_alloc_page and
-; must not be pinned; anything else is refused with EPERM
+; must not be pinned; anything else is refused with EPERM.
+; APP-v1: US is accepted by the flag rules (pure US, or US|RW|NX) but
+; the public window itself never takes a user mapping, so every US call
+; here is EPERM; the adjudicated user VA domain (FS-v1 M3) is served by
+; vmm_map_user_page below and this window rule stays frozen.
+; A new intermediate table entry carries US exactly when the leaf flags
+; do; existing entries are never rewritten, the offline build protocol
+; is unchanged.
 vmm_map_page:
         mm_enter
         cld
@@ -312,13 +320,15 @@ vmm_map_page:
         cmp     dword [mm_vmm_state + MM_VMM_STATE.ready], 0
         je      .notready
 
-        ; the public window only
+        ; the public window only, and never a user mapping (APP-v1)
         mov     rax, qword [mm_vmm_state + MM_VMM_STATE.window_base]
         cmp     r15, rax
         jb      .permitted
         mov     rax, qword [mm_vmm_state + MM_VMM_STATE.window_limit]
         cmp     r15, rax
         jae     .permitted
+        test    r13, MM_MAP_US
+        jnz     .permitted
         test    r15, MM_PAGE_SIZE-1
         jnz     .invalid
 
@@ -326,17 +336,28 @@ vmm_map_page:
         test    r14, MM_PAGE_SIZE-1
         jnz     .invalid
 
-        ; only RW and NX, and never writable plus executable
+        ; only RW, NX and US, and never writable plus executable
         mov     rax, r13
         mov     rdx, MM_MAP_ALLOWED
         not     rdx
         test    rax, rdx
         jnz     .invalid
         test    rax, MM_MAP_RW
-        jz      .flags_ok
+        jz      .no_rw
         mov     rcx, MM_MAP_NX
         test    rax, rcx
         jz      .invalid
+.no_rw:
+        ; APP-v1: a user mapping is pure US (RO+X code) or US|RW|NX
+        ; (data, stack); every other US combination is refused
+        test    rax, MM_MAP_US
+        jz      .flags_ok
+        mov     rcx, MM_MAP_US
+        cmp     rax, rcx
+        je      .flags_ok
+        mov     rcx, MM_MAP_US or MM_MAP_RW or MM_MAP_NX
+        cmp     rax, rcx
+        jne     .invalid
 .flags_ok:
 
         ; ownership: allocated by the public allocator and not pinned
@@ -378,6 +399,10 @@ vmm_map_page:
 .link_now:
         mov     rax, rdx
         or      rax, MM_PTE_P or MM_PTE_RW
+        ; APP-v1 anchor 1: a new intermediate entry carries the leaf US
+        mov     rcx, r13
+        and     rcx, MM_PTE_US
+        or      rax, rcx
         mov     qword [rsi], rax
 .record:
         mov     rax, qword [rsp+40]
@@ -421,8 +446,233 @@ vmm_map_page:
         mov     rsi, qword [rsp+32]
         mov     rax, qword [rsp+48]
         or      rax, MM_PTE_P or MM_PTE_RW
+        ; APP-v1 anchor 2: the publish entry carries the leaf US too
+        mov     rcx, r13
+        and     rcx, MM_PTE_US
+        or      rax, rcx
         mov     qword [rsi], rax
 .published:
+        mov     rax, qword [rsp+40]
+        add     qword [mm_vmm_state + MM_VMM_STATE.table_allocs], rax
+        invlpg  [r15]
+        xor     eax, eax
+        jmp     .done
+
+.rollback_exists:
+        mov     r12d, MM_EEXIST
+        jmp     .rollback
+.rollback_notsup:
+        mov     r12d, MM_ENOTSUP
+        jmp     .rollback
+.rollback_nomem:
+        mov     r12d, MM_ENOMEM
+.rollback:
+        mov     rax, qword [rsp+40]
+        add     qword [mm_vmm_state + MM_VMM_STATE.table_drops], rax
+        mov     rcx, qword [rsp+40]
+.drop_loop:
+        test    rcx, rcx
+        jz      .dropped
+        dec     rcx
+        mov     rbx, rcx
+        mov     rcx, qword [rsp+48 + rbx*8]
+        call    mm_pmm_drop_table
+        mov     rcx, rbx
+        jmp     .drop_loop
+.dropped:
+        mov     eax, r12d
+        jmp     .done
+.permitted:
+        mov     eax, MM_EPERM
+        jmp     .done
+.invalid:
+        mov     eax, MM_EINVAL
+        jmp     .done
+.overflow:
+        mov     eax, MM_EOVERFLOW
+        jmp     .done
+.notready:
+        mov     eax, MM_ENOTREADY
+.done:
+        xor     edx, edx
+        add     rsp, 96
+        mm_leave
+        ret
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; map one 4 KiB page inside the frozen user VA domain (FS-v1 M3)
+; in
+; rcx = virtual address, rdx = physical address,
+; r8 = MM_MAP_US or MM_MAP_US|MM_MAP_RW|MM_MAP_NX
+; out
+; eax = status, rdx = 0
+; note
+; the mirror image of vmm_map_page for the adjudicated user domain
+; [MM_USER_VA_BASE, MM_USER_VA_LIMIT): the VA must sit inside the domain
+; (EPERM outside), US is mandatory (EPERM without it) and the flag mix
+; is pure US (RO+X code) or US|RW|NX (data, stack) exactly like the
+; APP-v1 combination rules. The domain lives above the identity map in
+; an empty slot of the identity PDPT, so no 2 MiB supervisor leaf is
+; ever split: the offline build protocol, the atomic publish, both US
+; anchors and the failure rollback are copied verbatim from
+; vmm_map_page, which itself is not touched. One deliberate addition,
+; anchor 0 on the success path only: the shared PML4 slot 0 entry gains
+; US with a single or, because US is ANDed along the path and the
+; loader built that entry supervisor only. The identity PDPT/PD entries
+; below stay supervisor, so the low 4 GiB identity keeps its
+; supervisor-only effective access; refusals never touch it. Ownership
+; rules are identical: the physical page must come from pmm_alloc_page
+; and must not be pinned.
+vmm_map_user_page:
+        mm_enter
+        cld
+        sub     rsp, 96                 ; 32 shadow + publish/build state
+        mov     r15, rcx
+        mov     r14, rdx
+        mov     r13, r8
+        mov     qword [rsp+32], 0       ; publish point
+        mov     qword [rsp+40], 0       ; number of new tables
+
+        cmp     dword [mm_vmm_state + MM_VMM_STATE.ready], 0
+        je      .notready
+
+        ; the frozen user domain only, and US is mandatory here
+        mov     rax, MM_USER_VA_BASE
+        cmp     r15, rax
+        jb      .permitted
+        mov     rax, MM_USER_VA_LIMIT
+        cmp     r15, rax
+        jae     .permitted
+        test    r13, MM_MAP_US
+        jz      .permitted
+        test    r15, MM_PAGE_SIZE-1
+        jnz     .invalid
+
+        ; a page aligned physical address
+        test    r14, MM_PAGE_SIZE-1
+        jnz     .invalid
+
+        ; only RW, NX and US, and never writable plus executable
+        mov     rax, r13
+        mov     rdx, MM_MAP_ALLOWED
+        not     rdx
+        test    rax, rdx
+        jnz     .invalid
+        test    rax, MM_MAP_RW
+        jz      .no_rw
+        mov     rcx, MM_MAP_NX
+        test    rax, rcx
+        jz      .invalid
+.no_rw:
+        ; a user mapping is pure US (RO+X code) or US|RW|NX (data,
+        ; stack); every other US combination is refused
+        mov     rcx, MM_MAP_US
+        cmp     rax, rcx
+        je      .flags_ok
+        mov     rcx, MM_MAP_US or MM_MAP_RW or MM_MAP_NX
+        cmp     rax, rcx
+        jne     .invalid
+.flags_ok:
+
+        ; ownership: allocated by the public allocator and not pinned
+        mov     rbx, r14
+        shr     rbx, MM_PAGE_SHIFT
+        cmp     rbx, MM_PFN_COUNT
+        jae     .permitted
+        bt      qword [mm_bitmap_allocated], rbx
+        jnc     .permitted
+        bt      qword [mm_bitmap_pinned], rbx
+        jc      .permitted
+
+        ; the address must also fit the CPU physical width
+        mov     rax, qword [mm_vmm_state + MM_VMM_STATE.pa_mask]
+        not     rax
+        test    r14, rax
+        jnz     .overflow
+
+        mov     rbx, qword [mm_vmm_state + MM_VMM_STATE.root_phys]
+        mov     r12, 39
+.level_loop:
+        mov     rax, r15
+        mov     ecx, r12d
+        shr     rax, cl
+        and     eax, 0x1FF
+        lea     rsi, [rbx + rax*8]
+        mov     rdi, qword [rsi]
+        test    dil, MM_PTE_P
+        jnz     .descend
+
+        ; offline build: allocate, record, link inside the new pages only
+        call    mm_pmm_alloc_table
+        test    eax, eax
+        jnz     .rollback_nomem
+        cmp     qword [rsp+40], 0
+        jne     .link_now
+        mov     qword [rsp+32], rsi
+        jmp     .record
+.link_now:
+        mov     rax, rdx
+        or      rax, MM_PTE_P or MM_PTE_RW
+        ; anchor 1: a new intermediate entry carries the leaf US
+        mov     rcx, r13
+        and     rcx, MM_PTE_US
+        or      rax, rcx
+        mov     qword [rsi], rax
+.record:
+        mov     rax, qword [rsp+40]
+        mov     qword [rsp+48 + rax*8], rdx
+        inc     rax
+        mov     qword [rsp+40], rax
+        mov     rbx, rdx
+        jmp     .next_level
+.descend:
+        test    dil, MM_PTE_PS
+        jnz     .rollback_notsup
+        mov     rax, qword [mm_vmm_state + MM_VMM_STATE.pa_mask]
+        and     rdi, rax
+        mov     rbx, rdi
+        mov     rax, MM_PHYS_LIMIT
+        cmp     rbx, rax
+        jae     .rollback_notsup
+.next_level:
+        cmp     r12, 21
+        je      .leaf
+        sub     r12, 9
+        jmp     .level_loop
+
+.leaf:
+        mov     rax, r15
+        shr     rax, 12
+        and     eax, 0x1FF
+        lea     rsi, [rbx + rax*8]
+        mov     rdi, qword [rsi]
+        test    dil, MM_PTE_P
+        jnz     .rollback_exists
+        mov     rax, r14
+        or      rax, MM_PTE_P
+        or      rax, r13
+        mov     qword [rsi], rax
+
+        ; atomic publish of the whole new chain
+        mov     rcx, qword [rsp+40]
+        test    rcx, rcx
+        jz      .published
+        mov     rsi, qword [rsp+32]
+        mov     rax, qword [rsp+48]
+        or      rax, MM_PTE_P or MM_PTE_RW
+        ; anchor 2: the publish entry carries the leaf US too
+        mov     rcx, r13
+        and     rcx, MM_PTE_US
+        or      rax, rcx
+        mov     qword [rsi], rax
+.published:
+        ; anchor 0: the shared identity PML4 slot gains US once, on the
+        ; success path only; the identity levels below stay supervisor
+        mov     rbx, qword [mm_vmm_state + MM_VMM_STATE.root_phys]
+        mov     rax, r15
+        shr     rax, 39
+        and     eax, 0x1FF
+        or      qword [rbx + rax*8], MM_PTE_US
         mov     rax, qword [rsp+40]
         add     qword [mm_vmm_state + MM_VMM_STATE.table_allocs], rax
         invlpg  [r15]
@@ -522,6 +772,142 @@ vmm_unmap_page:
 .done:
         add     rsp, 96
         mm_leave
+        ret
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; remove one 4 KiB user mapping from the frozen user domain and
+; reclaim the page tables it empties (task 138 W3, the APP-v1 app
+; exit path groundwork)
+; in
+; rcx = virtual address inside [MM_USER_VA_BASE, MM_USER_VA_LIMIT)
+; out
+; eax = status, rdx = the unmapped physical address, 0 on failure;
+;       the physical page is NOT released, the caller owns it and
+;       hands it to pmm_free_page
+; contract
+; - outside the user domain EPERM (vmm_unmap_page keeps serving the
+;   public window and keeps refusing the user domain, both stay)
+; - misaligned EINVAL, no leaf ENOENT, non 4 KiB leaf ENOTSUP,
+;   effective US clear EPERM, vmm not ready ENOTREADY
+; - the leaf is cleared and invlpg'd first; then, bottom up: an all
+;   zero PT is unlinked from its PD and dropped, an all zero PD is
+;   unlinked from PDPT[MM_USER_PDPT_INDEX] and dropped. Each drop
+;   goes through mm_pmm_drop_table and increments table_drops here
+;   (the helper does not count); the net allocs-drops invariant of
+;   the +3 budget therefore returns to the pre-map baseline.
+; - the identity PDPT and PML4 are never reclaimed; the anchor 0 US
+;   bit of PML4 slot 0 is one way and stays set
+; - after any intermediate unlink a CR3 reload flushes the cached
+;   intermediate translations; a leaf-only unmap needs invlpg alone
+; - a failing table drop reports EIO with rdx = 0
+vmm_unmap_user_page:
+        mm_enter
+        cld
+        sub     rsp, 96                 ; 32 shadow + 64 record
+        mov     r12, rcx
+        cmp     dword [mm_vmm_state + MM_VMM_STATE.ready], 0
+        je      .notready
+        mov     rax, MM_USER_VA_BASE
+        cmp     r12, rax
+        jb      .permitted
+        mov     rax, MM_USER_VA_LIMIT
+        cmp     r12, rax
+        jae     .permitted
+        test    r12, MM_PAGE_SIZE-1
+        jnz     .invalid
+
+        mov     rcx, r12
+        lea     rdx, [rsp+32]
+        call    mm_vmm_resolve
+        test    eax, eax
+        jnz     .fail
+        cmp     qword [rsp+32+8], MM_PAGE_SIZE
+        jne     .notsup
+        cmp     qword [rsp+32+24], 1      ; effective US must be set
+        jne     .permitted
+        mov     rsi, qword [rsp+32]
+        mov     qword [rsi], 0
+        invlpg  [r12]
+        mov     r13, qword [rsp+32+48]    ; the released physical address
+
+        ; reclaim the PT when every one of its 512 entries is empty
+        mov     r14, rsi
+        and     r14, -MM_PAGE_SIZE
+        xor     ecx, ecx
+.pt_scan:
+        cmp     qword [r14 + rcx*8], 0
+        jne     .done_ok
+        inc     ecx
+        cmp     ecx, 512
+        jb      .pt_scan
+
+        ; locate the PD through PML4[slot] -> PDPT[index], identity VAs
+        mov     rbx, qword [mm_vmm_state + MM_VMM_STATE.root_phys]
+        mov     rax, r12
+        shr     rax, 39
+        and     eax, 0x1FF
+        mov     rbx, qword [rbx + rax*8]
+        mov     rax, qword [mm_vmm_state + MM_VMM_STATE.pa_mask]
+        and     rbx, rax
+        mov     rax, r12
+        shr     rax, 30
+        and     eax, 0x1FF
+        lea     r15, [rbx + rax*8]        ; the PDPT slot of the PD
+        mov     rbx, qword [r15]
+        mov     rax, qword [mm_vmm_state + MM_VMM_STATE.pa_mask]
+        and     rbx, rax
+        mov     rax, r12
+        shr     rax, 21
+        and     eax, 0x1FF
+        mov     qword [rbx + rax*8], 0    ; unlink the empty PT
+        mov     rcx, r14
+        call    mm_pmm_drop_table
+        test    eax, eax
+        jnz     .reclaim_eio
+        inc     qword [mm_vmm_state + MM_VMM_STATE.table_drops]
+
+        ; reclaim the PD when it is empty too; the PDPT stays forever
+        xor     ecx, ecx
+.pd_scan:
+        cmp     qword [rbx + rcx*8], 0
+        jne     .flush
+        inc     ecx
+        cmp     ecx, 512
+        jb      .pd_scan
+        mov     qword [r15], 0            ; unlink the empty PD
+        mov     rcx, rbx
+        call    mm_pmm_drop_table
+        test    eax, eax
+        jnz     .reclaim_eio
+        inc     qword [mm_vmm_state + MM_VMM_STATE.table_drops]
+.flush:
+        ; an intermediate entry changed: flush the cached walks
+        mov     rax, cr3
+        mov     cr3, rax
+.done_ok:
+        mov     rdx, r13
+        xor     eax, eax
+        jmp     .done
+.reclaim_eio:
+        mov     eax, MM_EIO
+        jmp     .fail
+.notsup:
+        mov     eax, MM_ENOTSUP
+        jmp     .fail
+.permitted:
+        mov     eax, MM_EPERM
+        jmp     .fail
+.invalid:
+        mov     eax, MM_EINVAL
+        jmp     .fail
+.notready:
+        mov     eax, MM_ENOTREADY
+        jmp     .fail
+.fail:
+        xor     edx, edx
+.done:
+add     rsp, 96
+mm_leave
         ret
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -932,7 +1318,7 @@ mm_vmm_protect_pass:
         jz      .next
         mov     rsi, qword [rsp+32]
         mov     rax, qword [rsi]
-        mov     rcx, MM_MAP_ALLOWED
+        mov     rcx, MM_MAP_RW or MM_MAP_NX
         not     rcx
         and     rax, rcx                ; clear RW and NX, keep PA and P
         or      rax, r13
@@ -983,8 +1369,10 @@ vmm_boot_protect:
         jz      .invalid
         test    r12, MM_PAGE_SIZE-1
         jnz     .invalid
+        ; the protect path keeps the pre APP-v1 matrix: RW and NX only,
+        ; a kernel leaf must never become user accessible
         mov     rax, r14
-        mov     rdx, MM_MAP_ALLOWED
+        mov     rdx, MM_MAP_RW or MM_MAP_NX
         not     rdx
         test    rax, rdx
         jnz     .invalid

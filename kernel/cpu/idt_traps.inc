@@ -245,7 +245,8 @@ cpu_trap_dispatch:
         mov     rbp, rsp
         sub     rsp, CPU_STACK_FRAME
         mov     [rbp-8], rcx
-        ; this stage only runs in ring 0, any other CS is a broken frame
+        ; a frame from ring 3 belongs to the user fault hook, never to the
+        ; kernel expectation machinery
         mov     rax, [rcx + CPU_FRAME_CS]
         test    al, 3
         jnz     .not_kernel
@@ -322,6 +323,16 @@ cpu_trap_dispatch:
         call    cpu_panic
         jmp     cpu_halt_forever
 .not_kernel:
+        ; a user frame goes to the registered user fault handler with
+        ; RCX = frame; the stub restores and iretqs afterwards. Without a
+        ; handler the pre APP-v1 panic stays, byte for byte.
+        mov     rax, [cpu_user_fault_handler]
+        test    rax, rax
+        jz      .user_panic
+        mov     rcx, [rbp-8]
+        call    rax
+        jmp     .return_ok
+.user_panic:
         mov     rcx, msg_trap_not_kernel
         mov     rdx, [rbp-8]
         mov     r8, CPU_EPERM

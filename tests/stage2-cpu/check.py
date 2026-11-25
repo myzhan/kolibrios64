@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage 2 CPU module checks, task 27. No machine is started.
+"""Stage 2 CPU module checks, task 27, task 113. No machine is started.
 
 Everything here is measured, nothing is taken from a comment. The probe
 tests/stage2-cpu/layout.asm assembles kernel/cpu/cpu.asm exactly as the kernel
@@ -48,15 +48,19 @@ KERNEL_BASE = 0xFFFFFFFF80000000
 KERNEL_SHIFT = 47
 KERNEL_TOP = 0x1FFFF
 
-GDT_SIZE = 40
+GDT_SIZE = 56
 GDT_ALIGN = 16
 GDT_CODE_VALUE = 0x00AF9A000000FFFF
 GDT_DATA_VALUE = 0x00CF92000000FFFF
+GDT_USER_DATA_VALUE = 0x00CFF2000000FFFF
+GDT_USER_CODE_VALUE = 0x00AFFA000000FFFF
 GDT_DESC_ACCESSED = 1 << 40
 GDT_RUNTIME_MASK = ((1 << 64) - 1) ^ GDT_DESC_ACCESSED
 SEL_CODE = 0x08
 SEL_DATA = 0x10
 SEL_TSS = 0x18
+SEL_USER_DATA = 0x28
+SEL_USER_CODE = 0x30
 DTR_SIZE = 10
 
 TSS_SIZE = 104
@@ -106,6 +110,23 @@ VECTOR_ALLOWED = (0, 3, 6, 14, 0xF0, 0xF1)
 # the asynchronous window the IRQ layer may own, contract IRQ-v1
 IRQ_VECTOR_MIN = 0x20
 
+# APP-v1, task 113: the SYSCALL/SYSRET pair and the syscall ABI, fixed
+# here independently of the sources. The ring 3 pair is 0x30 code / 0x28
+# data (the provisional layout reported to the lead), so the STAR base is
+# 0x20: 64-bit SYSRET loads CS = base + 16 | 3 and SS = base + 8 | 3.
+EFER_SCE = 1
+STAR_MSR = 0xC0000081
+LSTAR_MSR = 0xC0000082
+SFMASK_MSR = 0xC0000084
+STAR_VALUE = (0x20 << 48) | (0x08 << 32)
+SYSRET_CS = 0x33
+SYSRET_SS = 0x2B
+SFMASK_VALUE = 0x200
+# FS-v1 M3 (task 133): the table grows 4 -> 16; numbers 0..3 stay the
+# frozen APP-v1 set, 4..9 are the file syscalls, 10..15 stay unregistered
+SYS_CALL_MAX = 16
+SYS_VECTOR = 0x100
+
 # opcodes whose mod=00 rm=101 form is followed by an immediate, and how many
 # bytes it takes; without this an operand would be decoded one instruction too
 # early and point at the wrong variable
@@ -113,6 +134,7 @@ REX_TAIL = {0x80: 1, 0xC6: 1, 0xC7: 4}
 
 # the status codes the trap API uses, EAX
 EINVAL = -1
+ENOTSUP = -6
 EPERM = -5
 ENOTREADY = -7
 EALREADY = -8
@@ -125,7 +147,7 @@ SHADOW_SPACE = 32
 STUB_ALIGN = 16
 
 MAGIC = b'K64CPUP1'
-MANIFEST_VERSION = 4
+MANIFEST_VERSION = 5
 
 # manifest names that differ from the label the source exports
 ALIASES = {'cpu_trap_dispatch': 'dispatch'}
@@ -156,6 +178,16 @@ M = [
     'selftest_expect', 'selftest_out',
     'tss_desc_type', 'tss_desc_type_busy',
     'cpu_irq_set_handler', 'irq_handler', 'irq_vector_min',
+    'gdt_user_data', 'gdt_user_code',
+    'cpu_syscall_init', 'cpu_syscall_set_handler',
+    'cpu_user_fault_set_handler', 'cpu_syscall_entry',
+    'syscall_ready', 'user_fault_handler', 'syscall_handlers',
+    'syscall_scratch_rsp',
+    'gdt_user_data_value', 'gdt_user_code_value',
+    'sel_user_data', 'sel_user_code',
+    'star_value', 'sysret_cs', 'sysret_ss', 'sfmask_value',
+    'sys_call_max', 'sys_vector', 'efer_sce',
+    'star_msr', 'lstar_msr', 'sfmask_msr',
 ]
 
 # the trap state variables, in the order the module declares them; the
@@ -173,6 +205,8 @@ FUNCTIONS = [
     'cpu_gdt_init', 'cpu_set_rsp0',
     'cpu_trap_expect', 'cpu_trap_finish', 'cpu_trap_dispatch',
     'cpu_irq_set_handler',
+    'cpu_syscall_init', 'cpu_syscall_set_handler',
+    'cpu_user_fault_set_handler', 'cpu_syscall_entry',
     'cpu_com1_init', 'cpu_com1_putc', 'cpu_com1_puts', 'cpu_com1_puthex',
     'cpu_halt_forever', 'cpu_panic', 'cpu_selftest',
     'cpu_init', 'cpu_idt_init',
@@ -342,6 +376,36 @@ def expected_stub(vec, dispatch, at):
     return out
 
 
+def expected_syscall_head(img, at):
+    """Rebuild the syscall entry head byte by byte, APP-v1.
+
+    Park the untrusted user RSP, switch to TSS.RSP0, push the hardware
+    part of the 184 byte frame (SS, user RSP, RFLAGS, CS, RIP, error 0,
+    the sentinel vector), then the GPR block and CR2 exactly like a trap
+    stub, then the stub call protocol without the RCX load: the entry
+    passes RBP itself after the number dispatch.
+    """
+    scratch = img.at('syscall_scratch_rsp')
+    rsp0 = img.at('tss_rsp0')
+
+    def disp(target, rip):
+        return struct.pack('<i', target - rip)
+
+    out = b'\x48\x89\x25' + disp(scratch, at + 7)    # mov [scratch], rsp
+    out += b'\x48\x8B\x25' + disp(rsp0, at + 14)     # mov rsp, [tss_rsp0]
+    out += b'\x6A' + bytes((SYSRET_SS,))             # push SS
+    out += b'\xFF\x35' + disp(scratch, at + 22)      # push qword [scratch]
+    out += b'\x41\x53'                               # push r11, the RFLAGS
+    out += b'\x6A' + bytes((SYSRET_CS,))             # push CS
+    out += b'\x51'                                   # push rcx, the RIP
+    out += b'\x6A\x00'                               # push error code 0
+    out += b'\x68' + struct.pack('<I', SYS_VECTOR)   # push the sentinel
+    out += STUB_PUSH_GPR
+    out += STUB_SAVE_CR2
+    out += bytes.fromhex('FC 48 89 E5 48 83 E4 F0 48 83 EC 20')
+    return out
+
+
 # ----------------------------------------------------------------------
 # report
 # ----------------------------------------------------------------------
@@ -488,6 +552,36 @@ def check_manifest(rep, img):
     rep.equal('manifest.expect_cr2_mask', img['expect_cr2_mask'], EXPECT_CR2_MASK)
     rep.equal('manifest.expect_cr2_value', img['expect_cr2_value'], EXPECT_CR2_VALUE)
 
+    # APP-v1: the user segments and the syscall ABI, repeated independently
+    rep.equal('manifest.gdt_user_data_value', img['gdt_user_data_value'],
+              GDT_USER_DATA_VALUE)
+    rep.equal('manifest.gdt_user_code_value', img['gdt_user_code_value'],
+              GDT_USER_CODE_VALUE)
+    rep.equal('manifest.sel_user_data', img['sel_user_data'], SEL_USER_DATA)
+    rep.equal('manifest.sel_user_code', img['sel_user_code'], SEL_USER_CODE)
+    rep.equal('manifest.star_value', img['star_value'], STAR_VALUE)
+    rep.equal('manifest.sysret_cs', img['sysret_cs'], SYSRET_CS)
+    rep.equal('manifest.sysret_ss', img['sysret_ss'], SYSRET_SS)
+    rep.equal('manifest.sfmask_value', img['sfmask_value'], SFMASK_VALUE)
+    rep.equal('manifest.sys_call_max', img['sys_call_max'], SYS_CALL_MAX)
+    rep.equal('manifest.sys_vector', img['sys_vector'], SYS_VECTOR)
+    rep.equal('manifest.efer_sce', img['efer_sce'], EFER_SCE)
+    rep.equal('manifest.star_msr', img['star_msr'], STAR_MSR)
+    rep.equal('manifest.lstar_msr', img['lstar_msr'], LSTAR_MSR)
+    rep.equal('manifest.sfmask_msr', img['sfmask_msr'], SFMASK_MSR)
+    rep.check('manifest.sys_vector_past_the_idt',
+              img['sys_vector'] >= IDT_VECTORS,
+              'the sentinel must not collide with a real vector')
+    rep.check('manifest.star_derives_the_sysret_pair',
+              (((img['star_value'] >> 48) + 16) | 3) == img['sysret_cs'] and
+              (((img['star_value'] >> 48) + 8) | 3) == img['sysret_ss'] and
+              ((img['star_value'] >> 32) & 0xFFFF) == SEL_CODE,
+              'SDM volume 2, SYSCALL/SYSRET')
+    rep.check('manifest.sysret_lands_on_the_user_selectors',
+              img['sysret_cs'] == (img['sel_user_code'] | 3) and
+              img['sysret_ss'] == (img['sel_user_data'] | 3),
+              'SYSRET must return into the ring 3 pair')
+
     # the block the self test passes: any error code at all, must be zero;
     # any CR2 at all
     block = img.at('selftest_expect')
@@ -501,7 +595,8 @@ def check_manifest(rep, img):
                   ('trap_expect_rip', 'trap_resume_rip', 'trap_err_mask',
                    'trap_err_value', 'trap_cr2_mask', 'trap_cr2_value',
                    'trap_handler_frame', 'trap_result', 'selftest_expect',
-                   'selftest_out', 'irq_handler')),
+                   'selftest_out', 'irq_handler', 'user_fault_handler',
+                   'syscall_handlers', 'syscall_scratch_rsp')),
               'the dispatcher reads these as qwords')
     rep.check('expect.result_buffers_are_one_frame_each',
               img['selftest_out'] >= img['trap_result'] + FRAME_SIZE,
@@ -518,7 +613,9 @@ def check_manifest(rep, img):
     for name in ('gdt', 'tss', 'idt', 'gdtr', 'idtr', 'data_start', 'data_end',
                  'ist1', 'ist2', 'ist3', 'ist4', 'panic_stack', 'stubs_start',
                  'stubs_end', 'dispatch', 'trap_result', 'selftest_out',
-                 'selftest_expect', 'irq_handler'):
+                 'selftest_expect', 'irq_handler', 'gdt_user_data',
+                 'gdt_user_code', 'user_fault_handler', 'syscall_handlers',
+                 'syscall_scratch_rsp'):
         value = img[name]
         rep.check('layout.%s_inside_image' % name, 0 < value <= len(d),
                   '%#x of %#x' % (value, len(d)))
@@ -546,6 +643,24 @@ def check_gdt(rep, img):
     rep.check('gdt.null_descriptor', u64(d, img['gdt_null']) == 0)
     rep.equal('gdt.code_value', u64(d, img['gdt_code']), GDT_CODE_VALUE)
     rep.equal('gdt.data_value', u64(d, img['gdt_data']), GDT_DATA_VALUE)
+
+    # APP-v1: the ring 3 pair sits right behind the 16 byte TSS descriptor
+    rep.equal('gdt.user_data_offset', img['gdt_user_data'] - gdt, SEL_USER_DATA)
+    rep.equal('gdt.user_code_offset', img['gdt_user_code'] - gdt, SEL_USER_CODE)
+    rep.equal('gdt.user_data_value', u64(d, img['gdt_user_data']),
+              GDT_USER_DATA_VALUE)
+    rep.equal('gdt.user_code_value', u64(d, img['gdt_user_code']),
+              GDT_USER_CODE_VALUE)
+    rep.equal('gdt.user_data_follows_tss', img['gdt_user_data'] - img['gdt_tss'], 16)
+    rep.equal('gdt.ends_after_user_code', gdt + GDT_SIZE - img['gdt_user_code'], 8)
+    for name, slot in (('user_data', 'gdt_user_data'),
+                       ('user_code', 'gdt_user_code')):
+        value = u64(d, img[slot])
+        rep.check('gdt.%s_dpl3' % name, (value >> 45) & 3 == 3,
+                  'a ring 3 segment needs DPL 3, got %d' % ((value >> 45) & 3))
+        rep.check('gdt.%s_image_accessed_clear' % name,
+                  value & GDT_DESC_ACCESSED == 0,
+                  'the image keeps the built value; only hardware sets A')
 
     tss_at = img['gdt_tss']
     limit = u16(d, tss_at)
@@ -759,7 +874,11 @@ REGION_END = {
     'cpu_trap_expect': 'cpu_trap_finish',
     'cpu_trap_finish': 'cpu_trap_dispatch',
     'cpu_trap_dispatch': 'cpu_irq_set_handler',
-    'cpu_irq_set_handler': 'cpu_com1_init',
+    'cpu_irq_set_handler': 'cpu_syscall_init',
+    'cpu_syscall_init': 'cpu_syscall_set_handler',
+    'cpu_syscall_set_handler': 'cpu_user_fault_set_handler',
+    'cpu_user_fault_set_handler': 'cpu_syscall_entry',
+    'cpu_syscall_entry': 'cpu_com1_init',
     'cpu_com1_init': 'cpu_com1_putc',
     'cpu_com1_putc': 'cpu_com1_puts',
     'cpu_com1_puts': 'cpu_com1_puthex',
@@ -821,6 +940,14 @@ def check_functions(rep, img):
         if name == 'cpu_halt_forever':
             rep.check('cpu_halt_forever.masked_halt_loop', body == HALT_BODY,
                       body.hex(' '))
+            continue
+        if name == 'cpu_syscall_entry':
+            # the LSTAR target is never called: it switches to TSS.RSP0
+            # before it touches memory and leaves through SYSRETQ, so it
+            # has no caller frame; check_syscall_api pins it byte by byte
+            rep.check('cpu_syscall_entry.builds_no_frame',
+                      not body.startswith(PROLOGUE),
+                      'the entry must not assume a caller frame')
             continue
         kind, pad = region_tail(img, at, end)
         want = TAIL.get(name, 'ret')
@@ -944,9 +1071,13 @@ def check_functions(rep, img):
     gdt_call = site('cpu_gdt_init')
     rsp0_call = site('cpu_set_rsp0')
     idt_call = site('cpu_idt_init')
+    syscall_call = site('cpu_syscall_init')
     rep.check('cpu_init.calls_gdt_rsp0_idt', -1 < gdt_call < rsp0_call < idt_call,
               'gdt %d, rsp0 %d, idt %d' % (gdt_call, rsp0_call, idt_call))
-    setup = {img['cpu_gdt_init'], img['cpu_set_rsp0'], img['cpu_idt_init']}
+    rep.check('cpu_init.calls_syscall_after_idt', syscall_call > idt_call,
+              'the MSRs need the GDT, RSP0 and the IDT alive first')
+    setup = {img['cpu_gdt_init'], img['cpu_set_rsp0'], img['cpu_idt_init'],
+             img['cpu_syscall_init']}
     rep.check('cpu_init.calls_nothing_else',
               all(target in setup for _, target in sites),
               '%d call sites' % len(sites))
@@ -1181,9 +1312,10 @@ def check_trap_api(rep, img):
               % (handler[0] if handler else -1, copy_at, rip_at))
 
     touched = {n for n in rip_state_refs(img, dispatch_at, dispatch_end,
-                                         TRAP_STATE + ('irq_handler',))}
+                                         TRAP_STATE + ('irq_handler',
+                                                       'user_fault_handler'))}
     rep.check('dispatch.touches_only_the_declared_state',
-              touched == set(TRAP_STATE) | {'irq_handler'},
+              touched == set(TRAP_STATE) | {'irq_handler', 'user_fault_handler'},
               ' '.join(sorted(touched)))
 
     targets = [t for _, t in call_sites(img, dispatch_at, dispatch_end)]
@@ -1201,7 +1333,7 @@ def check_irq_api(rep, img):
     provides the shadow space. No EOI may appear in the dispatcher.
     """
     d = img.data
-    at, end = img.at('cpu_irq_set_handler'), img.at('cpu_com1_init')
+    at, end = img.at('cpu_irq_set_handler'), img.at('cpu_syscall_init')
     body = d[at:end]
     handler = img.at('irq_handler')
 
@@ -1259,13 +1391,22 @@ def check_irq_api(rep, img):
     loads = [t for t, _ in rip_targets(img, dispatch_at, dispatch_end,
                                        b'\x48\x8B\x05')]
     rep.check('dispatch.async_loads_the_handler',
-              loads == [img.at('trap_resume_rip'), handler],
-              'mov rax, [rip+cpu_irq_handler] after the resume RIP load')
+              loads == [img.at('trap_resume_rip'), handler,
+                        img.at('user_fault_handler')],
+              'the resume RIP, the IRQ handler, then the user fault hook')
     rep.check('dispatch.async_null_check',
               bytes.fromhex('48 85 C0') in dispatch,
               'test rax, rax before the call')
+    iload = [p - dispatch_at for t, p in
+             rip_targets(img, dispatch_at, dispatch_end, b'\x48\x8B\x05')
+             if t == handler]
+    rep.check('dispatch.async_null_guard',
+              len(iload) == 1 and
+              dispatch[iload[0] + 7:iload[0] + 10] == bytes.fromhex('48 85 C0') and
+              dispatch[iload[0] + 10] == 0x74,
+              'test rax, rax; jz to the panic right after the IRQ handler load')
     calls = find_all(dispatch, b'\xFF\xD0')
-    rep.equal('dispatch.async_one_indirect_call', len(calls), 1)
+    rep.equal('dispatch.async_and_user_indirect_calls', len(calls), 2)
     if calls:
         call_p = calls[0]
         rep.check('dispatch.async_passes_the_frame',
@@ -1300,9 +1441,300 @@ def check_irq_api(rep, img):
             jump_ok = call_p + 7 + rel == exit_p - 2
         rep.check('dispatch.async_joins_the_shared_exit', jump_ok,
                   'jmp .return_ok, one leave/ret for both paths')
+
+    # ---------------- the ring 3 fault branch, APP-v1 --------------------
+    # the user hook load sits behind the IRQ branch, a null guard falls
+    # back to the pre APP-v1 panic, and the callback joins the same exit
+    uload = [p - dispatch_at for t, p in rip_targets(img, dispatch_at, dispatch_end,
+                                                     b'\x48\x8B\x05')
+             if t == img.at('user_fault_handler')]
+    rep.equal('dispatch.user_hook_load_once', len(uload), 1)
+    if uload and len(calls) == 2:
+        up = uload[0]
+        rep.check('dispatch.user_null_guard',
+                  dispatch[up + 7:up + 10] == bytes.fromhex('48 85 C0') and
+                  dispatch[up + 10] == 0x74,
+                  'test rax, rax; jz to the fallback right after the load')
+        user_call = calls[1]
+        rep.check('dispatch.user_branch_behind_the_irq_branch',
+                  calls[0] < up < user_call,
+                  'irq call %d, user load %d, user call %d'
+                  % (calls[0], up, user_call))
+        rep.check('dispatch.user_passes_the_frame',
+                  dispatch[user_call - 4:user_call] == bytes.fromhex('48 8B 4D F8'),
+                  'mov rcx, [rbp-8] right before call rax')
+        exit_p = find_one(dispatch, EPILOGUE)
+        jump_ok = False
+        if dispatch[user_call + 2] == 0xEB:
+            rel = struct.unpack_from('<b', dispatch, user_call + 3)[0]
+            jump_ok = user_call + 4 + rel == exit_p - 2
+        elif dispatch[user_call + 2] == 0xE9:
+            rel = struct.unpack_from('<i', dispatch, user_call + 3)[0]
+            jump_ok = user_call + 7 + rel == exit_p - 2
+        rep.check('dispatch.user_joins_the_shared_exit', jump_ok,
+                  'jmp .return_ok, one leave/ret for every path')
+        if dispatch[up + 10] == 0x74:
+            rel = struct.unpack_from('<b', dispatch, up + 11)[0]
+            target = up + 12 + rel
+            block = dispatch[target:target + 24]
+            cp = block.find(b'\xE8')
+            rep.check('dispatch.user_null_guard_panics',
+                      target > user_call and cp >= 0 and
+                      dispatch_at + target + cp + 5 +
+                      struct.unpack_from('<i', block, cp + 1)[0] ==
+                      img['cpu_panic'],
+                      'the fallback behind the callback still calls cpu_panic')
     rep.check('dispatch.no_eoi_writes',
               b'\xE6\x21' not in dispatch and b'\xE6\xA1' not in dispatch,
               'the EOI belongs to the IRQ layer, not to the dispatcher')
+
+
+def check_syscall_api(rep, img):
+    """APP-v1: the MSR setup, both registrations and the thin ring 3 entry.
+
+    The entry is pinned byte by byte where it matters: the stack switch,
+    the frame head, the number dispatch and the SYSRET tail. The MSR
+    writes are pinned by their immediates, so a drifted STAR or SFMASK
+    value fails here even when the assembly time assertions are bypassed.
+    """
+    d = img.data
+
+    # ---------------- cpu_syscall_init: four MSRs, all read back --------
+    at, end = img.at('cpu_syscall_init'), img.at('cpu_syscall_set_handler')
+    body = d[at:end]
+    rep.check('syscall_init.checks_cpl',
+              bytes.fromhex('66 8C C8 A8 03') in body, 'mov ax, cs; test al, 3')
+    rep.check('syscall_init.checks_if',
+              bytes.fromhex('9C 58 A9 00 02 00 00') in body,
+              'pushfq; pop rax; test eax, RFLAGS.IF')
+    for name, code in (('eperm', EPERM), ('ealready', EALREADY), ('eio', EIO)):
+        rep.check('syscall_init.reports_%s' % name, mov_eax(code) in body)
+    rep.equal('syscall_init.five_rdmsr', body.count(bytes.fromhex('0F 32')), 5)
+    rep.equal('syscall_init.four_wrmsr', body.count(bytes.fromhex('0F 30')), 4)
+    rep.equal('syscall_init.full_width_read_back',
+              body.count(bytes.fromhex('48 C1 E2 20')), 5)
+    rep.check('syscall_init.efer_read_modify_write',
+              bytes.fromhex('48 83 C8 01') in body and
+              bytes.fromhex('48 3B 45 F8') in body,
+              'or rax, SCE; cmp rax, [rbp-8] preserves every other EFER bit')
+    star_hi = (STAR_VALUE >> 32) & 0xFFFFFFFF
+    rep.check('syscall_init.writes_the_star_pair',
+              (b'\xBA' + struct.pack('<I', star_hi)) in body,
+              'mov edx, STAR[63:32]')
+    rep.check('syscall_init.compares_the_whole_star',
+              (bytes.fromhex('48 B9') + struct.pack('<Q', STAR_VALUE)) in body and
+              bytes.fromhex('48 39 C8') in body,
+              'mov rcx, STAR; cmp rax, rcx')
+    rep.check('syscall_init.lstar_points_at_the_entry',
+              [t for t, _ in rip_targets(img, at, end, b'\x48\x8D\x05')] ==
+              [img.at('cpu_syscall_entry')], 'lea rax, [rip+cpu_syscall_entry]')
+    rep.check('syscall_init.lstar_read_back',
+              bytes.fromhex('48 3B 45 F0') in body, 'cmp rax, [rbp-16]')
+    rep.check('syscall_init.sfmask_clears_exactly_if',
+              (b'\xB8' + struct.pack('<I', SFMASK_VALUE)) in body and
+              (bytes.fromhex('48 3D') + struct.pack('<I', SFMASK_VALUE)) in body,
+              'mov eax, SFMASK; cmp rax, SFMASK')
+    for name, msr, count in (('efer', 0xC0000080, 3), ('star', STAR_MSR, 2),
+                             ('lstar', LSTAR_MSR, 2), ('sfmask', SFMASK_MSR, 2)):
+        rep.equal('syscall_init.selects_%s' % name,
+                  body.count(b'\xB9' + struct.pack('<I', msr)), count)
+    guard = [t for t, _ in rip_targets(img, at, end, b'\x80\x3D', 1)]
+    rep.check('syscall_init.ealready_guard', guard == [img.at('syscall_ready')],
+              'cmp byte [rip+cpu_syscall_ready], 0')
+    armed = [(t, d[p + 6]) for t, p in rip_targets(img, at, end, b'\xC6\x05', 1)]
+    rep.check('syscall_init.marks_ready_once',
+              armed == [(img.at('syscall_ready'), 1)], 'ready <- 1 on success')
+    touched = {n for n in rip_state_refs(img, at, end, ('syscall_ready',))}
+    rep.check('syscall_init.touches_only_the_ready_flag',
+              touched == {'syscall_ready'}, ' '.join(sorted(touched)))
+    rep.check('syscall_init.success_zeroes_rdx',
+              bytes.fromhex('31 C0 31 D2') in body, 'xor eax, eax; xor edx, edx')
+
+    # ---------------- cpu_syscall_set_handler: the table contract -------
+    at, end = img.at('cpu_syscall_set_handler'), img.at('cpu_user_fault_set_handler')
+    body = d[at:end]
+    table = img.at('syscall_handlers')
+    rep.check('syscall_set_handler.checks_cpl',
+              bytes.fromhex('66 8C C8 A8 03') in body)
+    rep.check('syscall_set_handler.checks_if',
+              bytes.fromhex('9C 58 A9 00 02 00 00') in body)
+    for name, code in (('eperm', EPERM), ('einval', EINVAL),
+                       ('ealready', EALREADY)):
+        rep.check('syscall_set_handler.reports_%s' % name, mov_eax(code) in body)
+    rep.check('syscall_set_handler.bounds_the_number',
+              (bytes.fromhex('48 83 F9') + bytes((SYS_CALL_MAX,)) + b'\x73') in body,
+              'cmp rcx, CPU_SYS_CALL_MAX; jae .einval')
+    rep.equal('syscall_set_handler.canonical_check_once',
+              len(find_all(body, bytes.fromhex('48 C1 E8 2F'))), 1)
+    rep.equal('syscall_set_handler.canonical_limit_is_the_kernel_top',
+              len(find_all(body, bytes.fromhex('48 3D') +
+                           struct.pack('<I', KERNEL_TOP))), 1)
+    rep.check('syscall_set_handler.zero_selects_clear',
+              bytes.fromhex('48 85 D2') in body, 'test rdx, rdx')
+    # [rcx*8 + disp32] with no base register: the disp32 is the absolute
+    # address of the table, not a RIP relative displacement
+    guard = find_all(body, bytes.fromhex('48 83 3C CD'))
+    rep.check('syscall_set_handler.ealready_guard',
+              len(guard) == 1 and
+              struct.unpack_from('<i', body, guard[0] + 4)[0] == table - img.base and
+              body[guard[0] + 8] == 0,
+              'cmp qword [cpu_syscall_handlers + rcx*8], 0')
+    stored = find_all(body, bytes.fromhex('48 89 14 CD'))
+    rep.check('syscall_set_handler.stores_into_the_table',
+              len(stored) == 1 and
+              struct.unpack_from('<i', body, stored[0] + 4)[0] == table - img.base,
+              'mov [cpu_syscall_handlers + rcx*8], rdx')
+    cleared = find_all(body, bytes.fromhex('48 C7 04 CD'))
+    rep.check('syscall_set_handler.clears_with_zero',
+              len(cleared) == 1 and
+              struct.unpack_from('<i', body, cleared[0] + 4)[0] == table - img.base and
+              u32(body, cleared[0] + 8) == 0,
+              'mov qword [cpu_syscall_handlers + rcx*8], 0')
+    rep.check('syscall_set_handler.success_zeroes_rdx',
+              bytes.fromhex('31 C0 31 D2') in body)
+    rep.check('syscall_set_handler.table_starts_empty',
+              all(u64(d, table + i * 8) == 0 for i in range(SYS_CALL_MAX)),
+              'no handler until one is registered')
+    rep.check('syscall_set_handler.table_inside_data',
+              img['data_start'] <= table and
+              table + SYS_CALL_MAX * 8 <= img['data_end'])
+
+    # ---------------- cpu_user_fault_set_handler: one slot --------------
+    at, end = img.at('cpu_user_fault_set_handler'), img.at('cpu_syscall_entry')
+    body = d[at:end]
+    slot = img.at('user_fault_handler')
+    rep.check('user_fault_set_handler.checks_cpl',
+              bytes.fromhex('66 8C C8 A8 03') in body)
+    rep.check('user_fault_set_handler.checks_if',
+              bytes.fromhex('9C 58 A9 00 02 00 00') in body)
+    for name, code in (('eperm', EPERM), ('einval', EINVAL),
+                       ('ealready', EALREADY)):
+        rep.check('user_fault_set_handler.reports_%s' % name, mov_eax(code) in body)
+    rep.equal('user_fault_set_handler.canonical_check_once',
+              len(find_all(body, bytes.fromhex('48 C1 E8 2F'))), 1)
+    rep.equal('user_fault_set_handler.canonical_limit_is_the_kernel_top',
+              len(find_all(body, bytes.fromhex('48 3D') +
+                           struct.pack('<I', KERNEL_TOP))), 1)
+    rep.check('user_fault_set_handler.zero_selects_unregister',
+              bytes.fromhex('48 85 C9') in body, 'test rcx, rcx')
+    stored = [t for t, _ in rip_targets(img, at, end, b'\x48\x89\x0D')]
+    rep.check('user_fault_set_handler.stores_the_handler', stored == [slot],
+              'mov [rip+cpu_user_fault_handler], rcx')
+    cleared = [(t, p) for t, p in rip_targets(img, at, end, b'\x48\xC7\x05', 4)
+               if t == slot]
+    rep.check('user_fault_set_handler.clears_with_zero',
+              len(cleared) == 1 and
+              struct.unpack_from('<i', d, cleared[0][1] + 7)[0] == 0,
+              'mov qword [rip+cpu_user_fault_handler], 0')
+    guard = [t for t, _ in rip_targets(img, at, end, b'\x48\x83\x3D', 1)]
+    rep.check('user_fault_set_handler.ealready_guard', guard == [slot],
+              'cmp qword [rip+cpu_user_fault_handler], 0')
+    touched = {n for n in rip_state_refs(img, at, end, ('user_fault_handler',))}
+    rep.check('user_fault_set_handler.touches_only_the_slot',
+              touched == {'user_fault_handler'}, ' '.join(sorted(touched)))
+    rep.check('user_fault_set_handler.success_zeroes_rdx',
+              bytes.fromhex('31 C0 31 D2') in body)
+    rep.check('user_fault_set_handler.slot_starts_empty', u64(d, slot) == 0)
+    rep.check('user_fault_set_handler.slot_inside_data',
+              img['data_start'] <= slot < img['data_end'])
+
+    # ---------------- cpu_syscall_entry: the thin ring 3 path -----------
+    at, end = img.at('cpu_syscall_entry'), img.at('cpu_com1_init')
+    body = d[at:end].rstrip(b'\x00')
+    head = expected_syscall_head(img, at)
+    rep.check('syscall_entry.head_rebuilt_byte_by_byte', body.startswith(head),
+              'park RSP, switch to RSP0, the frame head and the call protocol')
+    rax_off = bytes((FRAME_GPR['rax'],))
+    rep.check('syscall_entry.reads_the_number_from_the_frame',
+              (bytes.fromhex('48 8B 45') + rax_off) in body, 'mov rax, [rbp+120]')
+    rep.check('syscall_entry.bounds_the_number',
+              (bytes.fromhex('48 83 F8') + bytes((SYS_CALL_MAX,)) + b'\x73') in body,
+              'cmp rax, CPU_SYS_CALL_MAX; jae .unknown')
+    loads = find_all(body, bytes.fromhex('48 8B 04 C5'))
+    rep.check('syscall_entry.indexes_the_handler_table',
+              len(loads) == 1 and
+              struct.unpack_from('<i', body, loads[0] + 4)[0] == table - img.base,
+              'mov rax, [cpu_syscall_handlers + rax*8]')
+    rep.check('syscall_entry.null_slot_check',
+              bytes.fromhex('48 85 C0 74') in body,
+              'test rax, rax; jz .unknown')
+    rep.equal('syscall_entry.one_indirect_call',
+              body.count(bytes.fromhex('FF D0')), 1)
+    rep.check('syscall_entry.passes_the_frame',
+              bytes.fromhex('48 89 E9 FF D0') in body, 'mov rcx, rbp; call rax')
+    rep.check('syscall_entry.writes_the_result_back',
+              (bytes.fromhex('48 89 45') + rax_off) in body, 'mov [rbp+120], rax')
+    rep.check('syscall_entry.unknown_returns_enotsup',
+              (bytes.fromhex('48 C7 45') + rax_off +
+               struct.pack('<i', ENOTSUP)) in body,
+              'mov qword [rbp+120], CPU_ENOTSUP')
+    tail = (bytes.fromhex('48 89 EC 48 83 C4 08') +
+            reverse_gpr_block(STUB_PUSH_GPR) +
+            bytes.fromhex('48 83 C4 10 59 48 83 C4 08 41 5B 5C 48 0F 07'))
+    rep.check('syscall_entry.leaves_by_sysretq', body.endswith(tail),
+              'pops undo the frame, RCX/R11 from RIP/RFLAGS, pop rsp, sysretq')
+    code = d[img.at('code_start'):img.at('code_end')]
+    rep.equal('syscall_entry.one_sysret_in_the_module',
+              code.count(bytes.fromhex('48 0F 07')), 1)
+    rep.check('syscall_entry.no_swapgs',
+              bytes.fromhex('0F 01 F8') not in code,
+              'this kernel never programs the GS base')
+
+
+def check_dispatch_boundary(rep, img):
+    """FS-v1 M3: the dispatch and registration boundaries at 16 slots.
+
+    A pure model of the two unsigned compares the entry and the
+    registration perform, replayed over the interesting numbers: the
+    frozen APP-v1 set, the file syscall range, the last legal slot,
+    the first refused number and the wrap-around cases. The byte
+    assertions above pin the compares themselves; this pins the
+    semantics a drifted compare would break.
+    """
+    mask = (1 << 64) - 1
+
+    def dispatch(number, slots):
+        # cmp rax, CPU_SYS_CALL_MAX; jae .unknown  (unsigned)
+        if number >= SYS_CALL_MAX:
+            return ENOTSUP
+        handler = slots.get(number, 0)
+        if handler == 0:
+            return ENOTSUP
+        return handler
+
+    def register(number, slots):
+        # cmp rcx, CPU_SYS_CALL_MAX; jae .einval  (unsigned)
+        if number >= SYS_CALL_MAX:
+            return EINVAL
+        if slots.get(number, 0) != 0:
+            return EALREADY
+        return 0
+
+    empty = {}
+    for number in (0, 3, 4, 9, 10, 15):
+        rep.equal('dispatch_boundary.empty_slot_%d' % number,
+                  dispatch(number, empty), ENOTSUP)
+    rep.equal('dispatch_boundary.first_refused', dispatch(16, empty), ENOTSUP)
+    rep.equal('dispatch_boundary.negative_wraps',
+              dispatch((-1) & mask, empty), ENOTSUP)
+    rep.equal('dispatch_boundary.huge_refused', dispatch(1 << 40, empty), ENOTSUP)
+    live = {9: 0x1234}
+    rep.equal('dispatch_boundary.registered_calls', dispatch(9, live), 0x1234)
+    rep.equal('dispatch_boundary.neighbour_stays_empty',
+              dispatch(10, live), ENOTSUP)
+    rep.equal('dispatch_boundary.last_slot_registerable',
+              register(15, empty), 0)
+    rep.equal('dispatch_boundary.boundary_refused', register(16, empty), EINVAL)
+    rep.equal('dispatch_boundary.negative_register_refused',
+              register((-1) & mask, empty), EINVAL)
+    rep.equal('dispatch_boundary.double_register', register(9, live), EALREADY)
+    # the image itself: all sixteen slots start empty and inside data
+    d = img.data
+    table = img.at('syscall_handlers')
+    rep.check('dispatch_boundary.image_table_shape',
+              all(u64(d, table + i * 8) == 0 for i in range(16)) and
+              table + 16 * 8 <= img['data_end'],
+              'sixteen zero slots, the last one inside the data region')
 
 
 def check_selftest_abi(rep, img):
@@ -1558,7 +1990,7 @@ def check_sources(rep, root):
     files = sorted(p.name for p in module.glob('*'))
     rep.equal('source.file_set', files, [
         'api.inc', 'cpu.asm', 'data.inc', 'gdt_tss.inc',
-        'idt_traps.inc', 'panic.inc', 'selftest.inc'])
+        'idt_traps.inc', 'panic.inc', 'selftest.inc', 'syscall.inc'])
 
     api = (module / 'api.inc').read_text(encoding='utf-8')
     rep.check('source.api_standalone',
@@ -1602,7 +2034,7 @@ def check_sources(rep, root):
 
     order = re.findall(r"^include\s+'([^']+)'", (module / 'cpu.asm').read_text(encoding='utf-8'), re.M)
     rep.equal('source.include_order', order, [
-        'api.inc', 'gdt_tss.inc', 'idt_traps.inc', 'panic.inc',
+        'api.inc', 'gdt_tss.inc', 'idt_traps.inc', 'syscall.inc', 'panic.inc',
         'selftest.inc', 'data.inc'])
 
 
@@ -1618,7 +2050,10 @@ def check_position_independence(rep, asm_, root, out, low):
                  'ist1', 'ist2', 'ist3', 'ist4', 'panic_stack', 'stubs_start',
                  'stubs_end', 'dispatch', 'code_start', 'code_end',
                  'cpu_init', 'cpu_trap_dispatch', 'cpu_panic',
-                 'cpu_irq_set_handler', 'irq_handler'):
+                 'cpu_irq_set_handler', 'irq_handler',
+                 'cpu_syscall_init', 'cpu_syscall_entry', 'gdt_user_data',
+                 'gdt_user_code', 'user_fault_handler', 'syscall_handlers',
+                 'syscall_scratch_rsp'):
         shifted = shifted and hi[name] == low[name] + delta
     rep.check('reloc.labels_shift_by_kernel_base', shifted)
     for name in ('gdt_size', 'tss_size', 'idt_size', 'frame_size', 'vectors'):
@@ -1821,6 +2256,80 @@ FIXTURES = [
      '        test    rax, rax\n'
      '        jz      .unexpected\n',
      '', 'check'),
+
+    # ---- task 113: APP-v1, the user segments and the syscall path ------
+    # a ring 3 data descriptor built DPL 0 can never be loaded from ring 3
+    ('user-data-dpl0', 'kernel/cpu/api.inc',
+     'CPU_GDT_USER_DATA_VALUE = 0x00CFF2000000FFFF',
+     'CPU_GDT_USER_DATA_VALUE = 0x00CF92000000FFFF', 'assemble'),
+    # a STAR base that no longer derives the ring 3 selector pair
+    ('star-drift', 'kernel/cpu/api.inc',
+     'CPU_STAR_VALUE      = (0x20 shl 48) or (0x08 shl 32)',
+     'CPU_STAR_VALUE      = (0x18 shl 48) or (0x08 shl 32)', 'assemble'),
+    # the read back compare drifted even though the constant stayed right
+    ('star-code-drift', 'kernel/cpu/syscall.inc',
+     '        mov     rcx, CPU_STAR_VALUE\n',
+     '        mov     rcx, CPU_STAR_VALUE or (1 shl 48)\n', 'check'),
+    # SFMASK must clear exactly IF, nothing else
+    ('sfmask-drift', 'kernel/cpu/api.inc',
+     'CPU_SFMASK_VALUE    = CPU_RFLAGS_IF         ; SYSCALL clears IF, nothing else',
+     'CPU_SFMASK_VALUE    = CPU_RFLAGS_IF or 0x100', 'assemble'),
+    ('sfmask-code-drift', 'kernel/cpu/syscall.inc',
+     '        mov     eax, CPU_SFMASK_VALUE\n',
+     '        mov     eax, CPU_SFMASK_VALUE or 0x100\n', 'check'),
+    # the entry runs with IF cleared by SFMASK; an STI leaks interrupts
+    # into a half built frame on the kernel stack
+    ('entry-sti-leak', 'kernel/cpu/syscall.inc',
+     'cpu_syscall_entry:\n',
+     'cpu_syscall_entry:\n        sti\n', 'check'),
+    # staying on the untrusted user stack instead of switching to RSP0
+    ('entry-rsp0-drift', 'kernel/cpu/syscall.inc',
+     '        mov     rsp, [cpu_tss_rsp0]\n',
+     '        mov     rsp, [cpu_syscall_scratch_rsp]\n', 'check'),
+    # the frame sentinel must stay 0x100, past every IDT vector
+    ('sentinel-drift', 'kernel/cpu/api.inc',
+     'CPU_SYS_VECTOR      = 0x100',
+     'CPU_SYS_VECTOR      = 0x101', 'check'),
+    # the image must stay built with A clear; only hardware sets it
+    ('user-code-image-accessed', 'kernel/cpu/data.inc',
+     '        dq      CPU_GDT_USER_CODE_VALUE\n',
+     '        dq      (CPU_GDT_USER_CODE_VALUE or CPU_GDT_DESC_ACCESSED)\n',
+     'check'),
+    # an unregistered user fault hook must panic, not call address zero
+    ('user-fault-guard-removed', 'kernel/cpu/idt_traps.inc',
+     '        mov     rax, [cpu_user_fault_handler]\n'
+     '        test    rax, rax\n'
+     '        jz      .user_panic\n',
+     '        mov     rax, [cpu_user_fault_handler]\n'
+     '        test    rax, rax\n', 'check'),
+    # a second registration must be EALREADY, not a silent overwrite
+    ('syscall-ealready-removed', 'kernel/cpu/syscall.inc',
+     '        cmp     qword [cpu_syscall_handlers + rcx*8], 0\n'
+     '        jne     .ealready\n',
+     '', 'check'),
+    # SYSRET is the only way back: IRETQ would consume the wrong frame
+    ('sysret-to-iret', 'kernel/cpu/syscall.inc',
+     '        sysretq\n',
+     '        iretq\n', 'check'),
+
+    # ---- task 133: FS-v1 M3, the 16 slot table and its boundaries ------
+    # shrinking the table back to 4 breaks the manifest shape and both
+    # pinned dispatch compares
+    ('syscall-max-drift', 'kernel/cpu/api.inc',
+     'CPU_SYS_CALL_MAX    = 16',
+     'CPU_SYS_CALL_MAX    = 4', 'check'),
+    # jae -> ja lets number 16 index one slot past the table
+    ('syscall-dispatch-bound-drift', 'kernel/cpu/syscall.inc',
+     '        cmp     rax, CPU_SYS_CALL_MAX\n'
+     '        jae     .unknown\n',
+     '        cmp     rax, CPU_SYS_CALL_MAX\n'
+     '        ja      .unknown\n', 'check'),
+    # jae -> ja lets registration write one slot past the table
+    ('syscall-set-bound-drift', 'kernel/cpu/syscall.inc',
+     '        cmp     rcx, CPU_SYS_CALL_MAX\n'
+     '        jae     .einval\n',
+     '        cmp     rcx, CPU_SYS_CALL_MAX\n'
+     '        ja      .einval\n', 'check'),
 ]
 
 
@@ -1907,6 +2416,8 @@ def main(argv):
     check_uart(rep, img)
     check_trap_api(rep, img)
     check_irq_api(rep, img)
+    check_syscall_api(rep, img)
+    check_dispatch_boundary(rep, img)
     check_selftest_abi(rep, img)
     check_tss_runtime_type(rep, img)
     check_gdt_runtime_mask(rep, img)

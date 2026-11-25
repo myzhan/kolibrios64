@@ -22,7 +22,8 @@
 | kolibrios64 | `ddad22d` | IRQ-v2 IOAPIC + PS/2 键鼠输入闭环（QEMU 验证，见 §8） |
 | kolibrios64 | `ef6a29b` | docs：IRQ-v2 提交哈希补录 |
 | kolibrios64 | `2bd897b` | 桌面壳：最小交互桌面（QEMU 验证，见 §9） |
-| kolibrios64 | `7080025` | FONT-FIX 字体位序修复 + 独立 oracle 门禁（QEMU 验证，当前 HEAD，见 §7.10） |
+| kolibrios64 | `7080025` | FONT-FIX 字体位序修复 + 独立 oracle 门禁（QEMU 验证，见 §7.10） |
+| kolibrios64 | `e2bcbe7` | docs：FONT-FIX 提交哈希补录（当前 HEAD；FS-v1 改动尚未提交，见 §10） |
 | fasm2 | `0253b7f` | macOS x64 自举工作流收口（自举里程碑，含 `aad830d` 自举宿主与自宿主测试） |
 
 以上锚点已用 `git log --oneline` 核对。本文档随后续里程碑一并提交，不单独入库。
@@ -1437,7 +1438,332 @@
 
 ---
 
-## 10. 进行中（占位，待验证通过后补录）
+## 10. FS-v1：VFS + 块设备 + 文件 syscall（提交待补）
+
+> 状态：已通过独立验证（6/6，任务 134）与审查修复复验（8/8 +
+> 全量终值 6/6，任务 139，含 214 项独立交叉复核）；收口审查
+> W1–W4 / S1–S4 全部修复并复验（§10.8）。提交范围：kernel/blk、
+> kernel/fs、kernel/fsys 三个新模块，mm 用户域落地
+> （vmm_map_user_page / vmm_unmap_user_page），user/fsprobe 探针，
+> core 集成（contracts.inc / foundation.inc / kernel64.asm include
+> 顺序），tools/build-fat16-image.py 确定性映像构建器与
+> run-qemu-debug.py --fs/--fsprobe 编排，tests/stage2-blk /
+> stage2-fs / stage2-fsys 三个新门禁及 stage2-mm / stage2-cpu /
+> stage2-desktop 扩展，本文档。提交哈希待产生后补入锚点表
+> （本次不写未产生的哈希）。
+
+### 10.1 背景与用户裁决：APP-v1 期间插入 FS-v1，先冻结文件契约
+
+- **裁决经过（如实记录）**：APP-v1（首个用户程序 CHIP-8）轨一
+  （CPU syscall/Ring 3 地基 + mm 用户域铺垫）进行中，用户
+  插入 FS-v1 里程碑：**先做 VFS + 块设备，再回 APP 集成**——避免
+  程序加载路径按「ROM 嵌入内核映像」定型后返工；APP-v1 集成
+  （kernel/app）挂起，直至 FS 契约冻结。裁决来源为项目决策记录
+  （任务历史），仓库内对应事实：user/chip8 的 ROM 仍为嵌入数据
+  （api.inc 冻结 sha256 摘要断言），tests/stage2-app 为轨一门禁，
+  kernel/app 目录尚未建立。
+- **结果**：FS-v1 三里程碑（M1 块设备 / M2 FAT16 / M3 文件
+  syscall）收口后契约冻结（§10.7），APP-v1 集成解冻（§10.10）。
+- **证据文件**：`kolibrios64/user/chip8/api.inc`（嵌入 ROM 冻结
+  摘要）、`tests/stage2-app/`（轨一门禁）；裁决本身无仓库内
+  文本，按项目决策记录口径标注。
+
+### 10.2 32 位基线澄清：virt_disk.asm 并非 virtio
+
+- **32 位做法（基线澄清）**：`drivers/disk/virt_disk.asm` 名字
+  带 "virt" 但**不是 virtio 驱动**——它是文件映像回环盘：把扇区
+  偏移换算成文件偏移后 `invoke FS_Service`（fn70 文件服务，
+  子功能 0 读文件 / 3 写文件），无任何 virtqueue/PCI 逻辑。
+  真正的参照是两处：`kernel/trunk/blkdev/rd.inc`（ramdisk 后端
+  函数表契约：querymedia/read/write/adjust_cache_size 等槽位，
+  即「后端接缝」的组织方式）与 `kernel/trunk/fs/fat.inc`
+  （FAT 簇链/目录/路径算法）。fn70 是**路径式无状态**接口：
+  每次调用携带完整路径 + 偏移，内核不持有句柄。
+- **64 位做法**：取**句柄式 syscall 4..9**（OPEN/READ/CLOSE/
+  SEEK/STAT/READDIR）：OPEN 返回 fd（0..7 静态表），后续操作按
+  fd 引用，路径解析只发生在 OPEN/STAT。块层后端接缝对齐 rd.inc
+  的函数表思路但收敛为单指针 `blk_backend`（blk_read 叶子分发，
+  §10.4）。
+- **变更理由**：口径是**功能契约层对齐**——保留文件服务的功能
+  语义（读/定位/目录/属性），不是 32 位二进制兼容（后者需兼容
+  模式与 syscall 翻译，独立立项，§5 口径延续）。路径式每次调用
+  重复全量路径解析且 32 位实现依赖 APPDATA slot 等地址位技巧；
+  句柄式把解析收敛到 OPEN，fd 表成为可静态断言的有界状态。
+- **证据文件**：`kolibrios/drivers/disk/virt_disk.asm`（FS_Service
+  转调，read file/write file 子功能）、`kernel/trunk/blkdev/rd.inc`
+  （ramdisk_functions 函数表）、`kernel/trunk/fs/fat.inc`；
+  `kolibrios64/kernel/fs/api.inc`（句柄式 API 头注释）、
+  `kernel/blk/blk.inc`（blk_read 接缝注释）。
+
+### 10.3 路线裁决：legacy PIO + 轮询 + 只读 FAT16
+
+- **64 位做法（冻结路线）**：后端取 **virtio-blk-pci-transitional
+  的 legacy PIO 窗口 + 轮询单 virtqueue**（只读 T_IN），文件系统
+  取**只读 FAT16 8.3 短名**，用户接口取句柄式 syscall 4..9。
+- **被否方案与理由（裁决记录）**：
+  - **AHCI**：32 位有 `blkdev/ahci.inc` 可参照，但 command list/
+    FIS/端口 bring-up 复杂度远超首版需要；
+  - **modern virtio**：virtio 1.0 modern PCI 需解析 capability 链
+    与 64 位队列地址，legacy PIO 窗口在 transitional 设备上免费
+    可得，首版取简；
+  - **可写 FS**：写路径与一致性语义无法在首版闭环验证；
+  - **自定义 FS**：失去与 32 位 fat.inc 算法及标准映像工具的
+    互操作性；
+  - **纯 ramdisk 主线**：rd.inc 式内存盘不能满足 APP 从真实磁盘
+    读文件的语义，只保留为 blk_backend 回退接缝（BootInfo
+    initramfs 字段预留），不作主线。
+- **轮询而非中断的理由**：irq_dispatch 冻结字节不动（§8.4 纯
+  增量纪律），不新增向量（未知向量走 CPU panic 路径），IF 纪律
+  与 STI 所有权枚举（§6.6/§9.4）完全不受影响；blk 模块从不
+  接入任何中断。
+- **v2 坑位**：virtio modern、FAT12/32、LFN、可写支持均列 v2，
+  首版显式拒绝（modern-only 设备拒认、非 FAT16 簇数 EIO、
+  LFN 属性项跳过、写标志 EPERM）。
+- **证据文件**：`kolibrios64/kernel/blk/api.inc`（transitional
+  PCI 身份与 legacy PIO 寄存器表冻结）、`kernel/blk/blk.inc`
+  （revision 0 only / modern-only 拒认注释）、`kernel/fs/api.inc`
+  （FAT16 簇数范围 4085..65524、LFN 掩码）、
+  `kernel/fsys/api.inc`（写访问 EPERM 映射）；
+  `kolibrios/kernel/trunk/blkdev/ahci.inc`（被否方案对照）。
+
+### 10.4 M1 kernel/blk：virtio-blk legacy PIO 后端
+
+- **32 位做法**：无 virtio 驱动（§10.2 澄清）；后端组织参照
+  rd.inc 函数表。
+- **64 位做法**：五文件模块（api.inc / blk.asm / blk.inc /
+  data.inc / selftest.inc）。PCI 枚举走冻结 **CF8/CFC 机制**
+  （bus 0、dev 0..31、function 0），身份四重匹配
+  1AF4:1001 + 子系统 0x0002 + revision 0；BAR0 取 legacy PIO
+  窗口（bit0=IO，掩码 0xFFFC），COMMAND 置 IO|BUS_MASTER。
+  单 virtqueue（queue PFN 写入、QUEUE_NOTIFY 踢门、used ring
+  轮询），vring/DMA bounce 页/请求 scratch 页全在模块数据区，
+  经 BootInfo.kernel_phys_start 换算为 identity 域物理地址。
+  公开接缝 **blk_read(rcx=LBA, rdx=buf, r8=扇区数)** 是叶子分发器
+  （jmp blk_backend），未来 initramfs ramdisk 以同 ABI 替换。
+  自检七腿（容量/BPB 签名/ROM 前缀**读回验证**/参数与范围拒绝/
+  末 LBA/多 chunk 拷贝/请求计数），blk_test_reads 退出值 7。
+- **变更理由**：读回验证使「设备声称完成」必须落到字节真值；
+  单指针后端接缝把「换后端」收敛为一次指针替换而非接口改造；
+  全静态数据区 + 有界轮询使模块无 heap、无中断、无挂死路径。
+- **证据文件**：`kolibrios64/kernel/blk/blk.inc`（PCI/PIO/
+  virtqueue 与 blk_read 接缝）、`api.inc`（契约冻结 + 三副本
+  断言）、`selftest.inc`、`tests/stage2-blk/check.py`、
+  `tests/stage2-blk/virtqueue_model.py`（三环模型 18 项自测）。
+
+### 10.5 M2 kernel/fs：只读 FAT16 单挂载
+
+- **32 位做法**：`fs/fat.inc` FAT 算法 + 多挂载/写路径/LFN
+  （`fs/fs_lfn.inc`）设施。
+- **64 位做法**：五文件模块，单静态挂载。init 解析 LBA0 BPB
+  （仅 512B 扇区，FAT16 簇数范围校验，spf ≤ 32 否则 EIO），
+  **整个第一 FAT 在 init 缓存（16 KiB = 4 页）**；根目录/数据扇区
+  走**单扇区直映射缓存**——任何调用序列的 IO 模式确定，门禁
+  mirror 可逐字节复现。簇链遍历（越界/坏簇 0xFFF7/保留值/跳数
+  预算耗尽 = EIO）、固定根目录 512 项、8.3 大小写不敏感路径
+  解析（0xE5 Kanji 转义折叠）、**8 槽 × 64B 静态 fd 表**、路径
+  预算 128B。**零 heap**：全部状态为模块静态数据；从不 panic、
+  从不 STI、无任何写路径。自检八腿（几何/IBM 全读+EOF/TETRIS/
+  seek 边界/拒绝路径+readdir/BIG 跨簇/stat/扇区计数），
+  fs_test_reads 退出值 24（plain）/48（big）。
+- **变更理由**：只读 + 8.3 使 FAT 算法可与 32 位 fat.inc 及独立
+  Python oracle（fat16_model.py）双向对照；双缓存策略把 IO
+  计数变成确定性推导而非观测；零 heap 使 fs 不依赖 mm heap 的
+  失败语义，错误纪律与 blk 一致（signed EAX，绝不挂死）。
+- **证据文件**：`kolibrios64/kernel/fs/fs.inc`（缓存/簇链/路径
+  解析）、`api.inc`（BPB 偏移表与几何冻结断言）、`selftest.inc`、
+  `tests/stage2-fs/check.py`、`tests/stage2-fs/fat16_model.py`
+  （独立 oracle 15 项自测）；`kolibrios/kernel/trunk/fs/fat.inc`
+  （32 位算法对照）。
+
+### 10.6 M3 kernel/fsys + mm 用户域 + user/fsprobe
+
+- **32 位做法**：fn70 经中断门进入，路径指针直接在内核解引用；
+  无用户域页表契约（§10.2）。
+- **64 位做法**：
+  - **kernel/fsys 适配层**（四文件）：syscall handler 从 184B
+    trap frame 取参（RDI@72/RSI@80/RDX@104/RAX@120，偏移汇编期
+    互断言），把 fs 的 **EAX 状态/RDX 结果约定适配为 RAX 单寄存器
+    返回**；错误经 13 项 fsys_errmap 映射到 K64 五码集（§10.7）。
+    载荷一律经 **4 KiB bounce 页**中转（≤4 KiB chunk 拷贝）；
+    **用户指针全区间校验**：copy_path 逐字节 mm_vmm_resolve
+    （要求 4 KiB 叶 + 有效 US，越界字符串在第一个未映射字节即
+    EFAULT，绝不进入 fs）；copy_to_user 逐 chunk 同规则解析。
+    数据区三页：状态/bounce/syscall 栈。
+  - **mm 用户域落地**：VA 域冻结 **[0x100400000, 0x100800000)**
+    （PML4 slot 0 / PDPT[4]，复用 identity PDPT 空槽，不分裂任何
+    identity 2 MiB 叶）；code 16 KiB US+RX、data 2 MiB US+RW+NX、
+    栈顶 16 KiB；**+3 表预算**（1 PD + 2 PT；原 +4 草案重复计
+    identity PDPT，裁决修正并冻结）；vmm_map_user_page 首映射
+    置 PML4[0] US（anchor 0，单向），identity PDPT/PD 保持
+    supervisor，低 4 GiB identity 有效权限不变。
+  - **user/fsprobe**：首个经 FS syscall 的 Ring 3 探针，9 叶页
+    足迹（4 code + 1 data + 4 stack），**11 腿**（open/read/EOF/
+    seek 三 whence + W1 大偏移/close/stat/readdir/ENOENT/EFAULT/
+    EINVAL/ENOTSUP），probe_mask=0x7FF，8 个证据 qword；全程
+    IF=0，GDT 方案 A 选择子（CS 0x33/SS 0x2B）；每条退出路径
+    执行用户域 teardown（§10.7 W3）。
+- **变更理由**：bounce + 全区间解析使「用户指针」成为逐页可裁决
+  的安全契约而非信任假设；EAX/RDX→RAX 适配把内核内部 ABI 与
+  用户 ABI 显式解耦；teardown 使探针不留足迹，为 APP-v1 退出
+  路径提供地基。
+- **证据文件**：`kolibrios64/kernel/fsys/fsys.inc`（handler/
+  bounce/copy_path/copy_to_user）、`api.inc`（域镜像互断言）、
+  `kernel/mm/api.inc`（用户域裁决注 + map/unmap 契约）、
+  `kernel/mm/vmm.inc`、`user/fsprobe/fsprobe.asm`、`api.inc`、
+  `tests/stage2-fsys/check.py`、`tests/stage2-mm/check.py`。
+
+### 10.7 契约冻结清单（FS-v1 冻结面）
+
+- **SYS_CALL_MAX=16 两处同步**：cpu/api.inc CPU_SYS_CALL_MAX ↔
+  contracts.inc K64_APP_SYS_CALL_MAX 互断言；0..3 保持 APP-v1
+  冻结集，4..9 归 FS；fsys/api.inc 断言 READDIR(9) < MAX。
+- **错误映射表（不照搬 32 位码值）**：fs 的 FS_E* 经 fsys_errmap
+  13 项映射到 K64 五码集（EINVAL/ENOENT/ENOTSUP/EIO/EFAULT）：
+  EPERM→ENOTSUP（只读 v1）、ENOMEM/ENOTREADY/EBUSY→EIO、
+  EEXIST/EALREADY/EOVERFLOW→EINVAL、EFAULT→EFAULT，其余→EIO；
+  contracts.inc 与门禁独立副本三方一致。
+- **S2 POSIX 部分读口径（审查裁决冻结）**：READ/READDIR 只计
+  已交付字节（copy_to_user 成功后才推进总数）；N>0 后遇 EIO/
+  EFAULT 返回 N 而非 -errno；首字节交付前失败才返回负 errno；
+  EOF 返回计数（新 EOF 为 0）。
+- **W1/S1 全宽返回（审查裁决冻结）**：READ/READDIR/SEEK 成功
+  结果以 **RAX 全 64 位**返回（≥2 GiB 偏移原样返回，探针以
+  SEEK_SET 0x100000000 腿实证）；movsxd 符号扩展只服务负 errno
+  路径，成功结果绝不经过它。
+- **W3 用户域 teardown 契约（APP-v1 退出路径地基）**：
+  vmm_unmap_user_page 只服务冻结域，清叶 + invlpg 后自底向上
+  回收全零 PT/PD（mm_pmm_drop_table，table_drops 由调用方计）；
+  identity PDPT/PML4 永不回收，anchor 0 US 单向保持；域外 EPERM/
+  未对齐 EINVAL/无叶 ENOENT（幂等容忍）/大叶 ENOTSUP；成功 rdx
+  返回释放物理地址（帧仍归调用方，经 pmm_free_page 释放）。
+  完整 map+unmap 周期后 allocs-drops 回到基线、恰释放 +3 表。
+  fsys_probe 每条退出路径执行 teardown，证据页先快照进 bounce
+  页再拆域（QEMU judge 字节证据不丢）。
+- **GDT 方案 A 沿用**：用户数据 0x28/代码 0x30（加载值 0x2B/
+  0x33），TSS 保持 0x18——APP-v1 轨一裁决经 FS-v1 M3 落地冻结，
+  未重排 GDT。
+- **证据文件**：`kolibrios64/kernel/core/contracts.inc`（FS-v1
+  M3 段 + task 138 冻结修订尾 append）、`kernel/cpu/api.inc`、
+  `kernel/fsys/api.inc`、`fsys.inc`（errmap）、`kernel/mm/api.inc`、
+  `user/fsprobe/api.inc`、`tests/stage2-fsys/check.py`。
+
+### 10.8 缺陷与修复史（三层验证价值的实证）
+
+- **实现期真缺陷三例（如实记录）**：
+  - **PCI 写端口覆写 edx**：blk_pci_cfg_write 以 `mov dx, port`
+    装端口号，dx 是 edx 低半——待写值被端口号覆写，IO 使能写
+    失效。修复：值先 push rdx 暂存、pop rax 后写出（注释钉住
+    「值必须活过端口装载」）。
+  - **fs_read rbp 双重推进**：.cbyte 逐字节循环内已 inc rbp，
+    循环外又 add rbp, r9，每扇区光标走 2×chunk。单扇区文件
+    （IBM/TETRIS 单 chunk）不暴露故 **plain 映像全绿**；跨簇
+    BIG.BIN 8229B 奇数块留零且越界写坏相邻数据区，由 **QEMU
+    big 映像腿捕获**（fs_test_mask=0xA0）。修复删除循环外 add；
+    门禁补 read.cursor_single_advance 静态钉（read 区禁
+    4C 01 CD）。Python mirror 按切片语义建模，无法复现此类
+    寄存器双重推进——QEMU 是唯一权威执行（§5.4 口径再证）。
+  - **copy_path 二次叠加页偏移**：resolve 记录 rec+48 已含页内
+    偏移，实现又叠加一次 cursor 偏移，读到页内 2×offset 处。
+    **宿主门禁曾编码同一错误序列**（期望与实现锁步同错，静态
+    全绿），由 QEMU 真机暴露（task-133 catch，与 FONT-FIX
+    §7.10 锁步教训同型）。修复后门禁改负向断言
+    path.no_double_page_offset（禁 4C 89 E0 25 FF 0F 00 00）。
+- **收口审查 W1–W4 / S1–S4 全部修复并复验（任务 138/139）**：
+  - **W1/S1**：SEEK/READ/READDIR 32 位截断 → 全宽 RAX 返回
+    （§10.7），字节钉 48 89 D0 / 4C 89 E0 + seek-truncation
+    负向夹具 + 探针大偏移腿真机通过。
+  - **W2**：fs_init 缺 clusters↔spf 覆盖守卫，坏 BPB 可致 FAT
+    缓存越界 → 补 `clusters+2 <= spf*256` 守卫（违反 EIO 且
+    fs_ready 保持 0），模型/mirror 同步同式 +
+    spf_clusters_mismatch 夹具（BPB spf=16 必抓）。
+  - **W3**：探针无 teardown，用户域足迹残留阻塞 APP 集成 →
+    vmm_unmap_user_page 契约冻结 + 探针全退出路径 teardown
+    （§10.7）；teardown-unmap/free-removed 双夹具；同址再映射
+    抽查 25 项 PASS（再映射前须重新 alloc 帧，否则 EPERM——
+    属正确所有权规则，首轮 FAIL 为探针自身缺帧，已修正复跑）。
+  - **W4**：desktop 门禁 file_set 绊线弱化（名字过滤式使陌生
+    文件静默通过）→ 改白名单式：仅目录项与 wallpaper.inc
+    （DESKTOP-v2 轨）豁免，其余陌生文件必 FAIL；沙箱三态实测
+    （真实形态 PASS / 注入 foreign.txt FAIL / 陌生目录豁免），
+    desktop 386 判定不变。
+  - **S2**：部分读口径冻结（§10.7）+ 字节钉 + 模型 EOF 腿。
+  - **S3**：fsys_probe 失败路径 RSP0 恢复（3 次 cpu_set_rsp0 /
+    2 处恢复分支，rsp0-restore-removed 夹具被抓）。
+  - **S4**：foundation 头注释补 FS-v1 M1/M2/M3 阶段叙述。
+- **证据文件**：`kolibrios64/kernel/blk/blk.inc`（写端口修复
+  注释）、`kernel/fs/fs.inc`、`kernel/fsys/fsys.inc`、
+  `tests/stage2-fsys/check.py`（no_double_page_offset 注释）、
+  `tests/stage2-fs/check.py`、`tests/stage2-mm/check.py`、
+  `tests/stage2-desktop/check.py`（W4 白名单注释）；实测回放
+  来自 build/stage2-fsys-fix/、build/stage2-fs-reverify/
+  （w3-remap-spot / w4-tripwire，不入库）。
+
+### 10.9 集成与验证证据（实测，全部 0 失败）
+
+- **foundation 顺序**：desktop 之后插入三阶段——blk_init →
+  boot_protect → blk_selftest → `K64-BLK-OK`；fs_init →
+  boot_protect → fs_selftest → `K64-FS-OK`；fsys_init →
+  boot_protect → fsys_probe（Ring 3 腿，含 teardown）→
+  `K64-FSPROBE-OK`；三者均**强制、无 skip**（区别于 GUI/
+  desktop 的 ENOTSUP 可跳过）。include 序 desktop → blk → fs →
+  fsys → core 收口。leg7 早期表页核算 **3/3/3 不变**（用户域
+  +3 预算在核算基线之后，自计账）。
+- **宿主静态门禁终值**（独立重跑，15 个 rc=0）：**stage2-fsys
+  528（19 负向夹具全执行全被抓）**、**stage2-fs 530**、
+  **stage2-mm 2188（25 夹具）**、stage2-cpu 689、**stage2-blk
+  481**、stage2-irq 317、stage2-input 402、stage2-fb 508、
+  stage2-desktop 386、check-gui-judge 96、boot-contract
+  FAILURES 0、check-wallpaper 12 PASS；模型自测 virtqueue 18 /
+  fat16 15。
+- **映像确定性**：tools/build-fat16-image.py 两遍逐字节一致——
+  plain（8 MiB，512B 扇区/spc 2/reserved 1/双 FAT/spf 32/根 512
+  项/总扇区 16384，/ROMS/ 两 ROM + /PROGRAMS 空目录）sha256
+  `e9e83dad…bc42b`；big（manifest 追加 BIG.BIN 8229B，冻结公式
+  ((i*7+3)&0xFF)，sha `f799e250…`）sha256 `a8102805…00543`；
+  与实现者 build/fs-v1/disk.img、disk-big.img 逐字节相同。
+- **QEMU TCG 端到端矩阵**（唯一真实执行环境，§5.4 口径延续）：
+  **128/256 MiB × plain/big 四组合全 PASS**（独立验证端口
+  12631..12634、复验 12641..12644，均用验证侧自建新映像）。
+  每组合：**13 串口标记**按序各恰一次（BOOT/CPU/PMM/VMM/HEAP/
+  IRQ/INPUT/GUI/DESKTOP/BLK/FS/FSPROBE/FOUNDATION）；
+  blk_test_reads=34(plain)/58(big)、fs_test_reads=24/48、mask
+  全 0、capacity=0x4000；**probe_mask=0x7FF**、exit_code=0、
+  **table_delta=3**、8 证据 qword + stat/dirent/四 errno 全真；
+  **teardown 收据**四组合全 [ok]：用户 VA（code/data/栈顶）读
+  均失败、fsys_pages_held=0、fsys_pages 72B 全零、
+  fsys_table_released=3、净 allocs-drops 回基线、**PDPT[4]==0**、
+  anchor 0 US 保持；ROM/BIG 缓冲经 gdbstub 与源逐字节比对，
+  独立侧另以自写 FAT16 解析器从 backing 映像提取比对；冻结
+  判定值四组合不变（CPU 0x5FF、ticks 0xb、kbd/mouse 6/6、
+  cursor (557,411)、v21=6/v2c=18、三帧 PPM 像素断言全 [ok]、
+  无 triple fault）。
+- **独立验证与复验**：独立验证 **6/6**（任务 134，cross-check
+  142 项）；审查修复复验 **8/8 + 全量终值 6/6**（任务 139，
+  cross-check **214 项**全 PASS）。两轮均纯验证零修改、不采信
+  实现者日志。
+- **证据文件**：`kolibrios64/kernel/core/foundation.inc`、
+  `contracts.inc`、`kernel/blk|fs|fsys/`、`user/fsprobe/`、
+  `tests/stage2-blk|fs|fsys/`、`tools/build-fat16-image.py`、
+  `tools/run-qemu-debug.py`；实测数字来自
+  build/stage2-fs-verify/REPORT.md、build/stage2-fs-reverify/
+  REPORT.md 及其 gates/、images/、qemu-* 产物（不入库）。
+
+### 10.10 已知遗留与展望（如实记录，不粉饰）
+
+- **APP-v1 集成解冻**：FS 契约已冻结，kernel/app 从 FS 读
+  chip8.bin（build-fat16-image.py --manifest 追加，映像 sha 随之
+  变化属预期）；user/chip8 嵌入 ROM 改走 **/ROMS/** 文件路径；
+  W3 teardown 契约即 APP 退出路径地基；READDIR 为桌面菜单
+  （程序列表）预留。范围待 APP-v1 集成里程碑启动时冻结。
+- **v2 坑位**：virtio modern、FAT12/32、LFN、可写 FS（§10.3）；
+  blk_backend 的 initramfs ramdisk 回退接缝已预留未启用。
+- **只读限制**：写标志 EPERM、modern-only 设备拒认、非 512B
+  扇区/非 FAT16 几何 EIO——均为显式冻结拒绝而非静默降级。
+- FS-v1 提交哈希待产生后补入锚点表（本次不写未产生的哈希）。
+
+---
+
+## 11. 进行中（占位，待验证通过后补录）
 
 ### IRQ-v1：LAPIC 定时器闭环 —— 已完成
 
@@ -1456,7 +1782,20 @@
 ### 最小桌面壳 —— 已完成
 
 - 已收口并补录为 §9；提交哈希待产生后补入锚点表（本次不写
-  未产生的哈希）。
+  未产生的哈希）。（哈希已产生：`2bd897b`，已入锚点表。）
+
+### FS-v1：VFS + 块设备 + 文件 syscall —— 已完成
+
+- 已收口并补录为 §10；独立验证 6/6 与审查修复复验 8/8 通过，
+  提交哈希待产生后补入锚点表（本次不写未产生的哈希）。
+  APP-v1 集成由此解冻（§10.1/§10.10）。
+
+### APP-v1：首个用户程序（CHIP-8）—— 进行中
+
+- 轨一（CPU syscall/Ring 3 地基 + mm 用户域铺垫）已落地；
+  集成（kernel/app）曾因 FS-v1 插入裁决挂起，FS 契约冻结后
+  解冻：从 FS 读 chip8.bin、ROM 改走 /ROMS/（§10.10）。范围待
+  该里程碑收口时冻结。
 
 ### 用户态窗口系统与进程调度 —— 路线图后续
 
@@ -1490,5 +1829,7 @@
 收口审查通过之后（已随提交 ddad22d 入库）；桌面壳章节补录于其独立
 验证与收口审查通过之后（已随提交 2bd897b 入库）；FONT-FIX 字体位序
 修复补录于其独立验证（7/7）与收口审查（无阻断、无必改）通过之后
-（§7.5 勘误 + §7.10，已随提交 7080025 入库）。后续
+（§7.5 勘误 + §7.10，已随提交 7080025 入库）；FS-v1 章节补录于其
+独立验证（6/6）与审查修复复验（8/8，含 214 项交叉复核）通过之后
+（§10，提交哈希待补）。后续
 每个里程碑收口时，由变更史官增补对应小节并更新提交锚点表。*

@@ -56,6 +56,39 @@ Modes:
                  (one delivery per 8042 byte). Any parse/read failure,
                  or a timeout without a terminal marker, is a FAIL with
                  the reason printed.
+                 FS-v1 M1 appends the eleventh marker K64-BLK-OK between
+                 DESKTOP and FOUNDATION; the ten frozen markers keep
+                 their order and verdict values untouched. A
+                 virtio-blk-pci-transitional device backed by
+                 build/fs-v1/disk.img is attached in BOTH modes, and
+                 after the terminal marker the blk counters plus both
+                 512-byte guest test buffers are read through the
+                 gdbstub and compared byte for byte against the image
+                 sectors (LBA0 BPB and the LBA101 ROM pattern); the
+                 evidence stays in blk-evidence.log in the artifact
+                 directory.
+                 FS-v1 M2 appends the twelfth marker K64-FS-OK between
+                 BLK and FOUNDATION. With --fs the fs counters and the
+                 guest file buffers (IBM.CH8, TETRIS1.CH8, the BIG.BIN
+                 cross-cluster span, readdir and stat evidence) are read
+                 through the gdbstub and compared byte for byte against
+                 the ROM source files and the attached image; the
+                 evidence stays in fs-evidence.log. --disk selects the
+                 backing image (default build/fs-v1/disk.img; the
+                 BIG.BIN leg uses build/fs-v1/disk-big.img, a separately
+                 frozen sha). The blk_test_reads expectation derives
+                 from the unconditional fs legs: 34 plain / 58 BIG.
+                 FS-v1 M3 appends the thirteenth marker K64-FSPROBE-OK
+                 between FS and FOUNDATION. With --fsprobe the fsys
+                 counters, the eight evidence qwords and the Ring 3
+                 guest data page (read/stat/readdir landing buffers and
+                 the four errno verdicts) are read through the gdbstub;
+                 the IBM.CH8 payload is compared byte for byte against
+                 the ROM source and the image, the dirents against the
+                 raw image directory. The evidence stays in
+                 fsprobe-evidence.log. The frozen fs/blk counter totals
+                 are snapshotted and restored by the probe, so every
+                 M1/M2 verdict value stays untouched.
   --gui-skip     expect the non-fatal GUI skip path instead: the eight
                  non-GUI/non-desktop OK markers plus exactly one
                  K64-GUI-SKIP and one K64-DESKTOP-SKIP between INPUT and
@@ -86,6 +119,7 @@ Environment: FASMG / FASM2_DIR / FASM1 are forwarded to build_fasm2.sh.
 import argparse
 import atexit
 import datetime
+import hashlib
 import os
 import re
 import shutil
@@ -301,6 +335,104 @@ INPUT_FORENSIC_SYMBOLS = (("input_test_mouse_last", 8),
                           ("input_mouse_x", 8), ("input_mouse_y", 8),
                           ("input_mouse_bad", 8), ("input_mouse_state", 8),
                           ("input_mouse_b1", 8), ("input_mouse_b2", 8))
+
+# FS-v1 M1: the eleventh OK marker and its evidence symbols. Kept OUT of
+# MARKERS / COUNTER_SYMBOLS / EXPECTED_COUNTERS on purpose: the frozen
+# ten-marker judge fixtures (tests/stage2-fb/check-gui-judge.py) stay
+# untouched; judge() asserts the blk verdict only when blk= is passed.
+# The image hash is the frozen task-130 build-fat16-image.py output.
+BLK_OK_MARKER = "K64-BLK-OK"
+BLK_IMAGE_SHA256 = ("e9e83dad3f6d5193ac15c7a35834cc51"
+                    "90ca34e978b537d80be9fa9beb7bc42b")
+BLK_TEST_DATA_LBA = 101
+BLK_TEST_CAPACITY = 16384
+BLK_TEST_READS = 7
+BLK_COUNTER_SYMBOLS = (("blk_test_mask", 8), ("blk_test_reads", 8),
+                       ("blk_capacity", 8), ("blk_ready", 8),
+                       ("blk_qnum", 8),
+                       ("blk_test_lba0_buf", 512),
+                       ("blk_test_data_buf", 512))
+# bring-up diagnostics, logged as evidence only (never judged): they
+# pinpoint a failed scan/bring-up step without touching the kernel
+BLK_DIAG_SYMBOLS = (("blk_iobase", 8), ("blk_pci_addr", 8),
+                    ("blk_vring_phys", 8), ("blk_backend", 8))
+
+# FS-v1 M2: the twelfth OK marker and its evidence symbols. Kept OUT of
+# MARKERS / COUNTER_SYMBOLS / EXPECTED_COUNTERS exactly like the M1 blk
+# block: the frozen ten-marker judge fixtures stay untouched; judge()
+# asserts the fs verdict only when fs= is passed (--fs). The foundation
+# runs fs_init/fs_selftest unconditionally after the blk leg, so the
+# blk_test_reads total now includes the fs init chunks (1 BPB + 4 FAT)
+# and every fs single-sector cache miss: 7 + 5 + 22 = 34 on the plain
+# image, 7 + 5 + 46 = 58 on the BIG.BIN image (the stage2-fs gate mirror
+# derives the same totals sector for sector).
+FS_OK_MARKER = "K64-FS-OK"
+FS_IMAGE_SHA256 = ("e9e83dad3f6d5193ac15c7a35834cc51"
+                   "90ca34e978b537d80be9fa9beb7bc42b")
+FS_BIG_IMAGE_SHA256 = ("a810280509cd05f67dce37dc46e67cbf"
+                       "eb2e9432b73a105108f9a2d298500543")
+FS_TEST_IBM_SIZE = 132
+FS_TEST_TETRIS_SIZE = 494
+FS_TEST_BIG_SIZE = 8229
+FS_TEST_CLUSTERS = 8143
+FS_TEST_READS = 24
+FS_TEST_READS_BIG = 48
+FS_INIT_BLK_CHUNKS = 5
+FS_MISS_PLAIN = 22
+FS_MISS_BIG = 46
+BLK_TEST_READS_FS = BLK_TEST_READS + FS_INIT_BLK_CHUNKS + FS_MISS_PLAIN
+BLK_TEST_READS_FS_BIG = BLK_TEST_READS + FS_INIT_BLK_CHUNKS + FS_MISS_BIG
+# the frozen BIG.BIN payload formula of tools/build-fat16-image.py
+FS_BIG_DATA = bytes(((i * 7 + 3) & 0xFF) for i in range(FS_TEST_BIG_SIZE))
+FS_COUNTER_SYMBOLS = (("fs_test_mask", 8), ("fs_test_reads", 8),
+                      ("fs_test_big_present", 8), ("fs_ready", 8),
+                      ("fs_clusters", 8),
+                      ("fs_test_ibm_buf", 512),
+                      ("fs_test_tetris_buf", 512),
+                      ("fs_test_big_buf", 9216),
+                      ("fs_test_dirents", 96),
+                      ("fs_test_stat", 64))
+# the ROM source files the guest buffers are compared against, plus the
+# cluster-2 LBA of each file on the frozen geometry (IBM cluster 4 =
+# LBA 101, TETRIS1 cluster 5 = LBA 103)
+FS_ROM_SOURCES = (("ibm", "user/chip8/roms/ibm.ch8",
+                   FS_TEST_IBM_SIZE, 101, "fs_test_ibm_buf"),
+                  ("tetris", "user/chip8/roms/tetris1.ch8",
+                   FS_TEST_TETRIS_SIZE, 103, "fs_test_tetris_buf"))
+
+# FS-v1 M3: the thirteenth OK marker and its evidence symbols. Kept OUT
+# of MARKERS / COUNTER_SYMBOLS / EXPECTED_COUNTERS exactly like the M1/M2
+# blocks: the frozen ten-marker judge fixtures stay untouched; judge()
+# asserts the fsprobe verdict only when fsprobe= is passed (--fsprobe).
+# The foundation runs fsys_init/fsys_probe unconditionally after the fs
+# leg; the probe snapshots and restores fs_test_reads/blk_test_reads, so
+# the M2 finals (24/48, 34/58) are still what the blk/fs blocks read.
+FSPROBE_OK_MARKER = "K64-FSPROBE-OK"
+FSYS_TABLE_BUDGET = 3
+FSYS_FP_MASK_ALL = 0x7FF
+FSYS_USER_CODE_BASE = 0x100400000
+FSYS_USER_DATA_BASE = 0x100600000
+FSYS_USER_STACK_TOP = 0x100800000
+FSYS_COUNTER_SYMBOLS = (("fsys_ready", 8), ("fsys_probe_mask", 8),
+                        ("fsys_probe_fail", 8), ("fsys_exit_code", 8),
+                        ("fsys_table_base", 8), ("fsys_table_delta", 8),
+                        ("fsys_saved_fs_reads", 8),
+                        ("fsys_saved_blk_reads", 8),
+                        ("fsys_probe_evidence", 64),
+                        # task 138 W3: the teardown receipts and the
+                        # bounce snapshot of the guest data page (the
+                        # original user VA is unmapped after the probe)
+                        ("fsys_pages_held", 8), ("fsys_drops_base", 8),
+                        ("fsys_table_released", 8), ("fsys_pages", 72),
+                        ("fsys_bounce", 4096), ("mm_vmm_state", 56))
+# the guest evidence page layout, frozen in user/fsprobe/api.inc; the
+# kernel copy fsys_probe_evidence mirrors guest +16..+80 (8 qwords)
+FSYS_FP_EVIDENCE_WANT = (0, 132, 0, 124, 132, 1, 64, (1 << 64) - 3)
+FSYS_GUEST_ERRNO = (("enoent", 72, -3), ("efault", 80, -11),
+                    ("einval", 88, -1), ("enotsup", 96, -6))
+FSYS_GUEST_READBUF = (128, 512)
+FSYS_GUEST_STATBUF = (640, 64)
+FSYS_GUEST_DIRENTS = (704, 256)
 
 _qemu_proc = None
 
@@ -563,6 +695,431 @@ def read_counters(port, addrs):
     return counters, errors
 
 
+def collect_blk_evidence(args, art, counter_addrs):
+    """FS-v1 M1 evidence: the blk counters plus both 512-byte guest test
+    buffers, read through the gdbstub while the halted kernel still
+    lives, compared byte for byte against the matching disk.img sectors
+    (LBA0 BPB and the LBA101 ROM pattern). Returns a verdict dict for
+    judge(); every read failure is recorded, never silently skipped.
+    blk-evidence.log stays in the artifact directory as evidence.
+    """
+    ev = {"errors": []}
+    image_path = args.disk
+    image = None
+    try:
+        with open(image_path, "rb") as f:
+            image = f.read()
+        ev["image_sha256"] = hashlib.sha256(image).hexdigest()
+        ev["expect_big"] = ev["image_sha256"] == FS_BIG_IMAGE_SHA256
+        if ev["image_sha256"] not in (FS_IMAGE_SHA256, FS_BIG_IMAGE_SHA256):
+            ev["errors"].append("disk image sha256 matches neither frozen "
+                                "FS-v1 image (plain or BIG.BIN)")
+    except OSError as e:
+        ev["errors"].append(f"disk image read: {e}")
+    for name, size in BLK_COUNTER_SYMBOLS:
+        if name not in counter_addrs:
+            ev["errors"].append(f"{name}: address unresolved")
+            continue
+        try:
+            raw = gdb_read_mem(args.port, counter_addrs[name], size)
+        except OSError as e:
+            ev["errors"].append(f"{name}: {e}")
+            continue
+        # the 'm' reply is the raw memory byte string; for the sector
+        # buffers the int round trip restores exactly those bytes
+        ev[name] = raw.to_bytes(size, "little") if size == 512 else raw
+    diag = []
+    for name, size in BLK_DIAG_SYMBOLS:
+        if name not in counter_addrs:
+            continue
+        try:
+            diag.append(f"{name} = {gdb_read_mem(args.port, counter_addrs[name], size):#x}")
+        except OSError as e:
+            diag.append(f"{name}: {e}")
+    try:
+        info_pci = monitor_command(art, "info pci")
+    except OSError as e:
+        info_pci = f"info pci failed: {e}"
+    for name, lba, key in (("blk_test_lba0_buf", 0, "lba0_match"),
+                           ("blk_test_data_buf", BLK_TEST_DATA_LBA,
+                            "data_match")):
+        buf = ev.get(name)
+        if buf is None or image is None:
+            ev[key] = False
+            continue
+        want = image[lba * 512:(lba + 1) * 512]
+        ev[key] = buf == want
+        if not ev[key]:
+            first = next((i for i in range(512) if buf[i] != want[i]), -1)
+            ev["errors"].append(
+                f"{name} vs disk.img LBA {lba}: first diff at byte {first}")
+    lines = [f"image sha256 = {ev.get('image_sha256', '(unreadable)')}"]
+    for name, size in BLK_COUNTER_SYMBOLS:
+        v = ev.get(name)
+        if v is None:
+            lines.append(f"{name} = (unreadable)")
+        elif size == 512:
+            lines.append(f"{name}: 512 bytes, first 16 = {v[:16].hex()}")
+        else:
+            lines.append(f"{name} = {v:#x}")
+    lines.append(f"LBA0 BPB byte compare    : {ev['lba0_match']}")
+    lines.append(f"LBA{BLK_TEST_DATA_LBA} data byte compare : "
+                 f"{ev['data_match']}")
+    lines.extend(diag)
+    lines.append("monitor info pci:")
+    lines.extend("  " + ln for ln in info_pci.splitlines())
+    lines.extend("error: " + e for e in ev["errors"])
+    with open(os.path.join(art, "blk-evidence.log"), "w",
+              encoding="ascii") as f:
+        f.write("\n".join(lines) + "\n")
+    ev["log"] = lines
+    return ev
+
+
+def gdb_read_bytes(port, addr, size, chunk=4096):
+    """Read `size` guest bytes as a bytes object, chunked so every 'm'
+    reply stays well under the QEMU gdbstub packet buffer (the 9216
+    byte BIG.BIN buffer would otherwise overflow a single reply)."""
+    out = bytearray()
+    off = 0
+    while off < size:
+        n = min(chunk, size - off)
+        v = gdb_read_mem(port, addr + off, n)
+        out += v.to_bytes(n, "little")
+        off += n
+    return bytes(out)
+
+
+def fs_dirent(image, lba, slot):
+    """One fixed 32-byte readdir entry derived from the raw on-disk
+    directory slot: attr u32@0, pad@4, size u64@8, raw 8.3 name@16,
+    five zero pad bytes. Independent of the kernel: the host parses
+    the image directly, exactly like the stage2-fs oracle."""
+    e = image[lba * 512 + slot * 32:lba * 512 + (slot + 1) * 32]
+    attr = e[11]
+    size, = struct.unpack_from("<I", e, 28)
+    return struct.pack("<IIQ", attr, 0, size) + e[:11] + b"\x00" * 5
+
+
+def collect_fs_evidence(args, art, counter_addrs):
+    """FS-v1 M2 evidence: the fs counters plus the guest test buffers,
+    read through the gdbstub while the halted kernel still lives.
+    IBM.CH8/TETRIS1.CH8 are compared byte for byte against BOTH the ROM
+    source files and the matching image sectors; BIG.BIN against the
+    frozen payload formula and the image cluster span; the readdir and
+    stat buffers against entries derived from the raw image directories.
+    fs-evidence.log stays in the artifact directory as evidence.
+    """
+    ev = {"errors": []}
+    image = None
+    try:
+        with open(args.disk, "rb") as f:
+            image = f.read()
+        ev["image_sha256"] = hashlib.sha256(image).hexdigest()
+        ev["expect_big"] = ev["image_sha256"] == FS_BIG_IMAGE_SHA256
+    except OSError as e:
+        ev["errors"].append(f"disk image read: {e}")
+    for name, size in FS_COUNTER_SYMBOLS:
+        if name not in counter_addrs:
+            ev["errors"].append(f"{name}: address unresolved")
+            continue
+        try:
+            raw = gdb_read_bytes(args.port, counter_addrs[name], size)
+        except OSError as e:
+            ev["errors"].append(f"{name}: {e}")
+            continue
+        ev[name] = raw if size > 8 else int.from_bytes(raw, "little")
+    # ROM file legs: guest buffer == source file == image sector span,
+    # and the untouched tail of each 512-byte buffer stays zero
+    for key, rel, size, lba, bufname in FS_ROM_SOURCES:
+        buf = ev.get(bufname)
+        src = None
+        try:
+            with open(os.path.join(REPO, rel), "rb") as f:
+                src = f.read()
+        except OSError as e:
+            ev["errors"].append(f"{rel} read: {e}")
+        ok = (buf is not None and src is not None and image is not None
+              and len(src) == size
+              and buf[:size] == src
+              and buf[:size] == image[lba * 512:lba * 512 + size]
+              and buf[size:] == b"\x00" * (512 - size))
+        ev[key + "_match"] = ok
+        if not ok:
+            ev["errors"].append(f"{bufname} vs {rel} / image LBA {lba}")
+    # BIG.BIN leg: on the big image the 8229 payload bytes must match
+    # the formula and the contiguous cluster 6..14 span (LBA 105..122),
+    # the buffer tail stays zero; on the plain image the whole buffer
+    # was never written and must be all zero
+    big = ev.get("fs_test_big_buf")
+    if ev.get("expect_big"):
+        ok = (big is not None and image is not None
+              and big[:FS_TEST_BIG_SIZE] == FS_BIG_DATA
+              and big[:FS_TEST_BIG_SIZE] ==
+              image[105 * 512:105 * 512 + FS_TEST_BIG_SIZE]
+              and big[FS_TEST_BIG_SIZE:] ==
+              b"\x00" * (9216 - FS_TEST_BIG_SIZE))
+        ev["big_match"] = ok
+        if not ok:
+            ev["errors"].append("fs_test_big_buf vs BIG.BIN formula/image")
+            if big is not None:
+                diff = next((i for i in range(FS_TEST_BIG_SIZE)
+                             if big[i] != FS_BIG_DATA[i]), -1)
+                fill = next((i for i in range(9216 - 1, -1, -1)
+                             if big[i] != 0), -1) + 1
+                ev["errors"].append(
+                    f"big forensic: first diff at {diff}, last nonzero "
+                    f"byte + 1 = {fill}")
+                if diff >= 0:
+                    lo = max(0, diff - 8)
+                    ev["errors"].append(
+                        "big got  " + big[lo:diff + 8].hex())
+                    ev["errors"].append(
+                        "big want " + FS_BIG_DATA[lo:diff + 8].hex())
+                blocks = []
+                for k in range(18):
+                    seg = big[k * 512:(k + 1) * 512]
+                    want = FS_BIG_DATA[k * 512:(k + 1) * 512]
+                    tag = ("ok" if seg == want else
+                           "zero" if seg == b"\x00" * 512 else "bad")
+                    blocks.append(f"{k}:{tag}")
+                ev["errors"].append("big blocks " + " ".join(blocks))
+    else:
+        ok = big is not None and big == b"\x00" * 9216
+        ev["big_zero"] = ok
+        if not ok:
+            ev["errors"].append("fs_test_big_buf not pristine on plain image")
+    # readdir evidence: leg 4 (9) leaves the two /ROMS entries in the
+    # buffer; leg 4 (10) overwrites the first slot with the BIG.BIN
+    # entry on the big image only (a 0-byte readdir never writes), so
+    # bytes 32..63 keep the TETRIS1 entry and 64..96 stay zero
+    dirents = ev.get("fs_test_dirents")
+    if dirents is not None and image is not None:
+        ibm_ent = fs_dirent(image, 97, 2)     # /ROMS slot 2: IBM.CH8
+        tetris_ent = fs_dirent(image, 97, 3)  # /ROMS slot 3: TETRIS1.CH8
+        if ev.get("expect_big"):
+            big_ent = fs_dirent(image, 99, 2)  # /PROGRAMS slot 2: BIG.BIN
+            want = big_ent + tetris_ent + b"\x00" * 32
+        else:
+            want = ibm_ent + tetris_ent + b"\x00" * 32
+        ev["dirents_match"] = dirents == want
+        if not ev["dirents_match"]:
+            ev["errors"].append("fs_test_dirents vs image directory entries")
+    else:
+        ev["dirents_match"] = False
+    # stat evidence: leg 6 ends on stat('/'), the synthesized root: size
+    # 0, attr DIRECTORY, every other byte zero
+    stat = ev.get("fs_test_stat")
+    want_stat = struct.pack("<QI", 0, 0x10) + b"\x00" * 52
+    ev["stat_match"] = stat == want_stat
+    if not ev["stat_match"]:
+        ev["errors"].append("fs_test_stat vs the synthesized root stat")
+    lines = [f"image sha256 = {ev.get('image_sha256', '(unreadable)')}",
+             f"expect_big = {ev.get('expect_big')}"]
+    for name, size in FS_COUNTER_SYMBOLS:
+        v = ev.get(name)
+        if v is None:
+            lines.append(f"{name} = (unreadable)")
+        elif size > 8:
+            lines.append(f"{name}: {size} bytes, first 16 = {v[:16].hex()}")
+        else:
+            lines.append(f"{name} = {v:#x}")
+    for key in ("ibm_match", "tetris_match", "big_match", "big_zero",
+                "dirents_match", "stat_match"):
+        if key in ev:
+            lines.append(f"{key:14s}: {ev[key]}")
+    lines.extend("error: " + e for e in ev["errors"])
+    with open(os.path.join(art, "fs-evidence.log"), "w",
+              encoding="ascii") as f:
+        f.write("\n".join(lines) + "\n")
+    ev["log"] = lines
+    return ev
+
+
+def collect_fsprobe_evidence(args, art, counter_addrs):
+    """FS-v1 M3 evidence: the fsys counters, the eight kernel-side
+    evidence qwords and the Ring 3 guest data page, read through the
+    gdbstub while the halted kernel still lives. The guest page is
+    supervisor-readable through the shared page tables: the IBM.CH8
+    landing buffer is compared byte for byte against the ROM source and
+    image LBA 101, the stat buffer against size 132 / attr 1, the readdir
+    buffer against the raw image /ROMS entries, and the four errno
+    verdicts against the frozen K64 values. fsprobe-evidence.log stays
+    in the artifact directory as evidence.
+    """
+    ev = {"errors": []}
+    image = None
+    try:
+        with open(args.disk, "rb") as f:
+            image = f.read()
+        ev["image_sha256"] = hashlib.sha256(image).hexdigest()
+        ev["expect_big"] = ev["image_sha256"] == FS_BIG_IMAGE_SHA256
+    except OSError as e:
+        ev["errors"].append(f"disk image read: {e}")
+    for name, size in FSYS_COUNTER_SYMBOLS:
+        if name not in counter_addrs:
+            ev["errors"].append(f"{name}: address unresolved")
+            continue
+        try:
+            raw = gdb_read_bytes(args.port, counter_addrs[name], size)
+        except OSError as e:
+            ev["errors"].append(f"{name}: {e}")
+            continue
+        ev[name] = raw if size > 8 else int.from_bytes(raw, "little")
+    # the kernel copy of the guest evidence head (+16..+80)
+    raw = ev.get("fsys_probe_evidence")
+    if raw is not None:
+        got = struct.unpack("<8Q", raw)
+        ev["evidence_match"] = got == FSYS_FP_EVIDENCE_WANT
+        if not ev["evidence_match"]:
+            ev["errors"].append(
+                "fsys_probe_evidence = " + repr(tuple(hex(v) for v in got)))
+    else:
+        ev["evidence_match"] = False
+    # task 138 W3: the probe tears the user domain down before the
+    # verdict, so the guest evidence is the bounce snapshot the kernel
+    # took while the mapping was still live; the original user VAs must
+    # now be unreadable through the gdbstub
+    page = ev.get("fsys_bounce")
+    ev["user_va_unmapped"] = True
+    for va in (FSYS_USER_CODE_BASE, FSYS_USER_DATA_BASE,
+               FSYS_USER_STACK_TOP - 4096):
+        try:
+            gdb_read_bytes(args.port, va, 8)
+        except OSError:
+            continue
+        ev["user_va_unmapped"] = False
+        ev["errors"].append(
+            f"user VA {va:#x} still readable after the teardown")
+    if page is not None:
+        g_mask, g_fail = struct.unpack_from("<QQ", page, 0)
+        ev["guest_mask"] = g_mask
+        ev["guest_fail"] = g_fail
+        ev["guest_head_match"] = (g_mask == ev.get("fsys_probe_mask") and
+                                  g_fail == ev.get("fsys_probe_fail"))
+        if not ev["guest_head_match"]:
+            ev["errors"].append("guest mask/fail vs the kernel copy")
+        for key, off, want in FSYS_GUEST_ERRNO:
+            got, = struct.unpack_from("<Q", page, off)
+            ok = got == want & ((1 << 64) - 1)
+            ev[key + "_match"] = ok
+            if not ok:
+                ev["errors"].append(
+                    f"guest {key} verdict = {got:#x} (need {want})")
+        off, size = FSYS_GUEST_READBUF
+        buf = page[off:off + size]
+        src = None
+        try:
+            with open(os.path.join(REPO, "user/chip8/roms/ibm.ch8"),
+                      "rb") as f:
+                src = f.read()
+        except OSError as e:
+            ev["errors"].append(f"ibm.ch8 read: {e}")
+        ok = (src is not None and image is not None
+              and len(src) == FS_TEST_IBM_SIZE
+              and buf[:FS_TEST_IBM_SIZE] == src
+              and buf[:FS_TEST_IBM_SIZE] ==
+              image[101 * 512:101 * 512 + FS_TEST_IBM_SIZE]
+              and buf[FS_TEST_IBM_SIZE:] ==
+              b"\x00" * (size - FS_TEST_IBM_SIZE))
+        ev["read_match"] = ok
+        if not ok:
+            ev["errors"].append("guest read buffer vs ROM source / LBA 101")
+        off, size = FSYS_GUEST_STATBUF
+        want = struct.pack("<QI", FS_TEST_IBM_SIZE, 1) + b"\x00" * 52
+        ev["stat_match"] = page[off:off + size] == want
+        if not ev["stat_match"]:
+            ev["errors"].append("guest stat buffer vs size 132 / attr 1")
+        off, size = FSYS_GUEST_DIRENTS
+        if image is not None:
+            want = (fs_dirent(image, 97, 2) + fs_dirent(image, 97, 3)
+                    + b"\x00" * (size - 64))
+            ev["dirents_match"] = page[off:off + size] == want
+            if not ev["dirents_match"]:
+                ev["errors"].append(
+                    "guest readdir buffer vs image /ROMS entries")
+        else:
+            ev["dirents_match"] = False
+    # the W3 teardown receipts: every frame back, the array zeroed, the
+    # +3 budget reclaimed and the user PDPT slot clear again
+    held = ev.get("fsys_pages_held")
+    ev["frames_released"] = held == 0
+    if not ev["frames_released"]:
+        ev["errors"].append(f"fsys_pages_held = {held} (need 0)")
+    pages = ev.get("fsys_pages")
+    ev["pages_zeroed"] = pages == b"\x00" * 72
+    if not ev["pages_zeroed"]:
+        ev["errors"].append("fsys_pages array not zeroed after the teardown")
+    released = ev.get("fsys_table_released")
+    ev["released_is_budget"] = released == FSYS_TABLE_BUDGET
+    if not ev["released_is_budget"]:
+        ev["errors"].append(
+            f"fsys_table_released = {released} (need {FSYS_TABLE_BUDGET})")
+    state = ev.get("mm_vmm_state")
+    if state is not None:
+        root, = struct.unpack_from("<Q", state, 8)
+        pa_mask, = struct.unpack_from("<Q", state, 16)
+        allocs, drops = struct.unpack_from("<QQ", state, 40)
+        base = ev.get("fsys_table_base")
+        drops_base = ev.get("fsys_drops_base")
+        ev["net_table_invariant"] = (base is not None
+                                     and drops_base is not None
+                                     and allocs - drops == base - drops_base)
+        if not ev["net_table_invariant"]:
+            ev["errors"].append(
+                "net allocs-drops != the probe baseline after the teardown")
+        # walk PML4[0] -> PDPT through the identity map: slot 4 must be
+        # clear again, the one-way anchor 0 US bit must stay set
+        try:
+            pml4e, = struct.unpack(
+                "<Q", gdb_read_bytes(args.port, root, 8))
+            pdpt = pml4e & pa_mask
+            slot4, = struct.unpack(
+                "<Q", gdb_read_bytes(args.port, pdpt + 4 * 8, 8))
+            ev["pdpt4_clear"] = slot4 == 0
+            ev["anchor0_us_stays"] = bool(pml4e & 4)
+            if not ev["pdpt4_clear"]:
+                ev["errors"].append(
+                    f"user PDPT slot 4 = {slot4:#x} (need 0)")
+            if not ev["anchor0_us_stays"]:
+                ev["errors"].append("anchor 0 US bit lost after the teardown")
+        except OSError as e:
+            ev["pdpt4_clear"] = False
+            ev["errors"].append(f"page directory walk: {e}")
+    else:
+        ev["net_table_invariant"] = False
+    lines = [f"image sha256 = {ev.get('image_sha256', '(unreadable)')}",
+             f"expect_big = {ev.get('expect_big')}"]
+    for name, size in FSYS_COUNTER_SYMBOLS:
+        v = ev.get(name)
+        if v is None:
+            lines.append(f"{name} = (unreadable)")
+        elif name == "fsys_probe_evidence":
+            lines.append(f"{name}: " +
+                         " ".join(f"{q:#x}" for q in struct.unpack("<8Q", v)))
+        elif size > 8:
+            lines.append(f"{name}: {size} bytes, first 16 = {v[:16].hex()}")
+        else:
+            lines.append(f"{name} = {v:#x}")
+    for key in ("guest_mask", "guest_fail"):
+        if key in ev:
+            lines.append(f"{key} = {ev[key]:#x}")
+    for key in ("evidence_match", "guest_head_match", "read_match",
+                "stat_match", "dirents_match", "enoent_match",
+                "efault_match", "einval_match", "enotsup_match",
+                "user_va_unmapped", "frames_released", "pages_zeroed",
+                "released_is_budget", "net_table_invariant",
+                "pdpt4_clear", "anchor0_us_stays"):
+        if key in ev:
+            lines.append(f"{key:16s}: {ev[key]}")
+    lines.extend("error: " + e for e in ev["errors"])
+    with open(os.path.join(art, "fsprobe-evidence.log"), "w",
+              encoding="ascii") as f:
+        f.write("\n".join(lines) + "\n")
+    ev["log"] = lines
+    return ev
+
+
 def screendump(art, timeout=15.0, name="screen.ppm"):
     """Capture the guest screen through the unix-socket QEMU monitor.
 
@@ -673,7 +1230,7 @@ def parse_ppm(data):
 
 
 def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None,
-          ppm_echo=None, ppm_gui=None):
+          ppm_echo=None, ppm_gui=None, blk=None, fs=None, fsprobe=None):
     """Pure smoke verdict: (ok, report lines). No I/O in here, so the
     decision can be exercised unit-style against mutated serial/debug
     fixtures (the task-67 sensitivity evidence).
@@ -692,6 +1249,17 @@ def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None,
                     into the default PASS path.
     The -d int vector delivery counts (v=0x21/v=0x2c) are asserted in
     both modes against the deterministic injection-chain derivation.
+
+    blk= is the FS-v1 M1 evidence dict from collect_blk_evidence(); the
+    appended verdict block runs ONLY when it is not None, so the frozen
+    judge fixtures of tests/stage2-fb/check-gui-judge.py (which never
+    pass it) keep their exact check count and decisions. fs= is the
+    FS-v1 M2 evidence dict from collect_fs_evidence(), the same trailing
+    optional pattern: the twelfth marker K64-FS-OK and the fs verdict
+    are asserted only when it is passed (--fs). fsprobe= is the FS-v1 M3
+    evidence dict from collect_fsprobe_evidence(), the same pattern once
+    more: the thirteenth marker K64-FSPROBE-OK and the Ring 3 verdict
+    are asserted only when it is passed (--fsprobe).
     """
     lines = []
     ok = True
@@ -797,6 +1365,149 @@ def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None,
         req(p_skip >= 0 and p_dskip > p_skip and p_found > p_dskip,
             "K64-DESKTOP-SKIP sits between K64-GUI-SKIP and "
             "K64-FOUNDATION-OK")
+
+    # FS-v1 M1 verdict, appended AFTER every frozen decision above
+    if blk is not None:
+        n = serial.count(BLK_OK_MARKER)
+        req(n == 1, f"{BLK_OK_MARKER} count = {n} (need exactly 1)")
+        p_prev = serial.find(DESKTOP_OK_MARKER if gui_mode == "ok"
+                             else DESKTOP_SKIP_MARKER)
+        p_blk = serial.find(BLK_OK_MARKER)
+        p_found = serial.find("K64-FOUNDATION-OK")
+        req(p_prev >= 0 and p_blk > p_prev and p_found > p_blk,
+            "K64-BLK-OK sits between the desktop marker and "
+            "K64-FOUNDATION-OK")
+        # FS-v1 M2: the foundation runs the fs legs unconditionally, so
+        # blk_test_reads now totals 7 + 5 init chunks + the fs cache
+        # misses (22 plain / 46 BIG); the image sha follows the attached
+        # disk (the BIG.BIN image is a separately frozen sha)
+        expect_big = blk.get("expect_big") is True
+        want_reads = BLK_TEST_READS_FS_BIG if expect_big else BLK_TEST_READS_FS
+        want_sha = FS_BIG_IMAGE_SHA256 if expect_big else BLK_IMAGE_SHA256
+        for name, want in (("blk_test_mask", 0),
+                           ("blk_test_reads", want_reads),
+                           ("blk_capacity", BLK_TEST_CAPACITY),
+                           ("blk_ready", 1)):
+            got = blk.get(name)
+            req(got == want,
+                f"{name} = {got if got is None else hex(got)} "
+                f"(need {want:#x})")
+        qnum = blk.get("blk_qnum")
+        req(qnum is not None and 0 < qnum <= 256
+            and qnum & (qnum - 1) == 0,
+            f"blk_qnum = {qnum} (need a power of two <= 256)")
+        req(blk.get("lba0_match") is True,
+            "guest LBA0 buffer == disk.img sector 0 byte for byte")
+        req(blk.get("data_match") is True,
+            f"guest LBA{BLK_TEST_DATA_LBA} buffer == disk.img sector "
+            f"{BLK_TEST_DATA_LBA} byte for byte")
+        req(blk.get("image_sha256") == want_sha,
+            "disk image sha256 matches the frozen FS-v1 image in use")
+        for e in blk.get("errors", ()):
+            req(False, f"blk evidence: {e}")
+
+    # FS-v1 M2 verdict, appended AFTER every frozen decision and the
+    # blk block above; runs only when fs= is passed (--fs)
+    if fs is not None:
+        n = serial.count(FS_OK_MARKER)
+        req(n == 1, f"{FS_OK_MARKER} count = {n} (need exactly 1)")
+        p_blk = serial.find(BLK_OK_MARKER)
+        p_fs = serial.find(FS_OK_MARKER)
+        p_found = serial.find("K64-FOUNDATION-OK")
+        req(p_blk >= 0 and p_fs > p_blk and p_found > p_fs,
+            "K64-FS-OK sits between K64-BLK-OK and K64-FOUNDATION-OK")
+        expect_big = fs.get("expect_big") is True
+        for name, want in (("fs_test_mask", 0),
+                           ("fs_ready", 1),
+                           ("fs_clusters", FS_TEST_CLUSTERS),
+                           ("fs_test_reads",
+                            FS_TEST_READS_BIG if expect_big else FS_TEST_READS),
+                           ("fs_test_big_present", 1 if expect_big else 0)):
+            got = fs.get(name)
+            req(got == want,
+                f"{name} = {got if got is None else hex(got)} "
+                f"(need {want:#x})")
+        req(fs.get("ibm_match") is True,
+            "guest IBM.CH8 buffer == ROM source and image LBA 101 "
+            "byte for byte")
+        req(fs.get("tetris_match") is True,
+            "guest TETRIS1.CH8 buffer == ROM source and image LBA 103 "
+            "byte for byte")
+        if expect_big:
+            req(fs.get("big_match") is True,
+                "guest BIG.BIN buffer == frozen payload formula and "
+                "image cluster span byte for byte")
+        else:
+            req(fs.get("big_zero") is True,
+                "guest BIG.BIN buffer pristine zero on the plain image")
+        req(fs.get("dirents_match") is True,
+            "guest readdir buffer == the raw image directory entries")
+        req(fs.get("stat_match") is True,
+            "guest stat buffer == the synthesized root stat")
+        req(fs.get("image_sha256") ==
+            (FS_BIG_IMAGE_SHA256 if expect_big else FS_IMAGE_SHA256),
+            "fs evidence image sha256 matches the frozen image in use")
+        for e in fs.get("errors", ()):
+            req(False, f"fs evidence: {e}")
+
+    # FS-v1 M3 verdict, appended AFTER every frozen decision and the
+    # blk/fs blocks above; runs only when fsprobe= is passed (--fsprobe)
+    if fsprobe is not None:
+        n = serial.count(FSPROBE_OK_MARKER)
+        req(n == 1, f"{FSPROBE_OK_MARKER} count = {n} (need exactly 1)")
+        p_fs = serial.find(FS_OK_MARKER)
+        p_fp = serial.find(FSPROBE_OK_MARKER)
+        p_found = serial.find("K64-FOUNDATION-OK")
+        req(p_fs >= 0 and p_fp > p_fs and p_found > p_fp,
+            "K64-FSPROBE-OK sits between K64-FS-OK and K64-FOUNDATION-OK")
+        expect_big = fsprobe.get("expect_big") is True
+        for name, want in (("fsys_ready", 1),
+                           ("fsys_probe_mask", FSYS_FP_MASK_ALL),
+                           ("fsys_probe_fail", (1 << 64) - 1),
+                           ("fsys_exit_code", 0),
+                           ("fsys_table_delta", FSYS_TABLE_BUDGET),
+                           ("fsys_saved_fs_reads",
+                            FS_TEST_READS_BIG if expect_big
+                            else FS_TEST_READS),
+                           ("fsys_saved_blk_reads",
+                            BLK_TEST_READS_FS_BIG if expect_big
+                            else BLK_TEST_READS_FS),
+                           # task 138 W3: the teardown receipts
+                           ("fsys_pages_held", 0),
+                           ("fsys_table_released", FSYS_TABLE_BUDGET)):
+            got = fsprobe.get(name)
+            req(got == want,
+                f"{name} = {got if got is None else hex(got)} "
+                f"(need {want:#x})")
+        req(fsprobe.get("evidence_match") is True,
+            "the eight evidence qwords == fd 0 / 132 / EOF 0 / seek 124 / "
+            "size 132 / attr 1 / dir 64 / ENOENT -3")
+        req(fsprobe.get("guest_head_match") is True,
+            "guest mask/fail page head == the kernel evidence copy")
+        req(fsprobe.get("read_match") is True,
+            "guest IBM.CH8 landing buffer == ROM source and image "
+            "LBA 101 byte for byte")
+        req(fsprobe.get("stat_match") is True,
+            "guest stat buffer == size 132 / attr 1 / zero reserved")
+        req(fsprobe.get("dirents_match") is True,
+            "guest readdir buffer == the raw image /ROMS entries")
+        for key in ("enoent", "efault", "einval", "enotsup"):
+            req(fsprobe.get(key + "_match") is True,
+                f"guest {key} verdict matches the frozen K64 errno")
+        # task 138 W3: no user domain residue after the probe verdict
+        req(fsprobe.get("user_va_unmapped") is True,
+            "the code, data and top stack user VAs are unreadable "
+            "after the teardown")
+        req(fsprobe.get("pages_zeroed") is True,
+            "the fsys_pages frame array is zeroed after the teardown")
+        req(fsprobe.get("net_table_invariant") is True,
+            "net table allocs-drops is back at the probe baseline")
+        req(fsprobe.get("pdpt4_clear") is True,
+            "the user PDPT slot 4 is clear again after the teardown")
+        req(fsprobe.get("anchor0_us_stays") is True,
+            "the one-way anchor 0 US bit survives the teardown")
+        for e in fsprobe.get("errors", ()):
+            req(False, f"fsprobe evidence: {e}")
     return ok, lines
 
 
@@ -810,6 +1521,12 @@ def qemu_argv(args, art, esp):
             "-smp", "1",
             "-bios", os.path.join(REPO, "OVMF.fd"),
             "-drive", f"driver=vvfat,rw=on,dir={esp}",
+            # FS-v1 M1: the transitional virtio-blk device is mandatory
+            # in the smoke matrix, there is no blk skip path; FS-v1 M2
+            # adds --disk to select the plain or BIG.BIN frozen image
+            "-drive", ("if=none,id=blk0,file=" + args.disk
+                       + ",format=raw"),
+            "-device", "virtio-blk-pci-transitional,drive=blk0",
             "-nic", "none",
             "-display", "none",
             "-monitor", ("unix:" + os.path.join(art, "monitor.sock")
@@ -1073,13 +1790,30 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
                        f"geometry={width}x{height} (skip evidence)")
         except OSError as e:
             read_errors.append(f"video_fb_state read: {e}")
+    # FS-v1 M1 evidence: the blk counters and both sector buffers are
+    # read while the halted kernel still lives, in BOTH gui modes (the
+    # blk stage runs after the desktop skip too)
+    if proc.poll() is None:
+        blk_ev = collect_blk_evidence(args, art, counter_addrs)
+        fs_ev = (collect_fs_evidence(args, art, counter_addrs)
+                 if args.fs else None)
+        fsprobe_ev = (collect_fsprobe_evidence(args, art, counter_addrs)
+                      if args.fsprobe else None)
+    else:
+        blk_ev = {"errors": ["blk evidence not read: QEMU exited early"]}
+        fs_ev = ({"errors": ["fs evidence not read: QEMU exited early"]}
+                 if args.fs else None)
+        fsprobe_ev = (
+            {"errors": ["fsprobe evidence not read: QEMU exited early"]}
+            if args.fsprobe else None)
     cleanup()
 
     serial = read_log(serial_path)
     debug = read_log(os.path.join(art, "qemu-debug.log"))
     ok, lines = judge(serial, debug, counters, early_exit,
                       gui_mode="skip" if args.gui_skip else "ok", ppm=ppm,
-                      ppm_echo=echo_ppm, ppm_gui=gui_ppm)
+                      ppm_echo=echo_ppm, ppm_gui=gui_ppm, blk=blk_ev,
+                      fs=fs_ev, fsprobe=fsprobe_ev)
     print()
     print("=" * 72)
     print(f"run-qemu-debug: smoke verdict: {'PASS' if ok else 'FAIL'}")
@@ -1106,6 +1840,22 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
           f"({'captured' if ppm is not None else 'MISSING'})")
     if fb_note:
         print("  " + fb_note)
+    print("  blk evidence log  : " + os.path.join(art, "blk-evidence.log"))
+    for entry in (blk_ev.get("log")
+                  or ["error: " + e for e in blk_ev.get("errors", ())]):
+        print("    " + entry)
+    if fs_ev is not None:
+        print("  fs evidence log   : " + os.path.join(art, "fs-evidence.log"))
+        for entry in (fs_ev.get("log")
+                      or ["error: " + e for e in fs_ev.get("errors", ())]):
+            print("    " + entry)
+    if fsprobe_ev is not None:
+        print("  fsprobe evidence  : "
+              + os.path.join(art, "fsprobe-evidence.log"))
+        for entry in (fsprobe_ev.get("log")
+                      or ["error: " + e
+                          for e in fsprobe_ev.get("errors", ())]):
+            print("    " + entry)
     if serial:
         print("  serial.log:")
         for line in serial.splitlines():
@@ -1135,10 +1885,30 @@ def main():
     ap.add_argument("--cpu", default="qemu64,+popcnt",
                     help="QEMU -cpu model (default qemu64,+popcnt: the "
                          "kernel needs long mode, NX and POPCNT)")
+    ap.add_argument("--disk",
+                    default=os.path.join(REPO, "build", "fs-v1", "disk.img"),
+                    help="virtio-blk backing image (default "
+                         "build/fs-v1/disk.img; the BIG.BIN cross-cluster "
+                         "leg uses build/fs-v1/disk-big.img)")
+    ap.add_argument("--fs", action="store_true",
+                    help="assert the FS-v1 M2 verdict: the twelfth marker "
+                         "K64-FS-OK, the fs counters and the guest file "
+                         "buffers compared against the ROM sources/image")
+    ap.add_argument("--fsprobe", action="store_true",
+                    help="assert the FS-v1 M3 verdict: the thirteenth "
+                         "marker K64-FSPROBE-OK, the fsys counters, the "
+                         "evidence qwords and the Ring 3 guest data page "
+                         "compared against the ROM source/image")
     args = ap.parse_args()
 
     if shutil.which(args.qemu) is None and not os.path.exists(args.qemu):
         print(f"run-qemu-debug: {args.qemu} not found", file=sys.stderr)
+        sys.exit(1)
+    args.disk = os.path.abspath(args.disk)
+    if not os.path.isfile(args.disk):
+        print(f"run-qemu-debug: {args.disk} missing; run "
+              "tools/build-fat16-image.py first (FS-v1 M1/M2)",
+              file=sys.stderr)
         sys.exit(1)
 
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1148,7 +1918,9 @@ def main():
     # a reused art-dir must not leak a previous session's terminal marker
     # into the smoke poll loop, nor a stale socket into the monitor bind
     for stale in ("serial.log", "qemu-debug.log", "screen.ppm",
-                  "screen-echo.ppm", "screen-gui.ppm", "monitor.sock"):
+                  "screen-echo.ppm", "screen-gui.ppm", "monitor.sock",
+                  "blk-evidence.log", "fs-evidence.log",
+                  "fsprobe-evidence.log"):
         p = os.path.join(art, stale)
         if os.path.exists(p):
             os.unlink(p)
@@ -1160,7 +1932,11 @@ def main():
     elf = gen_symbols(art, bin_dir)
     counter_addrs, counter_errors = {}, []
     if args.no_freeze:
-        extra = INPUT_FORENSIC_SYMBOLS
+        extra = INPUT_FORENSIC_SYMBOLS + BLK_COUNTER_SYMBOLS + BLK_DIAG_SYMBOLS
+        if args.fs:
+            extra += FS_COUNTER_SYMBOLS
+        if args.fsprobe:
+            extra += FSYS_COUNTER_SYMBOLS
         if args.gui_skip:
             extra += (("video_fb_state", 64),)
         counter_addrs, counter_errors = counter_addresses(art, extra)
