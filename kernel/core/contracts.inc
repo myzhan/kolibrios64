@@ -1894,3 +1894,181 @@ end if
 if K64_FSYS_TABLE_BUDGET <> 3
         err 'the W3 teardown must release exactly the frozen +3 budget'
 end if
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; APP-v1 integration (task 115): the hosted program loader contract.
+;; Pure tail append after the FS-v1 M3 section; nothing above moved.
+;;
+;; The user ruling: the program is loaded through the FS, never an
+;; embedded image. app_launch reads /PROGRAMS/CHIP8.BIN through the
+;; kernel-internal fs API (fs_stat/fs_open/fs_read/fs_close, EAX status
+;; / RDX result), gates 0 < size <= 16 KiB, maps the frozen 516 page
+;; footprint (4 code RX+US, 512 data RW+NX+US covering the WHOLE 2 MiB
+;; domain; the mm contract places the 16 KiB stack at the TOP of the
+;; data domain, so the data loop maps the stack tail too and the
+;; footprint is 4 + 512, one PD + two PT = the frozen +3 budget)
+;; through vmm_map_user_page and
+;; asserts the frozen +3 table budget. The app module owns syscall
+;; numbers 0..3 ONLY while a program runs (registered at launch,
+;; unregistered on every exit path); 4..9 stay with the resident fsys
+;; adapters, the hosted chip8 loads its ROMs through them. The frozen
+;; fs/blk sector counters (24/48, 34/58) are snapshotted and restored
+;; exactly like the fsys probe, the judge keeps the M1/M2 finals.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+K64_APP_CODE_PAGES       = 4
+K64_APP_DATA_PAGES       = 512
+K64_APP_STACK_PAGES      = 4     ; descriptive: inside the data domain tail
+K64_APP_LAUNCH_PAGES     = 516   ; 4 code + 512 data (stack at the top)
+K64_APP_TABLE_BUDGET     = 3
+K64_APP_DATA_PAGES_TOTAL = 22
+
+; the host handshake stages published in app_stage
+K64_APP_STAGE_IDLE      = 0
+K64_APP_STAGE_IBM_READY = 1     ; first BLIT delivered, host screendumps
+K64_APP_STAGE_EXIT_REQ  = 2     ; host wrote the exit request
+K64_APP_STAGE_DONE      = 3     ; teardown + desktop redraw complete
+
+; the frozen BLIT geometry, user/chip8/api.inc mirror
+K64_APP_BLIT_DST_X = 192
+K64_APP_BLIT_DST_Y = 224
+K64_APP_FB_WIDTH   = 640
+K64_APP_FB_HEIGHT  = 320
+
+; the fabricated exit key: ascii 27 / raw set 1 make 0x01
+K64_APP_SC_ESC    = 0x01
+K64_APP_SC_ENTER  = 0x1C
+K64_APP_ASCII_ESC = 27
+
+if K64_APP_SYS_EXIT <> APP_SYS_EXIT | K64_APP_SYS_BLIT <> APP_SYS_BLIT
+        err 'the APP syscall numbers disagree with the module copy'
+end if
+if K64_APP_SYS_READ_KEY <> APP_SYS_READ_KEY | K64_APP_SYS_POLL <> APP_SYS_POLL
+        err 'the APP syscall numbers disagree with the module copy'
+end if
+if K64_APP_LAUNCH_PAGES <> APP_LAUNCH_PAGES | K64_APP_TABLE_BUDGET <> APP_TABLE_BUDGET
+        err 'the APP launch footprint disagrees with the module copy'
+end if
+if K64_APP_LAUNCH_PAGES <> K64_APP_CODE_PAGES + K64_APP_DATA_PAGES
+        err 'the stack lives at the data domain top, no extra leaf frames'
+end if
+if K64_APP_CODE_PAGES <> APP_CODE_PAGES | K64_APP_DATA_PAGES <> APP_DATA_PAGES | K64_APP_STACK_PAGES <> APP_STACK_PAGES
+        err 'the APP footprint split disagrees with the module copy'
+end if
+if APP_USER_STACK_TOP <> APP_USER_DATA_BASE + APP_USER_DATA_SIZE
+        err 'the mm contract places the stack at the data domain top'
+end if
+if K64_APP_DATA_PAGES_TOTAL <> APP_DATA_PAGES_TOTAL
+        err 'the APP data budget disagrees with the module copy'
+end if
+if K64_APP_STAGE_IDLE <> APP_STAGE_IDLE | K64_APP_STAGE_IBM_READY <> APP_STAGE_IBM_READY
+        err 'the APP handshake stages disagree with the module copy'
+end if
+if K64_APP_STAGE_EXIT_REQ <> APP_STAGE_EXIT_REQ | K64_APP_STAGE_DONE <> APP_STAGE_DONE
+        err 'the APP handshake stages disagree with the module copy'
+end if
+if K64_APP_BLIT_DST_X <> APP_BLIT_DST_X | K64_APP_BLIT_DST_Y <> APP_BLIT_DST_Y
+        err 'the APP BLIT geometry disagrees with the module copy'
+end if
+if K64_APP_FB_WIDTH <> APP_FB_WIDTH | K64_APP_FB_HEIGHT <> APP_FB_HEIGHT
+        err 'the APP BLIT geometry disagrees with the module copy'
+end if
+if K64_APP_SC_ESC <> APP_SC_ESC | K64_APP_SC_ENTER <> APP_SC_ENTER | K64_APP_ASCII_ESC <> APP_ASCII_ESC
+        err 'the APP exit key disagrees with the module copy'
+end if
+if K64_APP_TABLE_BUDGET <> MM_USER_TABLE_BUDGET | K64_APP_TABLE_BUDGET <> K64_FSYS_TABLE_BUDGET
+        err 'the APP teardown budget is the frozen user domain +3'
+end if
+if K64_APP_DATA_PAGES <> MM_USER_DATA_SIZE / K64_PAGE_SIZE
+        err 'the APP data footprint must cover the whole frozen data domain'
+end if
+if K64_APP_SYS_POLL >= K64_APP_SYS_CALL_MAX
+        err 'the syscall table must cover the APP syscall set'
+end if
+if APP_EINVAL <> K64_EINVAL | APP_ENOMEM <> K64_ENOMEM | APP_ENOENT <> K64_ENOENT | APP_EPERM <> K64_EPERM
+        err 'the APP errno set disagrees with the K64 contract'
+end if
+if APP_ENOTSUP <> K64_ENOTSUP | APP_ENOTREADY <> K64_ENOTREADY | APP_EALREADY <> K64_EALREADY
+        err 'the APP errno set disagrees with the K64 contract'
+end if
+if APP_EIO <> K64_EIO | APP_EFAULT <> K64_EFAULT
+        err 'the APP errno set disagrees with the K64 contract'
+end if
+
+; ---------------- task 115 adjudications, frozen semantics ----------------
+;
+; A1 POLL wake split: the IBM leg (app_interactive = 0) parks POLL in a
+; bounded pause window with IF = 0, the GUI frame precedent, because a
+; gdbstub memory write cannot wake HLT. Only the interactive leg (after
+; the Enter make) executes the frozen "one sti;hlt;cli" POLL semantics,
+; always LAPIC LVT timer masked first and both device RTEs re-masked
+; right after, so irq_test_ticks stays 11 and the 13 marker counters
+; keep their frozen finals. The app never unmasks the LVT timer.
+;
+; A2 exit handshake: the host screendumps the game frame at IBM_READY
+; (first successful BLIT), then writes EXIT_REQ. When the key queue is
+; empty and the stage is EXIT_REQ, READ_KEY fabricates ONE ESC make
+; (rax = 27, rdx = 0x01) without advancing the consumed index or the
+; key counters; the UNMODIFIED user key_drain takes its real sys_exit(0)
+; path. The launch trigger is the foundation leg itself (stage direct
+; call), no host key injection is needed to start the program.
+;
+; A3 teardown on EVERY post-snapshot exit path (EXIT, ring 3 fault,
+; registration failure): 516 leaves unmapped through vmm_unmap_user_page
+; (ENOENT tolerated for partial failures), the W3 net table invariant
+; holds, exactly +3 tables released, frames freed, the array zeroed,
+; app_pages_held back to 0. A post-exit fd sweep closes any leaked
+; fd table slot. The desktop is fully repainted (background, bar,
+; title, the saved echo first line) and the cursor is REPLACED at the
+; desktop's own coordinates through desktop_cursor_place, no stale
+; save is reused. While the program runs, POLL calls desktop_cursor_sync
+; (mirror only) and the BLIT rectangle covers the frozen cursor cell,
+; so the desktop never save/restores over the app's direct FB writes.
+;
+; A4 fault seam: cpu_user_fault_set_handler parks a ring 3 fault into
+; app_fault_vector (vector + 1, 0 = none) and takes the teardown path
+; with an EIO verdict; the handler is unregistered on every exit path.
+;
+; A5 RSP0 discipline, the S3 precedent: every failure path after a
+; successful cpu_set_rsp0 restores the saved foundation TSS.RSP0,
+; including the partial handler registration rollback.
+;
+; A6 launch gates: ring 0, IF = 0, app/fsys/fs/desktop/video ready,
+; desktop_echo_row = 0 (the echo save covers only row 0) and stage
+; IDLE; nothing is allocated before they pass. The BLIT handler
+; validates the FULL source range (write = 0) and the destination fit
+; before copying row by row through the bounce page; a bad pointer is
+; EFAULT, never a kernel read of an unmapped user page.
+
+; ---------------- task 141 adjudications, frozen semantics ----------------
+;
+; A7 interactive pacing (W1 fix): the user interactive loop executes a
+; FIXED budget of IPS_PER_TICK instructions on every POLL wake and
+; accumulates TIMER_HZ units per round into the 60 Hz delay/sound
+; divider (drained by TIMER_ACC_BASE). The POLL r8d snapshot
+; (irq_test_ticks) is frozen at 11 under the LVT-mask caliber and is
+; NOT consumed: a tick-delta budget would always be zero (the W1 dead
+; end). The IBM leg (interactive = 0) byte behavior is unchanged.
+;
+; A8 interactive park (W1 fix, supersedes the A1 park mechanism for
+; the interactive leg only): the interactive POLL window is a bounded
+; pause spin of APP_IPOLL_CHUNK iterations inside the single sti...cli
+; window, replacing sti;hlt;cli. A gdbstub key injection cannot wake
+; HLT and the masked LVT leaves no other wake source; the spin keeps
+; the CPU runnable for the debugger while real keyboard/mouse IRQs
+; still land inside the bounded window. The A1 IRQ caliber is
+; untouched: LVT timer masked first, both device RTEs live only inside
+; the window and re-masked right after, irq_test_ticks stays 11, the
+; 13 marker counters keep their frozen finals, and there is still
+; exactly one STI owner in the module (no resident interrupt window).
+; The IBM leg park stays the IF = 0 APP_POLL_CHUNK pause window.
+
+K64_APP_IPOLL_CHUNK     = 0x40000
+
+if K64_APP_IPOLL_CHUNK <> APP_IPOLL_CHUNK
+        err 'the interactive POLL park budget disagrees with the module copy'
+end if
+if K64_APP_IPOLL_CHUNK >= APP_POLL_CHUNK
+        err 'the interactive park round must stay shorter than the IBM window'
+end if
+

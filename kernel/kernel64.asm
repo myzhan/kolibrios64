@@ -406,6 +406,16 @@ include 'fs/fs.asm'
 FSYS_HOSTED = 1
 include 'fsys/fsys.asm'
 
+; APP-v1 (task 115): the hosted program loader over the frozen fs API.
+; app_launch reads /PROGRAMS/CHIP8.BIN from the mounted image (never an
+; embedded binary), maps the frozen 516 page user footprint, owns the
+; syscall numbers 0..3 only while a program runs and tears the whole
+; domain down on EXIT. APP_HOSTED keeps app.asm from emitting its
+; standalone format/org pair. Its 22 page data region is protected
+; RW/NX by the foundation app leg; the core files still close the image.
+APP_HOSTED = 1
+include 'app/app.asm'
+
 include 'core/contracts.inc'
 include 'core/foundation.inc'
 include 'core/selftest.inc'

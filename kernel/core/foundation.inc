@@ -434,6 +434,61 @@ k64_foundation_init:
 
         k64_report kmsg_fsysprobe_ok, .fail
 
+        ; ---------------- APP-v1: the hosted program loader ----------------
+        ; Runs after the fsys stage, still after the leg 7 accounting
+        ; baseline: the app data protection allocates late and the 516
+        ; page user footprint is mapped AND torn down inside app_launch,
+        ; the frozen 3/3/3 delta stays untouched. A skipped desktop means
+        ; a skipped app: no shell to return to, the same non fatal skip
+        ; convention as the GUI/desktop stages. app_launch reads
+        ; /PROGRAMS/CHIP8.BIN through the kernel-internal fs API, enters
+        ; Ring 3 and only returns after the program exits: the teardown
+        ; repainted the desktop and restored the frozen fs/blk counters.
+        cmp     qword [desktop_state], 0
+        je      .app_skip
+
+        mov     qword [rbp-16], kmsg_fail_app
+        call    app_init
+        test    eax, eax
+        jnz     .fail
+
+        ; the app data region becomes RW/NX like the other blocks; the
+        ; private syscall stack inside it stays writable
+        mov     qword [rbp-16], kmsg_fail_protect
+        mov     rcx, app_data_start
+        mov     rdx, (app_data_end - app_data_start) / K64_PAGE_SIZE
+        mov     r8, MM_MAP_RW or MM_MAP_NX
+        call    vmm_boot_protect
+        test    eax, eax
+        jnz     .fail
+
+        ; pristine state + the frozen handler table shape (0..3 empty,
+        ; 4..9 resident); a failure takes the standard fatal path
+        mov     qword [rbp-16], kmsg_fail_app
+        call    app_selftest
+        test    eax, eax
+        jnz     .fail
+
+        ; the hosted run: load, Ring 3, EXIT, teardown, desktop redraw.
+        ; The verdict covers the exit code, the fault seam and the BLIT
+        ; evidence; a failure is a real fault that panics.
+        mov     qword [rbp-16], kmsg_fail_app
+        call    app_launch
+        test    eax, eax
+        jz      .app_ok
+        ; a disk without /PROGRAMS/CHIP8.BIN reports ENOENT: the app
+        ; leg skips non-fatally so the FS-v1 images stay bootable and
+        ; the frozen 13-marker judge caliber is unchanged
+        cmp     eax, APP_ENOENT
+        je      .app_skip
+        jmp     .fail
+.app_ok:
+        k64_report kmsg_app_ok, .fail
+        jmp     .app_done
+.app_skip:
+        k64_report kmsg_app_skip, .fail
+.app_done:
+
         k64_report kmsg_foundation_ok, .fail
         ; FOUNDATION-OK stays the terminal judge marker, printed BEFORE
         ; the resident loop: a successful desktop never returns from
@@ -505,3 +560,10 @@ kmsg_fail_fs          db 'foundation: fs bring-up failed', 0
 ; marker, the Ring 3 fsprobe leg is mandatory in the smoke matrix
 kmsg_fsysprobe_ok     db 'K64-FSPROBE-OK', 13, 10, 0
 kmsg_fail_fsys        db 'foundation: fsys bring-up failed', 0
+
+; APP-v1 messages, same read only convention; the skip marker follows
+; the GUI/desktop skip semantics (no shell, no hosted program), it is
+; not a milestone and the smoke judges it separately
+kmsg_app_ok           db 'K64-APP-OK', 13, 10, 0
+kmsg_app_skip         db 'K64-APP-SKIP', 13, 10, 0
+kmsg_fail_app         db 'foundation: app bring-up failed', 0

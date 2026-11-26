@@ -120,8 +120,10 @@ import argparse
 import atexit
 import datetime
 import hashlib
+import json
 import os
 import re
+import select
 import shutil
 import signal
 import socket
@@ -434,6 +436,77 @@ FSYS_GUEST_READBUF = (128, 512)
 FSYS_GUEST_STATBUF = (640, 64)
 FSYS_GUEST_DIRENTS = (704, 256)
 
+# APP-v1: the fourteenth OK marker and its evidence symbols. Kept OUT
+# of MARKERS / COUNTER_SYMBOLS / EXPECTED_COUNTERS exactly like the
+# M1/M2/M3 blocks: the frozen ten-marker judge fixtures stay untouched;
+# judge() asserts the app verdict only when app= is passed (--app).
+# The foundation runs the app leg after the fsys probe; a disk without
+# /PROGRAMS/CHIP8.BIN reports ENOENT and the leg skips non-fatally
+# (K64-APP-SKIP), so the FS-v1 images keep their 13-marker caliber.
+# The app image is the plain ROMS plus /PROGRAMS/CHIP8.BIN, no BIG.BIN,
+# so the restored fs/blk finals are the plain ones (24 / 34).
+APP_OK_MARKER = "K64-APP-OK"
+APP_SKIP_MARKER = "K64-APP-SKIP"
+APP_IMAGE_SHA256 = ("aec9f70167e6e18170a638bf4af3d5bf"
+                    "28817cf2ff37d6fec5a137cec12f3170")
+APP_TABLE_BUDGET = 3
+APP_LAUNCH_PAGES = 516
+APP_PROGRAM_SIZE = 3255
+APP_STAGE_IDLE = 0
+APP_STAGE_IBM_READY = 1
+APP_STAGE_EXIT_REQ = 2
+APP_STAGE_DONE = 3
+# the frozen BLIT destination rectangle and cell size (user/chip8)
+APP_FB_X, APP_FB_Y = 192, 224
+APP_FB_W, APP_FB_H = 640, 320
+APP_CELL = 10
+APP_COUNTER_SYMBOLS = (("app_ready", 8), ("app_stage", 8),
+                       ("app_exit_code", 8), ("app_fault_vector", 8),
+                       ("app_blit_count", 8), ("app_key_count", 8),
+                       ("app_poll_count", 8),
+                       ("app_saved_fs_reads", 8),
+                       ("app_saved_blk_reads", 8),
+                       ("app_table_base", 8), ("app_drops_base", 8),
+                       ("app_table_delta", 8), ("app_table_released", 8),
+                       ("app_pages_held", 8), ("app_image_size", 8),
+                       ("app_kbd_consumed", 8), ("app_interactive", 8),
+                       ("app_fd_swept", 8), ("app_echo_saved", 8),
+                       ("app_fs_snapshot", 4096),
+                       ("app_pages", APP_LAUNCH_PAGES * 8),
+                       ("fs_test_reads", 8), ("blk_test_reads", 8),
+                       ("mm_vmm_state", 56))
+# the exit frame: the game rectangle is repainted to the background,
+# the desktop cursor sits again at the frozen final (557,411)
+APP_EXIT_PROBES = (
+    (APP_FB_X + 5, APP_FB_Y + 5, DESKTOP_BG),
+    (500, 400, DESKTOP_BG),
+    (APP_FB_X + APP_FB_W - 1, APP_FB_Y + APP_FB_H - 1, DESKTOP_BG),
+)
+
+# task 141 W1: the interactive tetris leg (--app-interactive). Keys are
+# injected by writing the public input key buffer directly through the
+# gdbstub, bypassing the 8042 IRQ handler so the 13 frozen marker
+# counters and the -d int delivery counts never drift. Round boundaries
+# are caught with a hardware breakpoint at the user main_loop VA published
+# by tests/stage2-app/check.py (build/user-chip8/interactive-probes.json).
+APP_INT_KEY_COUNT = 4          # Enter make + 7 make + 7 break + ESC make
+APP_INT_MIN_BLIT = 2           # the IBM logo plus at least one tetris frame
+APP_INT_MIN_POLL = 72          # the capture boundary is round 71 + 1
+APP_SC_ENTER = 0x1C
+APP_SC_ESC = 0x01
+APP_SC_KEY7_MAKE = 0x08
+APP_SC_KEY7_BREAK = 0x88
+APP_ASCII_ENTER = 0x0D
+APP_ASCII_ESC = 27
+APP_ASCII_KEY7 = 0x37
+# The break carries a NON-ZERO ascii so the frozen user key_drain (which
+# stops draining on ascii 0, treating it as the empty queue) actually
+# processes the release edge; the raw scancode keeps the 0x80 break bit.
+# This is a debug-buffer injection convention, not the IRQ handler path
+# (which stores ascii 0 for breaks); it exercises the true press/release
+# level semantics the chip8 model replays.
+APP_INT_SYMBOLS = (("input_kbd_buf", 8), ("input_kbd_used", 8))
+
 _qemu_proc = None
 
 
@@ -506,6 +579,12 @@ def entry_va(bin_path):
 def make_esp(art, bin_dir):
     esp = os.path.join(art, "esp")
     os.makedirs(os.path.join(esp, "EFI", "BOOT"), exist_ok=True)
+    # a stale OVMF NvVars from a SIGTERM'd session can trap the next
+    # boot in a UEFI shell clear-screen loop; always start clean
+    try:
+        os.remove(os.path.join(esp, "NvVars"))
+    except FileNotFoundError:
+        pass
     shutil.copyfile(os.path.join(bin_dir, "BOOTX64.EFI"),
                     os.path.join(esp, "EFI", "BOOT", "BOOTX64.EFI"))
     shutil.copyfile(os.path.join(bin_dir, "KERNEL64.BIN"),
@@ -549,7 +628,12 @@ def counter_addresses(art, extra=()):
         return {}, [f"fasmg host {host} not executable"]
     wrapper = os.path.join(art, "kernel64-counters.asm")
     elf_path = os.path.join(art, "kernel64-counters.elf")
-    symbols = COUNTER_SYMBOLS + tuple(extra)
+    # dedupe by name: --app shares fs_test_reads/blk_test_reads/mm_vmm_state
+    # with --fs/--fsprobe, a duplicate 'public' line would break fasmg
+    seen = {}
+    for name, size in COUNTER_SYMBOLS + tuple(extra):
+        seen.setdefault(name, size)
+    symbols = tuple(seen.items())
     with open(wrapper, "w", encoding="utf-8") as f:
         f.write("format elf64\n")
         f.write("include '%s'\n" % os.path.join(REPO, "kernel", "kernel64.asm"))
@@ -711,7 +795,12 @@ def collect_blk_evidence(args, art, counter_addrs):
             image = f.read()
         ev["image_sha256"] = hashlib.sha256(image).hexdigest()
         ev["expect_big"] = ev["image_sha256"] == FS_BIG_IMAGE_SHA256
-        if ev["image_sha256"] not in (FS_IMAGE_SHA256, FS_BIG_IMAGE_SHA256):
+        ev["expect_app"] = (getattr(args, "app", False)
+                            and ev["image_sha256"] == APP_IMAGE_SHA256)
+        allowed = (FS_IMAGE_SHA256, FS_BIG_IMAGE_SHA256)
+        if getattr(args, "app", False):
+            allowed += (APP_IMAGE_SHA256,)
+        if ev["image_sha256"] not in allowed:
             ev["errors"].append("disk image sha256 matches neither frozen "
                                 "FS-v1 image (plain or BIG.BIN)")
     except OSError as e:
@@ -817,6 +906,8 @@ def collect_fs_evidence(args, art, counter_addrs):
             image = f.read()
         ev["image_sha256"] = hashlib.sha256(image).hexdigest()
         ev["expect_big"] = ev["image_sha256"] == FS_BIG_IMAGE_SHA256
+        ev["expect_app"] = (getattr(args, "app", False)
+                            and ev["image_sha256"] == APP_IMAGE_SHA256)
     except OSError as e:
         ev["errors"].append(f"disk image read: {e}")
     for name, size in FS_COUNTER_SYMBOLS:
@@ -900,6 +991,10 @@ def collect_fs_evidence(args, art, counter_addrs):
         if ev.get("expect_big"):
             big_ent = fs_dirent(image, 99, 2)  # /PROGRAMS slot 2: BIG.BIN
             want = big_ent + tetris_ent + b"\x00" * 32
+        elif ev.get("expect_app"):
+            # APP-v1 third state: leg 4 (10) leaves the CHIP8.BIN entry
+            chip8_ent = fs_dirent(image, 99, 2)  # /PROGRAMS slot 2
+            want = chip8_ent + tetris_ent + b"\x00" * 32
         else:
             want = ibm_ent + tetris_ent + b"\x00" * 32
         ev["dirents_match"] = dirents == want
@@ -954,6 +1049,8 @@ def collect_fsprobe_evidence(args, art, counter_addrs):
             image = f.read()
         ev["image_sha256"] = hashlib.sha256(image).hexdigest()
         ev["expect_big"] = ev["image_sha256"] == FS_BIG_IMAGE_SHA256
+        ev["expect_app"] = (getattr(args, "app", False)
+                            and ev["image_sha256"] == APP_IMAGE_SHA256)
     except OSError as e:
         ev["errors"].append(f"disk image read: {e}")
     for name, size in FSYS_COUNTER_SYMBOLS:
@@ -979,8 +1076,21 @@ def collect_fsprobe_evidence(args, art, counter_addrs):
     # task 138 W3: the probe tears the user domain down before the
     # verdict, so the guest evidence is the bounce snapshot the kernel
     # took while the mapping was still live; the original user VAs must
-    # now be unreadable through the gdbstub
-    page = ev.get("fsys_bounce")
+    # now be unreadable through the gdbstub. APP-v1: the hosted program
+    # reuses fsys_bounce for its file payloads, so app_launch preserved
+    # the snapshot in app_fs_snapshot; read that copy instead.
+    if getattr(args, "app", False):
+        if "app_fs_snapshot" in counter_addrs:
+            try:
+                ev["app_fs_snapshot"] = gdb_read_bytes(
+                    args.port, counter_addrs["app_fs_snapshot"], 4096)
+            except OSError as e:
+                ev["errors"].append(f"app_fs_snapshot: {e}")
+        else:
+            ev["errors"].append("app_fs_snapshot: address unresolved")
+        page = ev.get("app_fs_snapshot")
+    else:
+        page = ev.get("fsys_bounce")
     ev["user_va_unmapped"] = True
     for va in (FSYS_USER_CODE_BASE, FSYS_USER_DATA_BASE,
                FSYS_USER_STACK_TOP - 4096):
@@ -1120,6 +1230,155 @@ def collect_fsprobe_evidence(args, art, counter_addrs):
     return ev
 
 
+def collect_app_evidence(args, art, counter_addrs):
+    """APP-v1 evidence: the app counters, the teardown receipts and the
+    game-frame reference, read through the gdbstub while the halted
+    kernel still lives. The 516 page user footprint is mapped AND torn
+    down inside app_launch, so the code/data/top-stack user VAs must be
+    unreadable again, the app_pages frame array zeroed, the +3 table
+    budget reclaimed and the frozen fs/blk sector counters restored.
+    The game frame probes and the full expected rectangle come from the
+    chip8 reference model (build/user-chip8), the same artifacts the
+    stage2-app gate consumes. app-evidence.log stays as evidence.
+    """
+    ev = {"errors": []}
+    image = None
+    try:
+        with open(args.disk, "rb") as f:
+            image = f.read()
+        ev["image_sha256"] = hashlib.sha256(image).hexdigest()
+    except OSError as e:
+        ev["errors"].append(f"disk image read: {e}")
+    for name, size in APP_COUNTER_SYMBOLS:
+        if name not in counter_addrs:
+            ev["errors"].append(f"{name}: address unresolved")
+            continue
+        try:
+            raw = gdb_read_bytes(args.port, counter_addrs[name], size)
+        except OSError as e:
+            ev["errors"].append(f"{name}: {e}")
+            continue
+        ev[name] = raw if size > 8 else int.from_bytes(raw, "little")
+    # the user domain must be gone after the teardown
+    ev["user_va_unmapped"] = True
+    for va in (FSYS_USER_CODE_BASE, FSYS_USER_DATA_BASE,
+               FSYS_USER_STACK_TOP - 4096):
+        try:
+            gdb_read_bytes(args.port, va, 8)
+        except OSError:
+            continue
+        ev["user_va_unmapped"] = False
+        ev["errors"].append(
+            f"user VA {va:#x} still readable after the app teardown")
+    pages = ev.get("app_pages")
+    ev["pages_zeroed"] = pages == b"\x00" * (APP_LAUNCH_PAGES * 8)
+    if not ev["pages_zeroed"]:
+        ev["errors"].append("app_pages frame array not zeroed")
+    held = ev.get("app_pages_held")
+    ev["frames_released"] = held == 0
+    if not ev["frames_released"]:
+        ev["errors"].append(f"app_pages_held = {held} (need 0)")
+    released = ev.get("app_table_released")
+    ev["released_is_budget"] = released == APP_TABLE_BUDGET
+    if not ev["released_is_budget"]:
+        ev["errors"].append(
+            f"app_table_released = {released} (need {APP_TABLE_BUDGET})")
+    state = ev.get("mm_vmm_state")
+    if state is not None:
+        root, = struct.unpack_from("<Q", state, 8)
+        pa_mask, = struct.unpack_from("<Q", state, 16)
+        allocs, drops = struct.unpack_from("<QQ", state, 40)
+        base = ev.get("app_table_base")
+        drops_base = ev.get("app_drops_base")
+        ev["net_table_invariant"] = (base is not None
+                                     and drops_base is not None
+                                     and allocs - drops == base - drops_base)
+        if not ev["net_table_invariant"]:
+            ev["errors"].append(
+                "net allocs-drops != the app baseline after the teardown")
+        try:
+            pml4e, = struct.unpack(
+                "<Q", gdb_read_bytes(args.port, root, 8))
+            pdpt = pml4e & pa_mask
+            slot4, = struct.unpack(
+                "<Q", gdb_read_bytes(args.port, pdpt + 4 * 8, 8))
+            ev["pdpt4_clear"] = slot4 == 0
+            ev["anchor0_us_stays"] = bool(pml4e & 4)
+            if not ev["pdpt4_clear"]:
+                ev["errors"].append(f"user PDPT slot 4 = {slot4:#x} (need 0)")
+            if not ev["anchor0_us_stays"]:
+                ev["errors"].append("anchor 0 US bit lost after the teardown")
+        except OSError as e:
+            ev["pdpt4_clear"] = False
+            ev["errors"].append(f"page directory walk: {e}")
+    else:
+        ev["net_table_invariant"] = False
+    # the game-frame reference from the chip8 model artifacts
+    game_probes = []
+    ev["expected_frame"] = None
+    model_dir = os.path.join(REPO, "build", "user-chip8")
+    try:
+        with open(os.path.join(model_dir, "ibm-probes.json"),
+                  encoding="utf-8") as f:
+            probes = json.load(f)
+        lit = int(probes["lit_pixel_dword"], 16)
+        for cx, cy in probes["sample_cells"]:
+            game_probes.append((APP_FB_X + cx * APP_CELL + 5,
+                                APP_FB_Y + cy * APP_CELL + 5, lit))
+        with open(os.path.join(model_dir, "ibm-expected-gfx.bin"),
+                  "rb") as f:
+            gfx = f.read()
+        for cy in range(32):
+            for cx in range(64):
+                if not gfx[cy * 64 + cx]:
+                    game_probes.append((APP_FB_X + cx * APP_CELL + 5,
+                                        APP_FB_Y + cy * APP_CELL + 5, 0))
+                    break
+            else:
+                continue
+            break
+        with open(os.path.join(model_dir, "ibm-expected-frame.bin"),
+                  "rb") as f:
+            ev["expected_frame"] = f.read()
+    except (OSError, ValueError, KeyError) as e:
+        ev["errors"].append(f"chip8 model evidence: {e}")
+    ev["game_probes"] = tuple(game_probes)
+    # task 141 W1: the interactive tetris reference frames, built by the
+    # same chip8 model run (tests/stage2-app/check.py) as the IBM ones
+    if args.app_interactive:
+        for key, fname in (("int_expected1", "tetris-int-frame-20.bin"),
+                           ("int_expected2", "tetris-int-frame-71-key.bin"),
+                           ("int_expected_nokey",
+                            "tetris-int-frame-71-nokey.bin")):
+            try:
+                with open(os.path.join(model_dir, fname), "rb") as f:
+                    ev[key] = f.read()
+            except OSError as e:
+                ev[key] = None
+                ev["errors"].append(f"interactive model evidence: {e}")
+    lines = [f"image sha256 = {ev.get('image_sha256', '(unreadable)')}"]
+    for name, size in APP_COUNTER_SYMBOLS:
+        v = ev.get(name)
+        if v is None:
+            lines.append(f"{name} = (unreadable)")
+        elif size > 8:
+            lines.append(f"{name}: {size} bytes, first 16 = {v[:16].hex()}")
+        else:
+            lines.append(f"{name} = {v:#x}")
+    for key in ("user_va_unmapped", "pages_zeroed", "frames_released",
+                "released_is_budget", "net_table_invariant",
+                "pdpt4_clear", "anchor0_us_stays"):
+        if key in ev:
+            lines.append(f"{key:18s}: {ev[key]}")
+    lines.append(f"game_probes        : {len(game_probes)} pixels")
+    lines.extend("error: " + e for e in ev["errors"])
+    with open(os.path.join(art, "app-evidence.log"), "w",
+              encoding="ascii") as f:
+        f.write("\n".join(lines) + "\n")
+    ev["log"] = lines
+    return ev
+
+
 def screendump(art, timeout=15.0, name="screen.ppm"):
     """Capture the guest screen through the unix-socket QEMU monitor.
 
@@ -1229,8 +1488,321 @@ def parse_ppm(data):
     return w, h, px
 
 
+class GdbSession:
+    """One persistent gdbstub connection for the interactive tetris leg.
+
+    The one-shot gdb_read_mem/gdb_write_mem helpers connect-detach per
+    access, which would resume the guest between the round-boundary
+    stops. This session keeps the VM under debugger control across the
+    whole key-injection sequence: connect, then the standard '?' halt
+    query (a RUNNING guest emits no spontaneous stop reply on connect;
+    '?' pauses the VM and answers with the S/T stop packet, verified
+    against the QEMU gdbstub), then m/M/Z1/z1/c packets on the same
+    socket. '+' acks are sent for every received packet and the stub's
+    own acks are skipped by the packet regex (a '+' can share a TCP
+    chunk with the reply, seen as b'+$OK#9a'). Console-output packets
+    are 'O' + hex text; the skip test must NOT swallow the 'OK' reply
+    of M/Z packets ('K' is not a hex digit) -- an earlier version that
+    skipped every 'O'-prefixed payload ate every write/breakpoint OK
+    and looked like a swallowed-reply gdbstub quirk. detach() is
+    mandatory on every exit path: a bare close would leave the VM
+    paused forever.
+    """
+
+    def __init__(self, port, timeout=30.0):
+        self.timeout = timeout
+        self.sock = socket.create_connection(("127.0.0.1", port),
+                                             timeout=timeout)
+        self.sock.settimeout(0.5)
+        self.buf = b""
+        self.t0 = time.monotonic()
+        self.rx = []  # (elapsed, chunk) traffic trace for timeout diagnosis
+        self.tx = []  # (elapsed, packet)
+        p = self.cmd("?")  # halt query: pauses the VM, returns S/T
+        if p[:1] not in (b"T", b"S"):
+            raise OSError(f"gdbstub halt query '?' -> {p!r}")
+
+    def _drain(self, dur):
+        """Keep reading into the buffer for a bounded window (select-
+        based, so a quiet socket never stretches the window to the
+        recv timeout): separates the ack read event from the next
+        command."""
+        end = time.monotonic() + dur
+        while True:
+            left = end - time.monotonic()
+            if left <= 0:
+                return
+            rl, _, _ = select.select([self.sock], [], [], left)
+            if not rl:
+                return
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise OSError("gdbstub closed the connection")
+            self.buf += chunk
+            self.rx.append((round(time.monotonic() - self.t0, 3), chunk))
+
+    def _recv_packet(self, deadline):
+        while time.monotonic() < deadline:
+            # the stub's '+' ack can share a TCP chunk with the reply
+            # (seen as b'+$OK#9a'): skip any leading acks before the '$'
+            m = re.search(rb"\+*\$([^#]*)#([0-9a-fA-F]{2})", self.buf)
+            if m:
+                payload = m.group(1)
+                self.buf = self.buf[m.end():]
+                self._drain(0.05)  # let the stub settle before the ack
+                self.sock.sendall(b"+")
+                self._drain(0.02)  # the ack gets its own read event
+                return payload
+            try:
+                chunk = self.sock.recv(65536)
+            except socket.timeout:
+                continue
+            if not chunk:
+                raise OSError("gdbstub closed the connection")
+            self.buf += chunk
+            self.rx.append((round(time.monotonic() - self.t0, 3), chunk))
+        raise OSError("gdbstub packet timeout (buf=%r rx=%r tx=%r)"
+                      % (self.buf[-200:], self.rx[-12:], self.tx[-8:]))
+
+    def _recv_reply(self, timeout=None):
+        deadline = time.monotonic() + (timeout or self.timeout)
+        while True:
+            p = self._recv_packet(deadline)
+            # skip hex-encoded console output ONLY: 'O' + nonempty hex
+            # text. 'OK' (the M/Z reply) must pass through -- 'K' is
+            # not a hex digit, so the fullmatch test keeps it.
+            if (p[:1] == b"O" and p[1:]
+                    and re.fullmatch(rb"[0-9a-fA-F]+", p[1:])):
+                continue
+            return p
+
+    def cmd(self, body, timeout=None):
+        data = body.encode()
+        pkt = b"$" + data + b"#%02x" % (sum(data) & 0xFF)
+        self.tx.append((round(time.monotonic() - self.t0, 3), pkt[:48]))
+        self.sock.sendall(pkt)
+        return self._recv_reply(timeout)
+
+    def read_mem(self, addr, size):
+        p = self.cmd("m%x,%x" % (addr, size))
+        if (len(p) != 2 * size
+                or not re.fullmatch(rb"[0-9a-fA-F]+", p)):
+            raise OSError(f"gdbstub read m{addr:x},{size:x} -> {p[:16]!r}")
+        return bytes.fromhex(p.decode())
+
+    def read_reg(self, regnum):
+        p = self.cmd("p%x" % regnum)
+        if not re.fullmatch(rb"[0-9a-fA-F]+", p):
+            raise OSError(f"gdbstub p{regnum:x} -> {p[:16]!r}")
+        # the stub answers register values in TARGET byte order (little
+        # endian for x86_64), reversed from the 'g' packet hex stream
+        return int.from_bytes(bytes.fromhex(p.decode()), "little")
+
+    def write_mem(self, addr, data):
+        p = self.cmd("M%x,%x:%s" % (addr, len(data), data.hex()))
+        if p != b"OK":
+            raise OSError(f"gdbstub write M{addr:x},{len(data):x} -> {p!r}")
+
+    def set_hbreak(self, va):
+        p = self.cmd("Z1,%x,1" % va)
+        if p != b"OK":
+            raise OSError(f"gdbstub Z1 at {va:#x} -> {p!r}")
+
+    def clear_hbreak(self, va):
+        p = self.cmd("z1,%x,1" % va)
+        if p not in (b"OK", b""):
+            raise OSError(f"gdbstub z1 at {va:#x} -> {p!r}")
+
+    def continue_(self, timeout=None, bp_va=None):
+        """Resume and wait for the next stop reply (T/S). 'c' has no
+        synchronous reply: the stop packet arrives when the hardware
+        breakpoint fires. W/X mean the guest died -> hard error.
+
+        bp_va: GDB-style step-over. QEMU TCG does NOT step past a
+        hardware breakpoint on a plain 'c' when the PC already sits on
+        it -- the breakpoint re-triggers immediately and the guest
+        never advances (72 fake stops at one RIP, pinned by a live rip
+        trace). Real gdb removes the breakpoint, single-steps, then
+        reinserts it; with bp_va set this does the same z1/s/Z1 dance
+        before every continue, so each stop is one real round."""
+        if bp_va is not None:
+            self.cmd("z1,%x,1" % bp_va)
+            self.cmd("s")  # single-step over the breakpoint site
+            self.cmd("Z1,%x,1" % bp_va)
+        self.sock.sendall(b"$c#63")
+        self.tx.append((round(time.monotonic() - self.t0, 3), b"$c#63"))
+        deadline = time.monotonic() + (timeout or self.timeout)
+        while True:
+            p = self._recv_packet(deadline)
+            if p[:1] in (b"T", b"S"):
+                return p
+            if p[:1] in (b"W", b"X"):
+                raise OSError(f"guest exited during continue: {p!r}")
+
+    def detach(self):
+        try:
+            self.sock.sendall(b"$D#44")
+            try:
+                self._recv_reply(timeout=2.0)
+            except OSError:
+                pass  # the resume matters, not the reply
+        except OSError:
+            pass
+        finally:
+            self.sock.close()
+
+
+def interactive_leg(args, art, counter_addrs, deadline):
+    """Task 141 W1: drive the interactive tetris leg to completion.
+
+    Runs while the guest sits at IBM_READY (the IBM logo frame is
+    already captured). Stop #h at the main_loop hardware breakpoint
+    means h-1 interactive rounds have completed (the breakpoint sits
+    at the loop top, before key_drain). Sequence, frozen against the
+    chip8 model replay (interactive-probes.json):
+      inject Enter -> the wait_enter leg consumes it, tetris loads,
+      stop #1..#21: 20 rounds -> capture screen-int-20.ppm
+      stop #68 (67 rounds, pc 0x23C delay 10): inject key7 MAKE
+      stop #69 (68 rounds, the make consumed): inject key7 BREAK
+      stop #72 (71 rounds, last key draw presented at round 70):
+      capture screen-int-71-key.ppm
+      clear the breakpoint, inject ESC, detach -> round 72 drains ESC,
+      SYS_EXIT, the kernel teardown republishes the desktop.
+    Keys go straight into input_kbd_buf/used (see APP_INT_SYMBOLS), so
+    the frozen IRQ counters never move. Returns {ppm1, ppm2, log,
+    errors}; on any failure the breakpoint is still cleared and ESC
+    injected so the guest can exit instead of hanging the smoke loop.
+    """
+    log, errors = [], []
+    ppm1 = ppm2 = None
+    model_dir = os.path.join(REPO, "build", "user-chip8")
+    try:
+        with open(os.path.join(model_dir, "interactive-probes.json"),
+                  encoding="utf-8") as f:
+            probes = json.load(f)
+    except (OSError, ValueError) as e:
+        return {"ppm1": None, "ppm2": None, "log": log,
+                "errors": [f"interactive-probes.json: {e} "
+                           "(run tests/stage2-app/check.py first)"]}
+    va = int(probes["main_loop_va"])
+    stop_k1 = int(probes["k1_rounds"]) + 1
+    stop_make = int(probes["key_make_round"])
+    stop_break = int(probes["key_break_round"])
+    stop_cap2 = int(probes["capture_rounds"]) + 1
+    buf_addr = counter_addrs.get("input_kbd_buf")
+    used_addr = counter_addrs.get("input_kbd_used")
+    if buf_addr is None or used_addr is None:
+        return {"ppm1": None, "ppm2": None, "log": log,
+                "errors": ["input_kbd_buf/input_kbd_used address unresolved"]}
+    sess = None
+    try:
+        sess = GdbSession(args.port)
+        log.append("gdb session up (halt query answered)")
+
+        def inject_key(raw, ascii_code, label):
+            used = int.from_bytes(sess.read_mem(used_addr, 8), "little")
+            log.append(f"{label}: kbd used={used} read")
+            sess.write_mem(buf_addr + used * 16,
+                           struct.pack("<QQ", ascii_code, raw))
+            sess.write_mem(used_addr, struct.pack("<Q", used + 1))
+            log.append(f"{label}: raw={raw:#x} ascii={ascii_code:#x} "
+                       f"-> kbd slot {used}")
+
+        inject_key(APP_SC_ENTER, APP_ASCII_ENTER, "enter make")
+        sess.set_hbreak(va)
+        log.append(f"hbreak at main_loop VA {va:#x}")
+        poll_addr = counter_addrs.get("app_poll_count")
+        blit_addr = counter_addrs.get("app_blit_count")
+        stops = 0
+        while stops < stop_cap2:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                errors.append(f"interactive leg deadline at stop {stops} "
+                              f"(need {stop_cap2})")
+                break
+            sess.continue_(timeout=min(30.0, left), bp_va=va)
+            stops += 1
+            if stops <= 3 or stops in (stop_k1, stop_make, stop_cap2):
+                rip = sess.read_reg(16)  # x86_64 gdb regnum 16 = rip
+                pc = int.from_bytes(sess.read_mem(rip, 8), "little")
+                pn = (int.from_bytes(sess.read_mem(poll_addr, 8), "little")
+                      if poll_addr else -1)
+                bn = (int.from_bytes(sess.read_mem(blit_addr, 8), "little")
+                      if blit_addr else -1)
+                log.append(f"stop {stops}: rip={rip:#x} bytes={pc:#x} "
+                           f"poll={pn} blit={bn}")
+            else:
+                log.append(f"stop {stops} at main_loop")
+            if stops == stop_k1:
+                ppm1 = screendump(art, name="screen-int-20.ppm")
+                log.append(f"stop {stops}: screen-int-20.ppm captured "
+                           f"({stop_k1 - 1} rounds)")
+            elif stops == stop_make:
+                inject_key(APP_SC_KEY7_MAKE, APP_ASCII_KEY7, "key7 make")
+            elif stops == stop_break:
+                inject_key(APP_SC_KEY7_BREAK, APP_ASCII_KEY7, "key7 break")
+            elif stops == stop_cap2:
+                ppm2 = screendump(art, name="screen-int-71-key.ppm")
+                log.append(f"stop {stops}: screen-int-71-key.ppm captured "
+                           f"({stop_cap2 - 1} rounds)")
+        sess.clear_hbreak(va)
+        inject_key(APP_SC_ESC, APP_ASCII_ESC, "ESC make")
+        log.append("hbreak cleared, ESC injected, detaching")
+    except OSError as e:
+        errors.append(f"interactive leg: {e}")
+    finally:
+        if sess is not None:
+            sess.detach()
+    return {"ppm1": ppm1, "ppm2": ppm2, "log": log, "errors": errors}
+
+
+def app_frame_match(ppm_data, exp):
+    """True when the 640x320 APP rectangle inside a PPM equals a BGRX
+    model frame pixel for pixel (task 141 interactive tetris evidence,
+    the same comparison the frozen IBM game frame uses)."""
+    if ppm_data is None or exp is None:
+        return False
+    try:
+        w, h, px = parse_ppm(ppm_data)
+    except ValueError:
+        return False
+    if ((w, h) != (PPM_WIDTH, PPM_HEIGHT)
+            or len(exp) != APP_FB_W * APP_FB_H * 4):
+        return False
+    for row in range(APP_FB_H):
+        for col in range(APP_FB_W):
+            soff = ((APP_FB_Y + row) * w + (APP_FB_X + col)) * 3
+            foff = (row * APP_FB_W + col) * 4
+            if (px[soff] != exp[foff + 2]
+                    or px[soff + 1] != exp[foff + 1]
+                    or px[soff + 2] != exp[foff]):
+                return False
+    return True
+
+
+def app_frame_lit(ppm_data):
+    """Non-black pixel count inside the APP rectangle, None on a parse
+    failure: the 'not all black' half of the W1 stepping evidence."""
+    if ppm_data is None:
+        return None
+    try:
+        w, h, px = parse_ppm(ppm_data)
+    except ValueError:
+        return None
+    if (w, h) != (PPM_WIDTH, PPM_HEIGHT):
+        return None
+    n = 0
+    for row in range(APP_FB_H):
+        base = ((APP_FB_Y + row) * w + APP_FB_X) * 3
+        rowpx = px[base:base + APP_FB_W * 3]
+        n += sum(1 for i in range(0, len(rowpx), 3)
+                 if rowpx[i:i + 3] != b"\x00\x00\x00")
+    return n
+
+
 def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None,
-          ppm_echo=None, ppm_gui=None, blk=None, fs=None, fsprobe=None):
+          ppm_echo=None, ppm_gui=None, blk=None, fs=None, fsprobe=None,
+          app=None, ppm_game=None, app_interactive=False):
     """Pure smoke verdict: (ok, report lines). No I/O in here, so the
     decision can be exercised unit-style against mutated serial/debug
     fixtures (the task-67 sensitivity evidence).
@@ -1346,7 +1918,8 @@ def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None,
             "no K64-DESKTOP-SKIP in serial (ok mode)")
         judge_ppm(ppm_gui, PPM_GUI_PROBES, "gui")
         judge_ppm(ppm_echo, PPM_COMMON_PROBES + PPM_ECHO_PROBES, "echo")
-        judge_ppm(ppm, PPM_COMMON_PROBES + PPM_FINAL_PROBES, "final")
+        judge_ppm(ppm, PPM_COMMON_PROBES + PPM_FINAL_PROBES
+                  + (APP_EXIT_PROBES if app is not None else ()), "final")
     else:
         req(GUI_OK_MARKER not in serial,
             "no K64-GUI-OK in serial (skip mode)")
@@ -1383,7 +1956,9 @@ def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None,
         # disk (the BIG.BIN image is a separately frozen sha)
         expect_big = blk.get("expect_big") is True
         want_reads = BLK_TEST_READS_FS_BIG if expect_big else BLK_TEST_READS_FS
-        want_sha = FS_BIG_IMAGE_SHA256 if expect_big else BLK_IMAGE_SHA256
+        want_sha = (FS_BIG_IMAGE_SHA256 if expect_big else
+                    APP_IMAGE_SHA256 if blk.get("expect_app") else
+                    BLK_IMAGE_SHA256)
         for name, want in (("blk_test_mask", 0),
                            ("blk_test_reads", want_reads),
                            ("blk_capacity", BLK_TEST_CAPACITY),
@@ -1445,7 +2020,8 @@ def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None,
         req(fs.get("stat_match") is True,
             "guest stat buffer == the synthesized root stat")
         req(fs.get("image_sha256") ==
-            (FS_BIG_IMAGE_SHA256 if expect_big else FS_IMAGE_SHA256),
+            (FS_BIG_IMAGE_SHA256 if expect_big else
+             APP_IMAGE_SHA256 if fs.get("expect_app") else FS_IMAGE_SHA256),
             "fs evidence image sha256 matches the frozen image in use")
         for e in fs.get("errors", ()):
             req(False, f"fs evidence: {e}")
@@ -1508,6 +2084,124 @@ def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None,
             "the one-way anchor 0 US bit survives the teardown")
         for e in fsprobe.get("errors", ()):
             req(False, f"fsprobe evidence: {e}")
+
+    # APP-v1 verdict, appended AFTER every frozen decision and the
+    # blk/fs/fsprobe blocks above; runs only when app= is passed (--app)
+    if app is not None:
+        n = serial.count(APP_OK_MARKER)
+        req(n == 1, f"{APP_OK_MARKER} count = {n} (need exactly 1)")
+        p_fp = serial.find(FSPROBE_OK_MARKER)
+        p_app = serial.find(APP_OK_MARKER)
+        p_found = serial.find("K64-FOUNDATION-OK")
+        req(p_fp >= 0 and p_app > p_fp and p_found > p_app,
+            "K64-APP-OK sits between K64-FSPROBE-OK and K64-FOUNDATION-OK")
+        req(APP_SKIP_MARKER not in serial,
+            "no K64-APP-SKIP in serial (the app image carries the program)")
+        for name, want in (("app_ready", 1),
+                           ("app_stage", APP_STAGE_DONE),
+                           ("app_exit_code", 0),
+                           ("app_fault_vector", 0),
+                           ("app_image_size", APP_PROGRAM_SIZE),
+                           ("app_table_delta", APP_TABLE_BUDGET),
+                           ("app_table_released", APP_TABLE_BUDGET),
+                           ("app_pages_held", 0),
+                           ("app_interactive",
+                            1 if app_interactive else 0),
+                           ("app_fd_swept", 0),
+                           ("app_echo_saved", 1),
+                           ("app_key_count",
+                            APP_INT_KEY_COUNT if app_interactive else 0),
+                           ("app_saved_fs_reads", FS_TEST_READS),
+                           ("app_saved_blk_reads", BLK_TEST_READS_FS),
+                           ("fs_test_reads", FS_TEST_READS),
+                           ("blk_test_reads", BLK_TEST_READS_FS)):
+            got = app.get(name)
+            req(got == want,
+                f"{name} = {got if got is None else hex(got)} "
+                f"(need {want:#x})")
+        blit = app.get("app_blit_count")
+        blit_need = APP_INT_MIN_BLIT if app_interactive else 1
+        blit_note = (", the IBM logo plus tetris frames)" if app_interactive
+                     else ", the IBM logo)")
+        req(blit is not None and blit >= blit_need,
+            f"app_blit_count = {blit} (need >= {blit_need}" + blit_note)
+        poll = app.get("app_poll_count")
+        poll_need = APP_INT_MIN_POLL if app_interactive else 1
+        req(poll is not None and poll >= poll_need,
+            f"app_poll_count = {poll} (need >= {poll_need})")
+        req(app.get("user_va_unmapped") is True,
+            "the code, data and top stack user VAs are unreadable "
+            "after the app teardown")
+        req(app.get("pages_zeroed") is True,
+            "the app_pages frame array is zeroed after the teardown")
+        req(app.get("frames_released") is True,
+            "app_pages_held is back at 0 after the teardown")
+        req(app.get("released_is_budget") is True,
+            "app_table_released == the +3 table budget")
+        req(app.get("net_table_invariant") is True,
+            "net table allocs-drops is back at the app baseline")
+        req(app.get("pdpt4_clear") is True,
+            "the user PDPT slot 4 is clear again after the teardown")
+        req(app.get("anchor0_us_stays") is True,
+            "the one-way anchor 0 US bit survives the teardown")
+        req(app.get("image_sha256") == APP_IMAGE_SHA256,
+            "disk image sha256 matches the frozen APP-v1 image")
+        # the game frame: the common desktop probes still hold outside
+        # the BLIT rectangle, plus the model lit/unlit cell probes
+        judge_ppm(ppm_game,
+                  PPM_COMMON_PROBES + app.get("game_probes", ()), "game")
+        # the whole 640x320 rectangle == the chip8 model expected frame
+        exp = app.get("expected_frame")
+        if ppm_game is None or exp is None:
+            req(False, "game frame rectangle reference available")
+        else:
+            try:
+                w, h, px = parse_ppm(ppm_game)
+            except ValueError as e:
+                req(False, f"game frame PPM parse: {e}")
+                w, h, px = 0, 0, b""
+            match = ((w, h) == (PPM_WIDTH, PPM_HEIGHT)
+                     and len(exp) == APP_FB_W * APP_FB_H * 4)
+            if match:
+                for row in range(APP_FB_H):
+                    for col in range(APP_FB_W):
+                        soff = ((APP_FB_Y + row) * w
+                                + (APP_FB_X + col)) * 3
+                        foff = (row * APP_FB_W + col) * 4
+                        if (px[soff] != exp[foff + 2]
+                                or px[soff + 1] != exp[foff + 1]
+                                or px[soff + 2] != exp[foff]):
+                            match = False
+                            break
+                    if not match:
+                        break
+            req(match, "game frame rectangle == the chip8 model expected "
+                       "frame pixel for pixel (640x320 BGRX)")
+        # task 141 W1: the interactive tetris stepping evidence. Only
+        # when --app-interactive drove the round loop; the frozen --app
+        # fixtures never pass the flag, their check count is unchanged.
+        if app_interactive:
+            req(app_frame_match(app.get("int_ppm1"),
+                                app.get("int_expected1")),
+                "interactive frame @20 rounds == the model tetris frame "
+                "pixel for pixel (640x320 BGRX)")
+            req(app_frame_match(app.get("int_ppm2"),
+                                app.get("int_expected2")),
+                "interactive frame @71 rounds (key7 tap) == the model "
+                "key frame pixel for pixel (640x320 BGRX)")
+            exp2 = app.get("int_expected2")
+            nokey = app.get("int_expected_nokey")
+            req(exp2 is not None and nokey is not None and exp2 != nokey,
+                "the key7 tap frame differs from the no-key reference "
+                "(the injected direction key changed the game)")
+            lit1 = app_frame_lit(app.get("int_ppm1"))
+            req(lit1 is not None and lit1 > 0,
+                f"the round-20 tetris frame is not all black "
+                f"({lit1} lit pixels)")
+            for e in app.get("int_errors", ()):
+                req(False, f"interactive leg: {e}")
+        for e in app.get("errors", ()):
+            req(False, f"app evidence: {e}")
     return ok, lines
 
 
@@ -1620,6 +2314,18 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
     # window times out into the EIO panic path, a FAIL, never a hang.
     gui_ppm = None
     gui_released = False
+    # APP-v1 handshake state: after K64-FSPROBE-OK the foundation enters
+    # app_launch and publishes IBM_READY (1) in app_stage on the first
+    # BLIT; capture screen-game.ppm, then write EXIT_REQ (2). The guest
+    # READ_KEY fabricates ESC, the program exits, the teardown repaints
+    # the desktop and app_stage reaches DONE (3) before K64-APP-OK.
+    game_ppm = None
+    app_exit_written = False
+    # task 141 W1 interactive leg state: the two tetris round-boundary
+    # captures and the leg errors, merged into app_ev for the judge
+    int_ppm1 = None
+    int_ppm2 = None
+    int_errors = []
 
     def inject(cmd, label):
         # a monitor reply starting with Error/unknown means the command
@@ -1641,6 +2347,7 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
     mouse_addr = counter_addrs.get("input_test_mouse_count")
     d_stage_addr = counter_addrs.get("desktop_test_stage")
     gui_stage_addr = counter_addrs.get("desktop_gui_frame_stage")
+    app_stage_addr = counter_addrs.get("app_stage")
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             early_exit = True  # QEMU died on its own, e.g. -no-reboot on fault
@@ -1736,6 +2443,45 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
                     if n >= 5:
                         d_release_sent = inject("mouse_button 0",
                                                 "desktop stage 4 release")
+        # the APP handshake runs after the fsys probe milestone; the
+        # game frame is captured at IBM_READY before EXIT_REQ is written
+        if (args.app and not args.gui_skip and app_stage_addr is not None
+                and "K64-FSPROBE-OK" in serial_now):
+            try:
+                a_stage = gdb_read_mem(args.port, app_stage_addr, 8)
+            except OSError:
+                a_stage = None
+            if a_stage == APP_STAGE_IBM_READY and game_ppm is None:
+                try:
+                    game_ppm = screendump(art, name="screen-game.ppm")
+                    inject_log.append("game frame: screen-game.ppm "
+                                      "captured")
+                except OSError as e:
+                    inject_log.append("game frame: screendump FAILED: "
+                                      f"{e}")
+                if game_ppm is not None and not app_exit_written:
+                    if args.app_interactive:
+                        # the ESC injection inside the leg replaces the
+                        # EXIT_REQ write: the program exits through the
+                        # real key path, app_interactive stays 1
+                        res = interactive_leg(args, art, counter_addrs,
+                                              deadline)
+                        int_ppm1 = res["ppm1"]
+                        int_ppm2 = res["ppm2"]
+                        int_errors = res["errors"]
+                        inject_log.extend(res["log"])
+                        inject_log.extend("interactive leg: " + e
+                                          for e in res["errors"])
+                        app_exit_written = True
+                    else:
+                        try:
+                            gdb_write_mem(args.port, app_stage_addr,
+                                          APP_STAGE_EXIT_REQ, 8)
+                            app_exit_written = True
+                            inject_log.append("app frame: EXIT_REQ written")
+                        except OSError as e:
+                            inject_log.append(
+                                f"app frame: EXIT_REQ FAILED: {e}")
         time.sleep(0.5)
     # give the kernel a moment to finish its report, then read the
     # memory-only counters while QEMU (and the halted kernel) still lives
@@ -1799,6 +2545,8 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
                  if args.fs else None)
         fsprobe_ev = (collect_fsprobe_evidence(args, art, counter_addrs)
                       if args.fsprobe else None)
+        app_ev = (collect_app_evidence(args, art, counter_addrs)
+                  if args.app else None)
     else:
         blk_ev = {"errors": ["blk evidence not read: QEMU exited early"]}
         fs_ev = ({"errors": ["fs evidence not read: QEMU exited early"]}
@@ -1806,6 +2554,12 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
         fsprobe_ev = (
             {"errors": ["fsprobe evidence not read: QEMU exited early"]}
             if args.fsprobe else None)
+        app_ev = ({"errors": ["app evidence not read: QEMU exited early"]}
+                  if args.app else None)
+    if args.app_interactive and app_ev is not None:
+        app_ev["int_ppm1"] = int_ppm1
+        app_ev["int_ppm2"] = int_ppm2
+        app_ev["int_errors"] = int_errors
     cleanup()
 
     serial = read_log(serial_path)
@@ -1813,7 +2567,9 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
     ok, lines = judge(serial, debug, counters, early_exit,
                       gui_mode="skip" if args.gui_skip else "ok", ppm=ppm,
                       ppm_echo=echo_ppm, ppm_gui=gui_ppm, blk=blk_ev,
-                      fs=fs_ev, fsprobe=fsprobe_ev)
+                      fs=fs_ev, fsprobe=fsprobe_ev, app=app_ev,
+                      ppm_game=game_ppm,
+                      app_interactive=args.app_interactive)
     print()
     print("=" * 72)
     print(f"run-qemu-debug: smoke verdict: {'PASS' if ok else 'FAIL'}")
@@ -1855,6 +2611,22 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
         for entry in (fsprobe_ev.get("log")
                       or ["error: " + e
                           for e in fsprobe_ev.get("errors", ())]):
+            print("    " + entry)
+    if app_ev is not None:
+        print(f"  game screendump PPM : "
+              f"{os.path.join(art, 'screen-game.ppm')} "
+              f"({'captured' if game_ppm is not None else 'MISSING'})")
+        if args.app_interactive:
+            print(f"  int-20 screendump   : "
+                  f"{os.path.join(art, 'screen-int-20.ppm')} "
+                  f"({'captured' if int_ppm1 is not None else 'MISSING'})")
+            print(f"  int-71 screendump   : "
+                  f"{os.path.join(art, 'screen-int-71-key.ppm')} "
+                  f"({'captured' if int_ppm2 is not None else 'MISSING'})")
+        print("  app evidence log  : " + os.path.join(art, "app-evidence.log"))
+        for entry in (app_ev.get("log")
+                      or ["error: " + e
+                          for e in app_ev.get("errors", ())]):
             print("    " + entry)
     if serial:
         print("  serial.log:")
@@ -1899,7 +2671,29 @@ def main():
                          "marker K64-FSPROBE-OK, the fsys counters, the "
                          "evidence qwords and the Ring 3 guest data page "
                          "compared against the ROM source/image")
+    ap.add_argument("--app", action="store_true",
+                    help="assert the APP-v1 verdict: the fourteenth marker "
+                         "K64-APP-OK, the app counters, the teardown "
+                         "receipts and the game/exit frames (use "
+                         "build/fs-v1/disk-app.img; a disk without "
+                         "/PROGRAMS/CHIP8.BIN reports K64-APP-SKIP). "
+                         "Run tests/stage2-app/check.py first: it builds "
+                         "the model probe artifacts ibm-probes.json and "
+                         "ibm-expected-frame.bin this leg compares "
+                         "against (task 141 S4)")
+    ap.add_argument("--app-interactive", action="store_true",
+                    help="task 141 W1: implies --app. After the IBM logo "
+                         "frame, inject Enter/key7/ESC through the gdbstub "
+                         "key buffer and catch the tetris round boundaries "
+                         "with a hardware breakpoint at main_loop; asserts "
+                         "the two model tetris frames pixel for pixel and "
+                         "the full teardown receipts. Run "
+                         "tests/stage2-app/check.py first: it builds "
+                         "interactive-probes.json and the tetris-int-* "
+                         "reference frames this leg compares against")
     args = ap.parse_args()
+    if args.app_interactive:
+        args.app = True
 
     if shutil.which(args.qemu) is None and not os.path.exists(args.qemu):
         print(f"run-qemu-debug: {args.qemu} not found", file=sys.stderr)
@@ -1920,7 +2714,9 @@ def main():
     for stale in ("serial.log", "qemu-debug.log", "screen.ppm",
                   "screen-echo.ppm", "screen-gui.ppm", "monitor.sock",
                   "blk-evidence.log", "fs-evidence.log",
-                  "fsprobe-evidence.log"):
+                  "fsprobe-evidence.log", "screen-game.ppm",
+                  "app-evidence.log", "screen-int-20.ppm",
+                  "screen-int-71-key.ppm"):
         p = os.path.join(art, stale)
         if os.path.exists(p):
             os.unlink(p)
@@ -1937,6 +2733,10 @@ def main():
             extra += FS_COUNTER_SYMBOLS
         if args.fsprobe:
             extra += FSYS_COUNTER_SYMBOLS
+        if args.app:
+            extra += APP_COUNTER_SYMBOLS
+            if args.app_interactive:
+                extra += APP_INT_SYMBOLS
         if args.gui_skip:
             extra += (("video_fb_state", 64),)
         counter_addrs, counter_errors = counter_addresses(art, extra)

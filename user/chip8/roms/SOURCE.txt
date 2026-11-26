@@ -1,0 +1,19 @@
+ROM provenance
+==============
+
+Both ROM images are byte-for-byte copies from the 32-bit KolibriOS CHIP-8
+emulator by rgimad (GNU GPL v2), see:
+
+  kolibrios/programs/emulator/chip8/roms/
+  (upstream ROM collection: https://github.com/dmatlack/chip8/tree/master/roms)
+
+ibm.ch8      132 bytes  sha256 8bf3b46d8a64c2074e7538200f684a2eaced258404d3c7d3bd7a917c3d0143e5
+             Draws the IBM logo, then spins on a jump-to-self at 0x228.
+             Used for the deterministic 256-instruction boot leg.
+
+tetris1.ch8  494 bytes  sha256 667cb026dee03f59f3a2fd81a2ffeab47da87731883f9601d37ba019976f94dd
+             TETRIS game, keys: 4 = rotate, 5 = left, 6 = right.
+             Loaded after Enter switches from the boot leg to interactive mode.
+
+The sha256 digests are mirrored as assembly-time constants in ../api.inc and
+asserted by tests/stage2-app/chip8_model.py.

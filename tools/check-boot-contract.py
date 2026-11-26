@@ -67,6 +67,7 @@ Exit status is non zero when any check fails.
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1721,6 +1722,38 @@ def check_bootstrap_outdir(root):
             f.write("#!/bin/sh\nexit 0\n")
         os.chmod(fasm1, 0o755)
 
+        # task 141: build_fasm2.sh also prebuilds repo-side artifacts
+        # (fsprobe.bin, chip8.bin, disk-app.img) under its own root, so
+        # the fixture must run a COPY of the script inside the sandbox:
+        # the stub host writes 'x' to every output it is handed, and the
+        # real script would poison the real build tree (the S3 image
+        # step would then bake the poisoned chip8.bin into disk-app.img)
+        sandbox_build = os.path.join(tmp, "build_fasm2.sh")
+        shutil.copy2(build, sandbox_build)
+        os.makedirs(os.path.join(tmp, "tools"))
+        shutil.copy2(os.path.join(root, "tools", "build-fat16-image.py"),
+                     os.path.join(tmp, "tools", "build-fat16-image.py"))
+        for stub_src in ("user/fsprobe/fsprobe.asm", "user/chip8/chip8.asm",
+                         "kernel/boot/bootx64.asm", "kernel/kernel64.asm"):
+            path = os.path.join(tmp, stub_src)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            open(path, "w").close()
+        # the image builder verifies the frozen ROM digests against
+        # api.inc, so the sandbox carries the real constants and ROMs
+        os.makedirs(os.path.join(tmp, "user", "chip8", "roms"))
+        shutil.copy2(os.path.join(root, "user", "chip8", "api.inc"),
+                     os.path.join(tmp, "user", "chip8", "api.inc"))
+        for rom in ("ibm.ch8", "tetris1.ch8"):
+            shutil.copy2(os.path.join(root, "user", "chip8", "roms", rom),
+                         os.path.join(tmp, "user", "chip8", "roms", rom))
+        os.makedirs(os.path.join(tmp, "tests", "stage2-app"))
+        with open(os.path.join(tmp, "tests", "stage2-app",
+                               "app-manifest.json"), "w") as f:
+            f.write('{"/PROGRAMS/CHIP8.BIN": "build/user-chip8/chip8.bin"}')
+        repo_chip8 = os.path.join(root, "build", "user-chip8", "chip8.bin")
+        chip8_before = (open(repo_chip8, "rb").read()
+                        if os.path.isfile(repo_chip8) else None)
+
         # the whole fixture is relative: this is the case a user hits when
         # calling ./build_fasm2.sh from next to the checkout
         kernel_out = "kernel-out"
@@ -1729,8 +1762,8 @@ def check_bootstrap_outdir(root):
         env.pop("FASMG", None)
         env.update({"OUTDIR": kernel_out, "FASM2_DIR": "fasm2",
                     "FASM1": "./fasm1-stub"})
-        proc = subprocess.run([build], cwd=tmp, env=env, capture_output=True,
-                              text=True)
+        proc = subprocess.run([sandbox_build], cwd=tmp, env=env,
+                              capture_output=True, text=True)
         check(proc.returncode == 0,
               "build_fasm2.sh bootstraps from relative paths (status %d)" %
               proc.returncode)
@@ -1767,6 +1800,12 @@ def check_bootstrap_outdir(root):
               "the kernel artifacts land in OUTDIR")
         check(not os.path.exists(os.path.join(kernel_abs, "fasmg-macos-x64")),
               "no host is written into the kernel build tree")
+        # task 141 regression: the stub host must never reach the real
+        # repo build tree, the sandbox copy keeps every 'x' write local
+        chip8_after = (open(repo_chip8, "rb").read()
+                       if os.path.isfile(repo_chip8) else None)
+        check(chip8_before == chip8_after,
+              "the OUTDIR fixture leaves the real chip8.bin untouched")
     check(not os.path.exists(os.path.join(tempfile.gettempdir(),
                                          os.path.basename(tmp))),
           "the bootstrap scratch directory is gone again")

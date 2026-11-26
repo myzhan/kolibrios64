@@ -1205,8 +1205,9 @@ def check_sources(rep, root):
     rep.check('source.blk_asm_end_assertion',
               'if $ <> blk_data_end' in asm_text)
 
-    # the frozen STI ownership across the whole kernel source tree is
-    # unchanged: the blk module adds no third owner
+    # the frozen STI ownership across the whole kernel source tree;
+    # task 115 adjudication: the APP-v1 interactive POLL leg is the
+    # third legal owner (LVT masked, RTEs re-masked, ticks stay 11)
     hits = []
     for path in sorted((root / 'kernel').rglob('*')):
         if path.suffix not in ('.asm', '.inc') or not path.is_file():
@@ -1215,17 +1216,20 @@ def check_sources(rep, root):
         for m in re.finditer(r'^\s*sti\b', text, re.M):
             hits.append(str(path.relative_to(root)))
     rep.equal('source.kernel_sti_sites', hits,
-              ['kernel/desktop/desktop.inc', 'kernel/irq/selftest.inc'])
+              ['kernel/app/app.inc', 'kernel/desktop/desktop.inc',
+               'kernel/irq/selftest.inc'])
 
     # the kernel include order: blk sits between desktop and fs, the
-    # core trio closes after fs (FS-v1 M2 inserted fs right after blk)
+    # core trio closes after app (FS-v1 M2 inserted fs right after blk,
+    # task 115 inserted app right after fsys)
     k64 = (root / 'kernel' / 'kernel64.asm').read_text(encoding='utf-8')
     incs = re.findall(r"^include\s+'([^']+)'", k64, re.M)
     ok = ('blk/blk.asm' in incs and
           incs.index('blk/blk.asm') == incs.index('desktop/desktop.asm') + 1 and
           incs.index('fs/fs.asm') == incs.index('blk/blk.asm') + 1 and
           incs.index('fsys/fsys.asm') == incs.index('fs/fs.asm') + 1 and
-          incs.index('core/contracts.inc') == incs.index('fsys/fsys.asm') + 1)
+          incs.index('app/app.asm') == incs.index('fsys/fsys.asm') + 1 and
+          incs.index('core/contracts.inc') == incs.index('app/app.asm') + 1)
     rep.check('source.kernel64_include_position', ok, repr(incs[-6:]))
     rep.check('source.kernel64_blk_hosted',
               re.search(r"^BLK_HOSTED = 1\ninclude 'blk/blk\.asm'", k64, re.M)

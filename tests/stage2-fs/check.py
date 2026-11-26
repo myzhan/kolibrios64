@@ -129,6 +129,10 @@ STAT_SIZE = 64
 # frozen images: build/fs-v1/disk.img and the --manifest BIG.BIN image
 IMAGE_SHA = 'e9e83dad3f6d5193ac15c7a35834cc5190ca34e978b537d80be9fa9beb7bc42b'
 BIG_IMAGE_SHA = 'a810280509cd05f67dce37dc46e67cbfeb2e9432b73a105108f9a2d298500543'
+# APP-v1 hosted-program image: /PROGRAMS/CHIP8.BIN instead of BIG.BIN,
+# the same ROMS and geometry, so the plain sector totals still hold
+APP_IMAGE_SHA = 'aec9f70167e6e18170a638bf4af3d5bf28817cf2ff37d6fec5a137cec12f3170'
+TEST_CHIP8_SIZE = 3255
 
 TEST_IBM_SIZE = 132
 TEST_TETRIS_SIZE = 494
@@ -199,6 +203,7 @@ NAMES = {
     'n_ibm': b'IBM     CH8',
     'n_tetris': b'TETRIS1 CH8',
     'n_big': b'BIG     BIN',
+    'n_chip8': b'CHIP8   BIN',
 }
 
 MAGIC = b'K64FSP1'
@@ -218,7 +223,7 @@ M = [
     'msg_selftest_mask', 'msg_nl',
     'p_ibm_lower', 'p_ibm', 'p_tetris', 'p_missing', 'p_ibm_x',
     'p_nope', 'p_roms', 'p_root', 'p_programs', 'p_big',
-    'n_roms', 'n_programs', 'n_ibm', 'n_tetris', 'n_big',
+    'n_roms', 'n_programs', 'n_ibm', 'n_tetris', 'n_big', 'n_chip8',
     'ready', 'spc', 'reserved', 'nfats', 'spf', 'root_entries',
     'root_sectors', 'total', 'clusters', 'fat_lba', 'root_lba',
     'data_lba', 'sec_tag', 'sec_valid', 'test_mask', 'test_reads',
@@ -516,7 +521,7 @@ def region(img, start, stop):
 def check_manifest(rep, img):
     rep.check('manifest.magic', True, MAGIC.decode())
     rep.equal('manifest.version', img['version'], MANIFEST_VERSION)
-    rep.equal('manifest.entry_count', len(M), 173)
+    rep.equal('manifest.entry_count', len(M), 174)
     for name, want in CONSTANTS.items():
         # negative status codes live in the manifest as two's complement
         rep.equal('manifest.%s' % name, img[name], want & 0xFFFFFFFFFFFFFFFF)
@@ -588,11 +593,11 @@ def check_data(rep, img):
     # each raw 8.3 name constant is EXACTLY 11 bytes: consecutive name
     # labels must sit 11 bytes apart, a stray pad byte would shift the
     # whole tail without breaking the per-label byte compare above
-    order = ['n_roms', 'n_programs', 'n_ibm', 'n_tetris', 'n_big']
+    order = ['n_roms', 'n_programs', 'n_ibm', 'n_tetris', 'n_big', 'n_chip8']
     gaps = [img.at(b) - img.at(a) for a, b in zip(order, order[1:])]
-    rep.equal('data.name_constants_are_11_bytes', gaps, [11, 11, 11, 11])
+    rep.equal('data.name_constants_are_11_bytes', gaps, [11, 11, 11, 11, 11])
     rep.equal('data.names_close_the_code',
-              img.at('n_big') + len(NAMES['n_big']), img.at('code_end'))
+              img.at('n_chip8') + len(NAMES['n_chip8']), img.at('code_end'))
 
 
 def check_frames(rep, img):
@@ -1664,7 +1669,15 @@ def replay_selftest(m):
             d = m.bufs['dirents']
             if u64(d, 8) != TEST_BIG_SIZE or d[16:27] != NAMES['n_big']:
                 return False
-        elif n != 0:
+        elif n == 0:
+            pass
+        elif n == DIRENT_SIZE:
+            # APP-v1: the hosted CHIP8.BIN replaces BIG.BIN
+            d = m.bufs['dirents']
+            if (u64(d, 8) != TEST_CHIP8_SIZE or
+                    d[16:27] != NAMES['n_chip8']):
+                return False
+        else:
             return False
         ev['prog_dirents'] = bytes(m.bufs['dirents'][:n])
         if m.readdir(fd, 'dirents', 96) != (OK, 0):
@@ -1879,6 +1892,34 @@ def check_model(rep, root, img, out):
                   [106, 107, 108, 109, 121] + [65, 97, 65])
     rep.equal('mirror.big_miss_trace', evb['misses'], big_misses)
 
+    # the APP-v1 image replay: /PROGRAMS/CHIP8.BIN instead of BIG.BIN.
+    # The ROMS legs and the geometry are identical to the plain image,
+    # so the sector totals stay at the plain values; only leg 4 (10)
+    # takes the new third state. This is a pure append: the plain and
+    # BIG.BIN replays above are untouched.
+    app_path = root / 'build' / 'fs-v1' / 'disk-app.img'
+    if rep.check('model.app_image_present', app_path.is_file(),
+                 str(app_path)):
+        app = app_path.read_bytes()
+        rep.equal('model.app_image_sha', hashlib.sha256(app).hexdigest(),
+                  APP_IMAGE_SHA)
+        oracle_app = model.Fat16(app)
+        ma = KernelFsMirror(app)
+        eva = replay_selftest(ma)
+        rep.equal('mirror.app_mask', eva['mask'], 0)
+        rep.equal('mirror.app_reads', eva['reads'], TEST_READS_FINAL)
+        rep.equal('mirror.app_blk_reads', eva['blk_reads'], BLK_READS_FINAL)
+        rep.equal('mirror.app_big_present', eva['big_present'], 0)
+        rep.check('mirror.app_prog_dirents',
+                  dirent_rows(eva.get('prog_dirents', b'')) ==
+                  oracle_rows(oracle_app.readdir('/PROGRAMS')))
+        rep.check('mirror.app_chip8_bytes',
+                  oracle_app.read('/PROGRAMS/CHIP8.BIN') ==
+                  (root / 'build' / 'user-chip8' / 'chip8.bin').read_bytes())
+        rep.check('mirror.app_roms_dirents',
+                  dirent_rows(eva.get('roms_dirents', b'')) ==
+                  oracle_rows(oracle_app.readdir('/ROMS')))
+
     # case insensitive resolution cross checked against the oracle
     mc = KernelFsMirror(disk)
     mc.init()
@@ -2070,14 +2111,15 @@ def check_sources(rep, root):
               '%d err sites' % len(re.findall(r'^\s*err\b', api, re.M)))
 
     # the kernel include order: fs sits between blk and fsys, the M3
-    # file-syscall module that consumes the fs API; contracts closes the
-    # module chain right after fsys
+    # file-syscall module that consumes the fs API; task 115 inserted
+    # app right after fsys, contracts closes the module chain after app
     k64 = (root / 'kernel' / 'kernel64.asm').read_text(encoding='utf-8')
     incs = re.findall(r"^include\s+'([^']+)'", k64, re.M)
     ok = ('fs/fs.asm' in incs and
           incs.index('fs/fs.asm') == incs.index('blk/blk.asm') + 1 and
           incs.index('fsys/fsys.asm') == incs.index('fs/fs.asm') + 1 and
-          incs.index('core/contracts.inc') == incs.index('fsys/fsys.asm') + 1)
+          incs.index('app/app.asm') == incs.index('fsys/fsys.asm') + 1 and
+          incs.index('core/contracts.inc') == incs.index('app/app.asm') + 1)
     rep.check('source.kernel64_include_position', ok, repr(incs[-6:]))
     rep.check('source.kernel64_fs_hosted',
               re.search(r"^FS_HOSTED = 1\ninclude 'fs/fs\.asm'", k64, re.M)
@@ -2117,8 +2159,9 @@ def check_sources(rep, root):
               "kmsg_fs_ok            db 'K64-FS-OK', 13, 10, 0" in found)
     rep.check('source.foundation_no_fs_skip', 'K64-FS-SKIP' not in found)
 
-    # the frozen STI ownership across the whole kernel source tree is
-    # unchanged: the fs module adds no third owner
+    # the frozen STI ownership across the whole kernel source tree;
+    # task 115 adjudication: the APP-v1 interactive POLL leg is the
+    # third legal owner (LVT masked, RTEs re-masked, ticks stay 11)
     hits = []
     for path in sorted((root / 'kernel').rglob('*')):
         if path.suffix not in ('.asm', '.inc') or not path.is_file():
@@ -2127,7 +2170,8 @@ def check_sources(rep, root):
         for m in re.finditer(r'^\s*sti\b', text, re.M):
             hits.append(str(path.relative_to(root)))
     rep.equal('source.kernel_sti_sites', hits,
-              ['kernel/desktop/desktop.inc', 'kernel/irq/selftest.inc'])
+              ['kernel/app/app.inc', 'kernel/desktop/desktop.inc',
+               'kernel/irq/selftest.inc'])
 
     # the IRQ dispatch table is byte frozen and never mentions fs
     dispatch = (root / 'kernel' / 'irq' / 'dispatch.inc').read_text(
@@ -2326,6 +2370,11 @@ def run_fixtures(rep, root, out, fasmg, fasm2_dir):
                          tree / 'tools' / 'build-fat16-image.py')
             shutil.copytree(root / 'user' / 'chip8', tree / 'user' / 'chip8')
             shutil.copytree(root / 'build' / 'fs-v1', tree / 'build' / 'fs-v1')
+            # the APP-v1 replay compares the hosted program bytes against
+            # the build product, so the sandbox needs chip8.bin too
+            (tree / 'build' / 'user-chip8').mkdir(parents=True)
+            shutil.copy2(root / 'build' / 'user-chip8' / 'chip8.bin',
+                         tree / 'build' / 'user-chip8' / 'chip8.bin')
             target = tree / rel
             text = target.read_text(encoding='utf-8')
             if text.count(old) != 1:

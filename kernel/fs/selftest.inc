@@ -383,7 +383,11 @@ fs_st_seek_done:
         call    fs_close
         test    eax, eax
         jnz     fs_st_fail_neg
-        ; (10) /PROGRAMS is empty on the plain image, BIG.BIN on the big one
+        ; (10) /PROGRAMS is empty on the plain image, BIG.BIN on the big
+        ; one, and the hosted CHIP8.BIN on the APP-v1 image. The third
+        ; state is a pure extension: the plain and BIG.BIN replays keep
+        ; their exact byte path and sector totals, only an image that
+        ; carries the program instead of BIG.BIN takes the new branch.
         mov     rcx, p_fs_programs
         xor     edx, edx
         call    fs_open
@@ -410,7 +414,19 @@ fs_st_seek_done:
         jmp     .prog_again
 .prog_empty:
         test    edx, edx
-        jnz     fs_st_fail_neg
+        jz      .prog_again
+        ; APP-v1: no BIG.BIN, but /PROGRAMS may hold the hosted program.
+        ; Exactly one CHIP8.BIN of the frozen build size is legal; any
+        ; other dirent count, size or name still fails the leg.
+        cmp     edx, FS_DIRENT_SIZE
+        jne     fs_st_fail_neg
+        cmp     qword [fs_test_dirents + 8], 3255
+        jne     fs_st_fail_neg
+        lea     rsi, [fs_test_dirents + 16]
+        lea     rdi, [n_fs_chip8]
+        mov     ecx, 11
+        repe cmpsb
+        jne     fs_st_fail_neg
 .prog_again:
         mov     ecx, r14d
         mov     rdx, fs_test_dirents
@@ -668,5 +684,6 @@ n_fs_programs db 'PROGRAMS   '
 n_fs_ibm      db 'IBM     CH8'
 n_fs_tetris   db 'TETRIS1 CH8'
 n_fs_big      db 'BIG     BIN'
+n_fs_chip8    db 'CHIP8   BIN'
 
 fs_code_end:

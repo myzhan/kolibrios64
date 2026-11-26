@@ -152,6 +152,20 @@ mkdir -p "$outdir"
 mkdir -p "$root/build/user-fsprobe"
 assemble user/fsprobe/fsprobe.asm "$root/build/user-fsprobe/fsprobe.bin"
 
+# APP-v1 task 115: prebuild the Ring 3 chip8 image. It is no longer
+# embedded in the kernel: tools/build-fat16-image.py --manifest puts
+# build/user-chip8/chip8.bin onto the app disk image as /PROGRAMS/CHIP8.BIN
+# and kernel/app loads it through the fs API at launch time.
+mkdir -p "$root/build/user-chip8"
+assemble user/chip8/chip8.asm "$root/build/user-chip8/chip8.bin"
+
+# APP-v1 task 141 S3: rebuild the app disk image right after chip8.bin so
+# a clean checkout can run tests/stage2-app without a manual image step.
+# The builder resolves the manifest host paths against the repo root.
+python3 "$root/tools/build-fat16-image.py" \
+        --manifest "$root/tests/stage2-app/app-manifest.json" \
+        --out "$root/build/fs-v1/disk-app.img"
+
 assemble kernel/boot/bootx64.asm "$outdir/BOOTX64.EFI"
 assemble kernel/kernel64.asm "$outdir/KERNEL64.BIN"
 

@@ -24,7 +24,9 @@
 | kolibrios64 | `2bd897b` | 桌面壳：最小交互桌面（QEMU 验证，见 §9） |
 | kolibrios64 | `7080025` | FONT-FIX 字体位序修复 + 独立 oracle 门禁（QEMU 验证，见 §7.10） |
 | kolibrios64 | `e2bcbe7` | docs：FONT-FIX 提交哈希补录 |
-| kolibrios64 | `424fed2` | FS-v1：virtio-blk + 只读 FAT16 + 文件 syscall 4..9（QEMU 验证，见 §10；含 APP-v1 轨一 CPU/MM 用户态前置，收口文件不可拆分裁决；当前 HEAD） |
+| kolibrios64 | `424fed2` | FS-v1：virtio-blk + 只读 FAT16 + 文件 syscall 4..9（QEMU 验证，见 §10；含 APP-v1 轨一 CPU/MM 用户态前置，收口文件不可拆分裁决） |
+| kolibrios64 | `3b1617d` | docs：FS-v1 提交哈希补录（当前 HEAD） |
+| kolibrios64 | 待回填（任务 119） | APP-v1：首个用户程序 CHIP-8（Ring 3 + SYSCALL + FS 装载，QEMU 验证，见 §11） |
 | fasm2 | `0253b7f` | macOS x64 自举工作流收口（自举里程碑，含 `aad830d` 自举宿主与自宿主测试） |
 
 以上锚点已用 `git log --oneline` 核对。本文档随后续里程碑一并提交，不单独入库。
@@ -1764,7 +1766,300 @@
 
 ---
 
-## 11. 进行中（占位，待验证通过后补录）
+## 11. APP-v1：首个用户程序 CHIP-8（提交哈希待回填，任务 119）
+
+> 状态：已通过独立验证（**10/10**，任务 116）与审查修复复验
+> （**六大项 6/6**，任务 142）；收口审查 W1 / S1–S5 与门禁污染、
+> GdbSession 双缺陷全部修复并复验（§11.6）。提交范围：kernel/app
+> 宿主装载器新模块，user/chip8 FS 化（含 roms/），core 集成
+> （contracts.inc APP 段 + task 141 尾追加裁决段 / foundation leg /
+> kernel64.asm include 序），fs selftest leg4 第三态，build_fasm2.sh
+> chip8.bin / disk-app.img 衔接，tools/run-qemu-debug.py --app 编排
+> 与 GdbSession 修复，check-boot-contract.py OUTDIR fixture 沙箱化，
+> tests/stage2-app 新门禁及 stage2-fs / blk / fsys / irq 扩展，
+> 本文档。提交哈希**待回填（任务 119）**。
+
+### 11.1 背景与用户裁决：FS 先行装载 + 用户 VA 域方案 B
+
+- **裁决经过（如实记录）**：APP-v1 轨一（CPU syscall/Ring 3
+  地基 + mm 用户域铺垫）进行中，用户插入 FS-v1（§10.1）——
+  **APP 装载必须走文件系统**，避免「ROM 嵌入内核镜像」路径
+  定型后返工；FS 契约冻结后 APP 集成解冻（§10.10），本章即
+  该集成里程碑的收口记录。
+- **用户 VA 域方案 B 裁决（独立高位域）**：用户域取
+  **[0x100400000, 0x100800000)**，既非 32 位「应用装载地址零」
+  布局，也不与 identity 域共享——经 FS-v1 M3 落地冻结
+  （§10.6）；user/chip8 完成方案 B VA 重定位，api.inc sha
+  注释即重定位后终值。
+- **GDT 方案 A 裁决**：冻结草案用户选择子 0x20/0x28 与 0x18
+  处 16 字节 TSS 描述符（占 0x18..0x27）重叠，56 字节 GDT 容
+  不下——裁决用户段对后移至 TSS 之后：数据 0x28 / 代码 0x30，
+  内核选择子不动（§11.5）。两处偏差在 contracts.inc 注释中
+  如实记录（reported pending adjudication → 冻结）。
+- **证据文件**：`kolibrios64/kernel/core/contracts.inc`（APP-v1
+  段 GDT/VA 裁决注释）、`user/chip8/api.inc`（scheme B VA
+  relocation 注释）、本文档 §10.1/§10.6/§10.10；裁决经过本身
+  无仓库内文本，按项目决策记录口径标注。
+
+### 11.2 32 位基线：MENUET01 可执行格式 + int 0x40 系统调用
+
+- **32 位做法**：用户程序为 MENUET01 头可执行映像（'MENUET01'
+  魔数 + 入口/内存布局字段），内核 taskman 装载时校验 'MENU'
+  签名后按头字段建立进程；系统调用走 **int 0x40** 中断门
+  （core/syscall.inc 调用面），programs/ 目录应用皆此格式
+  （仓库内参照 core/test_malloc.asm：MENUET01 头 + int 0x40）。
+- **64 位做法（最小形态）**：**Ring 3 + SYSCALL/SYSRET**（无
+  int 门）；首个程序取**无格式头 flat binary**（chip8.bin），
+  经 **/PROGRAMS/CHIP8.BIN 文件 syscall 路径**装载到冻结 VA，
+  无格式解析、无重定位。
+- **变更理由**：口径仍是功能契约层对齐（§5/§10.2 延续）——
+  保留「程序从磁盘装载 + syscall 服务」的功能语义，不是
+  MENUET01 二进制兼容；flat binary 使装载器可逐字节验证
+  （尺寸门禁 + sha 冻结），格式头/重定位留待后续里程碑。
+  32 位「装载地址零 + 地址位提取 slot」假设不照搬。
+- **证据文件**：`kolibrios/kernel/trunk/core/taskman.inc`
+  （'MENU' 头校验）、`core/syscall.inc`（int 0x40 调用面）、
+  `core/test_malloc.asm`（MENUET01 + int 0x40 仓库内参照）；
+  `kolibrios64/kernel/app/app.inc`（FS 装载路径）、`user/chip8/`。
+
+### 11.3 kernel/app 宿主装载器：516 页装载与握手/退出协议
+
+- **32 位做法**：taskman 按 MENUET01 头建立进程地址空间，
+  常驻多进程（对照，不照搬）。
+- **64 位做法**：五文件模块（api.inc / app.asm / app.inc /
+  data.inc / selftest.inc），include 于 fsys 之后 contracts
+  之前。app_launch 走**内核内部 fs API**（fs_stat/fs_open/
+  fs_read/fs_close，EAX 状态/RDX 结果）读 /PROGRAMS/CHIP8.BIN，
+  尺寸门禁 0 < size ≤ 16 KiB；**516 页装载**（4 code RX+US +
+  512 data RW+NX+US 覆盖整个 2 MiB 域，16 KiB 栈位于 data 域
+  顶部、无额外叶帧），**+3 表预算**（1 PD + 2 PT）。握手四阶段
+  app_stage：IDLE → IBM_READY（首 BLIT 交付，host 截屏）→
+  EXIT_REQ（host 写退出请求）→ DONE；键队空且 stage=EXIT_REQ
+  时 READ_KEY **伪造一次 ESC make**（rax=27 / rdx=0x01，不
+  推进 consumed/key_count），未修改的用户 key_drain 走真实
+  sys_exit(0)。**每条快照后退出路径**（EXIT / Ring 3 fault /
+  注册失败）全量 teardown：516 叶经 vmm_unmap_user_page
+  （部分失败容忍 ENOENT）、恰释放 +3 表、帧释放、数组清零、
+  app_pages_held=0、fd 泄漏清扫、桌面完整重绘 + 光标按桌面
+  自身坐标重置。**fault seam**：cpu_user_fault_set_handler 把
+  Ring 3 故障泊入 app_fault_vector（向量+1，0=无），EIO 裁决
+  走 teardown；RSP0 纪律沿 S3 先例（每条失败路径恢复已保存
+  的 foundation TSS.RSP0）。**ENOENT 非致命裁决**：plain/big
+  磁盘无 CHIP8.BIN → `K64-APP-SKIP`（不 panic），13 标记口径
+  不变。**fs/blk 冻结计数器快照恢复**：app 数据区 21→22 页
+  （新增 app_fs_snapshot 页，launch 入口 rep movsq 快照
+  fsys_bounce），避免探针/APP bounce 复用冲突；fsys 三页冻结
+  不动。内核由此 856064→**860160 B**（+4096）。
+- **变更理由**：hosted 语义（launch 注册 syscall 0..3、每条
+  退出路径注销）使 APP 调用面非常驻，4..9 fsys 适配器常驻供
+  chip8 读 ROM；快照恢复保住 M1/M2 冻结终值可判定；全退出
+  路径 teardown 是 W3 契约（§10.7）的 APP 级复用。
+- **证据文件**：`kolibrios64/kernel/app/api.inc|app.inc|data.inc|
+  selftest.inc`、`kernel/core/contracts.inc`（task 115 段
+  A1–A6 裁决注释）、`foundation.inc`（app leg / K64-APP-OK /
+  K64-APP-SKIP）、`kernel/fs/selftest.inc`（leg4 第三态）；
+  实测回放 build/stage2-app-int/progress.md（不入库）。
+
+### 11.4 user/chip8 FS 化与 interactive pacing（A7/A8）
+
+- **FS 化**：删两处内嵌 ROM 数据段，改 sys_open/sys_read/
+  sys_close 包装从 **/ROMS/** 读取（IBM.CH8→RAM+0x200，Enter
+  后 TETRIS1.CH8）；ROM sha256 常量保留为门禁期望。chip8.bin
+  由 build_fasm2.sh 产出，尺寸/sha 常量链四处同步
+  （selftest.inc / stage2-fs / stage2-app / runner）。
+- **interactive pacing 冻结语义（A7/A8，W1 裁决见 §11.6）**：
+  user 每轮固定 **IPS_PER_TICK=5** 条指令预算 + 按轮累加
+  **TIMER_HZ=60** 进 acc、**TIMER_ACC_BASE=100** 分频（~417
+  ips），不再消费 POLL r8d tick 快照；kernel interactive
+  POLL：LVT timer mask → KBD/MOUSE RTE live → **单一 sti…cli
+  窗口内 APP_IPOLL_CHUNK=0x40000 有界 pause 自旋** → RTE
+  re-mask。A8 取代 A1 的 sti;hlt;cli（gdbstub 键注入无法唤醒
+  HLT，LVT masked 下无其他唤醒源）；A1 IRQ 口径不动：
+  irq_test_ticks 恒 11、13 标记冻结终值不变、模块内仍恰一个
+  STI owner。IBM leg（interactive=0）保持 IF=0
+  APP_POLL_CHUNK=0x2000000 pause 窗，**字节行为不变**。
+- **证据文件**：`kolibrios64/user/chip8/chip8.asm`（固定预算
+  循环）、`api.inc`（IPS/TIMER 常量）、`kernel/app/app.inc`
+  （interactive 分支与注释）、`kernel/core/contracts.inc`
+  （A7/A8 + K64_APP_IPOLL_CHUNK 双向断言）。
+
+### 11.5 契约冻结清单（APP-v1 冻结面）
+
+- **GDT 方案 A**：用户数据 **0x28** / 代码 **0x30**（加载值
+  0x2B/0x33），TSS 保持 **0x18**，GDT **56 B**；
+  **STAR=(0x20<<48)|(0x08<<32)**，SFMASK=0x200 恰清 IF，
+  SYSRET CS 0x33 / SS 0x2B 按 SDM 规则从 STAR 基派生
+  （汇编期断言）。
+- **VA 域与足迹**：[0x100400000, 0x100800000)（PML4 slot 0 /
+  PDPT[4]），code 16 KiB RX+US / data 2 MiB RW+NX+US / 栈顶
+  16 KiB；**516 叶 + 3 表**；vmm_map_user_page /
+  vmm_unmap_user_page teardown 收据 **released=3 /
+  pages_held=0**。
+- **syscall 面**：0..3 = **EXIT(0) / BLIT(1) / READ_KEY(2) /
+  POLL(3)**（语义以 contracts.inc APP 段为准），
+  **SYS_CALL_MAX=16**；0..3 仅程序运行期注册，4..9 常驻 fsys；
+  Linux 风格 ABI（RAX 号，RDI/RSI/RDX/R10/R8/R9 参数，
+  RCX/R11 由 SYSCALL 本身破坏）。
+- **BLIT 几何与握手**：dst (192,224)、640×320；stage 0..3；
+  ESC 伪造 ascii 27 / make 0x01，ENTER make 0x1C。
+- **pacing 常量**：IPS_PER_TICK=5 / TIMER_HZ=60 /
+  TIMER_ACC_BASE=100；APP_IPOLL_CHUNK=0x40000 双向等值 +
+  < APP_POLL_CHUNK 上界断言（尾追加零删除行）。
+- **终值冻结**：chip8.bin **3255 B** sha256
+  `9da19f2d0b537ac85cfb758e9615f0a111f32b96c125150b91218bb8ff630f82`；
+  disk-app.img sha256
+  `aec9f70167e6e18170a638bf4af3d5bf28817cf2ff37d6fec5a137cec12f3170`；
+  plain/big FAT16 映像 sha **不变**（`e9e83dad…bc42b` /
+  `a8102805…00543`）；内核 KERNEL64.BIN **860160 B**
+  （sha `c13518b5…`）；kernel app 数据区 **22 页**（含
+  app_fs_snapshot）。
+- **证据文件**：`kolibrios64/kernel/core/contracts.inc`（APP
+  段 + task 141 尾追加段）、`kernel/app/api.inc`、
+  `user/chip8/api.inc`、`tests/stage2-app/check.py`、
+  `build_fasm2.sh`。
+
+### 11.6 缺陷与修复史（三层验证与门禁卫生的实证）
+
+- **draw_sprite 位循环偏移丢 col（两段修复，如实记录）**：
+  首段 `lea ecx,[rdi+rax]` 误用移位后 sprite 值作像素偏移 →
+  改 `[rdi+r8]`（位索引）只对一半（chip8.bin 3311→3312 B）；
+  运行时取证（state 页 dump V 寄存器正确 + 双侧 trace 传参
+  col/row/n 正确）推翻 V[0]≡0 假设，真根因：col+bit 算在 eax
+  后被 sprite 字节覆盖，偏移只剩 row*64+bit → **6 字符全部
+  叠在 col=0 XOR**。正确修复：裁剪后 `mov r9d,eax` 保存
+  col+bit，偏移改 `lea ecx,[rdi+r9]`（3312→3315 B）；门禁
+  升级 r9 列保存**正反断言**（source.chip8_draw_bit_index，
+  r9→r8 变异被抓）。临时 trace 全部移除还原。
+- **收口审查 W1（interactive pacing 死路，裁决修复而非
+  遗留）**：tetris interactive 循环消费冻结 irq_test_ticks
+  （LVT_MASK 口径下恒 11）→ tick-delta 恒 0 → **Enter 后 0
+  条指令，不可玩**。修复两侧：kernel interactive POLL 改
+  A8 有界 pause 自旋（§11.4）；user 改 A7 固定预算 + 按轮
+  累加分频，**不触碰冻结 IRQ 口径**（irq_test_ticks 恒 11、
+  13 标记冻结终值不变），**IBM 冻结分支字节不变**；
+  contracts.inc 尾追加 A7/A8 裁决段 + K64_APP_IPOLL_CHUNK
+  断言（单一 hunk 零删除行，严格尾追加）。chip8.bin
+  3315→**3255 B** 终值。
+- **门禁污染真缺陷（门禁卫生实证）**：check-boot-contract.py
+  OUTDIR fixture 伪造 fasmg host（printf x > "$out"）跑真实
+  build_fasm2.sh，S3/M3 之后脚本写真实仓库 build 树——真实
+  chip8.bin/fsprobe.bin 被覆写为 1 字节 'x'，S3 步骤把污染
+  chip8.bin 烘进 disk-app.img（10795aec…）。实证二分定位
+  真凶。修复：fixture 改跑**沙箱副本**（copy2 脚本+builder+
+  api.inc+ROMs+桩源+manifest 全落 tmp，root 按 __file__
+  定位），新增正断言 "OUTDIR fixture **leaves the real
+  chip8.bin untouched**"（只增不弱化）。修复后 boot 门禁
+  107 PASS / FAILURES:0，跑前/跑后三工件 sha 逐字节不变
+  （复验专项回归）。
+- **GdbSession 双缺陷（runner，非产品）**：(A) _recv_reply
+  O-skip 把 b'OK' 当 console-output 吞掉 → 改 fullmatch hex
+  判定（'K' 非 hex，OK 通过）；(B) QEMU TCG hbreak 停在断点
+  时 'c' 立即重触发 → continue_ 加 GDB 式 **step-over
+  （z1/s/Z1）**；_drain 改 select 有界窗口。前段
+  「deferred reply/nudge」误判完整撤销。
+- **S1–S5 全部落实**：S1 user/chip8/api.inc sha 注释更新为
+  终值（非发射记录）；S2 kernel/app/api.inc + data.inc
+  「21 page」→22 pages 对齐（含 22*4096 err 断言）；
+  S3 build_fasm2.sh chip8.bin 后追加 disk-app.img 构建步骤
+  （入库）；S4 run-qemu-debug.py --app/--app-interactive
+  help 注明先跑 tests/stage2-app/check.py；S5 ESC 伪造注释
+  对齐实现（每次空读伪造，无 one-shot 标志，不推进
+  consumed/key_count）。
+- **证据文件**：`kolibrios64/kernel/app/app.inc`、
+  `user/chip8/chip8.asm|emu.inc|api.inc`、
+  `kernel/core/contracts.inc`、`tools/check-boot-contract.py`、
+  `tools/run-qemu-debug.py`、`tests/stage2-app/check.py`；
+  实测回放来自 build/stage2-app-int/（progress.md + logs/）、
+  build/stage2-app-reverify/（REPORT-142.md + mutation-*.log，
+  不入库）。
+
+### 11.7 集成与验证证据（实测，全部 0 失败）
+
+- **foundation 顺序**：fsys_probe 之后插入 app leg——launch
+  gates（ring 0 / IF=0 / app+fsys+fs+desktop+video ready /
+  desktop_echo_row=0 / stage IDLE，通过前零分配）→ IBM leg →
+  teardown + 桌面重绘 → `K64-APP-OK`；ENOENT →
+  `K64-APP-SKIP`（非致命）。--app 时 FSPROBE 与 FOUNDATION
+  之间插入 APP，**14 标记**按序各恰一次；skip 腿 13 标记 +
+  K64-APP-SKIP 在序。include 序 fsys → app → contracts。
+  leg7 早期表页核算不变（用户域 +3 自计账，§10.9 口径延续）。
+- **fs selftest leg4 第三态**：app 映像 /PROGRAMS 非空触发
+  冻结自检 bit4（QEMU 128 首跑 FAIL 根因）→ .prog_empty 增
+  CHIP8.BIN 合法分支（尺寸+名双校验），plain/big 字节路径
+  不变；stage2-fs **530→540**（纯追加 10 项），manifest 同步。
+- **宿主静态门禁终值**（任务 142 独立重跑）：**stage2-app
+  724/0（24 负向 fixture 全执行全被抓，含 poll-remask-removed /
+  poll-hlt-regression / interactive-tick-delta-regression）**、
+  fs 540、fsys 528、mm 2188、cpu 689、blk 481、irq 317、
+  input 402、fb 508、desktop 386、judge 96、boot
+  **FAILURES:0（107 PASS）**、wallpaper PASSED；chip8_model
+  **16 checks**（含 tetris 固定预算步进帧 20/67/68/69/71 轮
+  探针）；virtqueue 18 / fat16 15 自测不变。
+- **构建确定性与干净重建**：KERNEL64.BIN/BOOTX64.EFI/
+  chip8.bin/disk-app.img 移走后 build_fasm2.sh 全部从源码
+  再生（disk-app.img 自动产出，S3）；baseline/post-rebuild/
+  final 三次 sha 一致：chip8.bin 3255 B `9da19f2d…`、
+  disk-app.img `aec9f701…`、plain `e9e83dad…` / big
+  `a8102805…` 不变、内核 860160 B `c13518b5…`、fsprobe
+  `c770e33f…`。污染回归专项：boot 门禁跑前/跑后真实 build
+  树 chip8.bin 与 disk-app.img sha 逐字节不变。
+- **QEMU TCG 矩阵**（唯一真实执行环境，复验端口
+  1264/1265/1266）：**128/256 MiB interactive 各 259 ok/0**
+  （interactive=1、key_count=4、poll=72、blit=58；stop 诊断
+  poll 1→2→3 真实递增；IBM@20 帧（2400 lit）与 tetris@71-key
+  帧（7800 lit）均与纯 Python 模型独立重放派生**逐像素一致**
+  （1024×768 PPM 中 (192,224) 640×320 矩形），key7 帧 ≠
+  no-key 参照；ESC teardown 收据全 [ok]：VA 不可读 / 帧数组
+  清零 / released=3 / pages_held=0 / PDPT[4] 清除 / anchor0
+  US 保留）；**frozen --app 255 ok/0**（IBM 腿字节行为与
+  任务 115 终值一致）；**无 --app 185 ok/0 + K64-APP-SKIP
+  在序**（ENOENT 非致命）。
+- **ring3 实证**（独立验证自跑 gdbstub 硬件断点采样）：用户
+  sys_poll RIP=0x100400b55 **CS=0x33 CPL=3**、
+  RSP=0x1007fffd8（用户栈域）；内核 app_h_poll **CS=0x8
+  CPL=0**；ud2 负向冒烟：**v=06 cpl=3** 捕获、
+  app_fault_vector=7（向量+1）、全量 teardown（3/3/0）、
+  桌面重绘帧与基线字节相同、**无 triple fault**（Reset=2
+  仅正常上电+OVMF）。
+- **独立验证与复验**：独立验证 **10/10**（任务 116，端口
+  1254..1256，在 687 门禁 / 3315 B 形态上进行，含 IBM 帧独立
+  派生、ring3/ud2 实证、变异抽查 3/3 被抓）；W1/S1–S5 修复后
+  复验 **6/6 大项**（任务 142：全门禁 / 构建 / QEMU 矩阵 /
+  独立帧比对 / 变异抽查 / 卫生零失败），变异抽查 M1
+  tick-delta 回退 / M2 IPS_PER_TICK=0 / M3 映像翻 bit 全被
+  抓——门禁非恒真证明。两轮均纯验证零产品源码修改、不采信
+  实现者日志。
+- **证据文件**：`kolibrios64/kernel/core/foundation.inc`、
+  `contracts.inc`、`kernel/app/`、`user/chip8/`、
+  `kernel/fs/selftest.inc`、`tests/stage2-app/`、
+  `tests/stage2-fs/`、`build_fasm2.sh`、
+  `tools/run-qemu-debug.py`；实测数字来自
+  build/stage2-app-verify/REPORT.md、
+  build/stage2-app-reverify/REPORT-142.md 及其 gates/qemu/
+  frame 产物（不入库）。
+
+### 11.8 已知遗留与展望（如实记录，不粉饰）
+
+- **N1 用户故障终态口径（显式裁决）**：fault seam 在 CPL3
+  捕获 #UD 后完成全量 teardown + 桌面重绘（帧与基线字节
+  一致），无 triple fault；但 APP 裁决为 EIO，foundation 按
+  冻结注释（"a failure is a real fault that panics"）走
+  **K64-CPU-PANIC**（"foundation: app bring-up failed"），
+  桌面不常驻恢复——此为 v1 冻结行为（实现与门禁自洽，非
+  产品缺陷）；**桌面常驻故障恢复列 APP-v2**。
+- **仓库自包含（FS-v1 教训）**：收口提交必须完整纳入
+  kernel/app/、user/chip8/（含 roms/）、tests/stage2-app/
+  全部新文件及全部已修改文件——FS-v1 提交曾因缺 user/chip8
+  契约文件致干净检出构建失败，本次一并修复（独立验证 N2
+  风险项）。
+- **单程序 hosting**：launch gates 要求 stage IDLE、
+  desktop_echo_row=0，一次仅一个 hosted 程序；多程序/窗口
+  系统集成属路线图后续（§12）。
+- APP-v1 提交哈希**待回填（任务 119）**，锚点表已留占位。
+
+---
+
+## 12. 进行中（占位，待验证通过后补录）
 
 ### IRQ-v1：LAPIC 定时器闭环 —— 已完成
 
@@ -1791,12 +2086,11 @@
   提交哈希待产生后补入锚点表（本次不写未产生的哈希）。
   APP-v1 集成由此解冻（§10.1/§10.10）。
 
-### APP-v1：首个用户程序（CHIP-8）—— 进行中
+### APP-v1：首个用户程序（CHIP-8）—— 已完成
 
-- 轨一（CPU syscall/Ring 3 地基 + mm 用户域铺垫）已落地；
-  集成（kernel/app）曾因 FS-v1 插入裁决挂起，FS 契约冻结后
-  解冻：从 FS 读 chip8.bin、ROM 改走 /ROMS/（§10.10）。范围待
-  该里程碑收口时冻结。
+- 已收口并补录为 §11；独立验证 10/10 与审查修复复验 6/6
+  通过，提交哈希待产生后回填锚点表（占位「待回填（任务
+  119）」，本次不写未产生的哈希）。
 
 ### 用户态窗口系统与进程调度 —— 路线图后续
 
@@ -1832,5 +2126,7 @@
 修复补录于其独立验证（7/7）与收口审查（无阻断、无必改）通过之后
 （§7.5 勘误 + §7.10，已随提交 7080025 入库）；FS-v1 章节补录于其
 独立验证（6/6）与审查修复复验（8/8，含 214 项交叉复核）通过之后
-（§10，已随提交 424fed2 入库）。后续
+（§10，已随提交 424fed2 入库）；APP-v1 章节补录于其独立验证
+（10/10）与审查修复复验（6/6 大项，任务 142）通过之后（§11，
+提交哈希待任务 119 回填）。后续
 每个里程碑收口时，由变更史官增补对应小节并更新提交锚点表。*

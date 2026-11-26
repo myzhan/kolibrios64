@@ -99,6 +99,7 @@ fs_probe:
         dq      n_fs_ibm
         dq      n_fs_tetris
         dq      n_fs_big
+        dq      n_fs_chip8
         dq      fs_ready
         dq      fs_spc
         dq      fs_reserved
@@ -221,6 +222,6 @@ fs_probe:
         dq      FS_TEST_READS_FINAL_BIG
 fs_probe_end:
 
-if (fs_probe_end - fs_probe) <> 173 * 8
+if (fs_probe_end - fs_probe) <> 174 * 8
         err 'the manifest must keep its fixed entry count'
 end if
