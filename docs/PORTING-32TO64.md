@@ -25,8 +25,8 @@
 | kolibrios64 | `7080025` | FONT-FIX 字体位序修复 + 独立 oracle 门禁（QEMU 验证，见 §7.10） |
 | kolibrios64 | `e2bcbe7` | docs：FONT-FIX 提交哈希补录 |
 | kolibrios64 | `424fed2` | FS-v1：virtio-blk + 只读 FAT16 + 文件 syscall 4..9（QEMU 验证，见 §10；含 APP-v1 轨一 CPU/MM 用户态前置，收口文件不可拆分裁决） |
-| kolibrios64 | `3b1617d` | docs：FS-v1 提交哈希补录（当前 HEAD） |
-| kolibrios64 | 待回填（任务 119） | APP-v1：首个用户程序 CHIP-8（Ring 3 + SYSCALL + FS 装载，QEMU 验证，见 §11） |
+| kolibrios64 | `3b1617d` | docs：FS-v1 提交哈希补录 |
+| kolibrios64 | `31d342c` | APP-v1：首个用户程序 CHIP-8（Ring 3 + SYSCALL + FS 装载，QEMU 验证，见 §11；当前 HEAD） |
 | fasm2 | `0253b7f` | macOS x64 自举工作流收口（自举里程碑，含 `aad830d` 自举宿主与自宿主测试） |
 
 以上锚点已用 `git log --oneline` 核对。本文档随后续里程碑一并提交，不单独入库。
@@ -1766,7 +1766,7 @@
 
 ---
 
-## 11. APP-v1：首个用户程序 CHIP-8（提交哈希待回填，任务 119）
+## 11. APP-v1：首个用户程序 CHIP-8（提交 `31d342c`）
 
 > 状态：已通过独立验证（**10/10**，任务 116）与审查修复复验
 > （**六大项 6/6**，任务 142）；收口审查 W1 / S1–S5 与门禁污染、
@@ -1777,7 +1777,7 @@
 > chip8.bin / disk-app.img 衔接，tools/run-qemu-debug.py --app 编排
 > 与 GdbSession 修复，check-boot-contract.py OUTDIR fixture 沙箱化，
 > tests/stage2-app 新门禁及 stage2-fs / blk / fsys / irq 扩展，
-> 本文档。提交哈希**待回填（任务 119）**。
+> 本文档。提交哈希 `31d342c`（已补入锚点表）。
 
 ### 11.1 背景与用户裁决：FS 先行装载 + 用户 VA 域方案 B
 
@@ -2055,7 +2055,7 @@
 - **单程序 hosting**：launch gates 要求 stage IDLE、
   desktop_echo_row=0，一次仅一个 hosted 程序；多程序/窗口
   系统集成属路线图后续（§12）。
-- APP-v1 提交哈希**待回填（任务 119）**，锚点表已留占位。
+- APP-v1 提交哈希 `31d342c`（已补入锚点表）。
 
 ---
 
@@ -2128,5 +2128,5 @@
 独立验证（6/6）与审查修复复验（8/8，含 214 项交叉复核）通过之后
 （§10，已随提交 424fed2 入库）；APP-v1 章节补录于其独立验证
 （10/10）与审查修复复验（6/6 大项，任务 142）通过之后（§11，
-提交哈希待任务 119 回填）。后续
+已随提交 31d342c 入库）。后续
 每个里程碑收口时，由变更史官增补对应小节并更新提交锚点表。*
