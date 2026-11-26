@@ -2072,3 +2072,157 @@ if K64_APP_IPOLL_CHUNK >= APP_POLL_CHUNK
         err 'the interactive park round must stay shorter than the IBM window'
 end if
 
+; ---------------- task 124 DESKTOP-v2 contract, frozen geometry ----------------
+;
+; The wallpaper background (T2) and the click pump / start menu (T3).
+; The v1 constants above stay frozen; this tail appendix pins the v2
+; geometry, colours, data offsets and the wallpaper digest against the
+; module private copy in kernel/desktop/api.inc and wallpaper.inc.
+;
+; Redraw order adjudication (frozen): desktop_pump restores the cursor
+; OLD position first, then runs desktop_click_pump (menu/taskbar), then
+; desktop_echo_pump, then places the cursor at the NEW position. The
+; click pump returns eax = 1 on a menu redraw so the cursor is placed
+; again even without a move. The input module layout stays frozen: the
+; edge memory desktop_prev_buttons is desktop private.
+;
+; Menu save adjudication: the (0,32,200,34) background is saved through
+; video_readback_rect into desktop_menu_save, data page 2 (offset 4096,
+; 27200 bytes); close restores it through video_blit_rect. Known limit:
+; the rectangle overlaps the top 2 pixel rows of echo row 0 (y 64,65);
+; typing while the menu is open loses those rows on close. Neither the
+; frozen self test nor the QEMU menu leg exercises that path.
+;
+; The CHIP-8 entry only sets desktop_app_launch_requested (offset
+; 1928), the private label task 125 wires to the loader; this contract
+; never calls the app module.
+
+K64_DESKTOP_START_X             = 0
+K64_DESKTOP_START_Y             = 0
+K64_DESKTOP_START_W             = 64
+K64_DESKTOP_START_H             = 32
+K64_DESKTOP_MENU_X              = 0
+K64_DESKTOP_MENU_Y              = 32
+K64_DESKTOP_MENU_W              = 200
+K64_DESKTOP_MENU_H              = 34
+K64_DESKTOP_MENU_COLOR          = 0x2C3E50
+K64_DESKTOP_ACCENT_COLOR        = 0x9594A2
+K64_DESKTOP_MENU_TEXT_X         = 76
+K64_DESKTOP_MENU_TEXT_Y         = 41
+K64_DESKTOP_MENU_TEXT_LEN       = 6
+K64_DESKTOP_ENTRY_CX            = 100
+K64_DESKTOP_ENTRY_CY            = 49
+K64_DESKTOP_MENU_SAVE_BYTES     = 27200
+K64_DESKTOP_OFF_PREV_BUTTONS    = 1912
+K64_DESKTOP_OFF_MENU_FLAG       = 1920
+K64_DESKTOP_OFF_APP_LAUNCH      = 1928
+K64_DESKTOP_OFF_TEST_CLICKS     = 1936
+K64_DESKTOP_OFF_TEST_MENU_OPENS = 1944
+K64_DESKTOP_OFF_MENU_SAVE       = 0x1000
+K64_DESKTOP_DATA_PAGES          = 8
+K64_DESKTOP_WALLPAPER_W         = 1024
+K64_DESKTOP_WALLPAPER_H         = 768
+K64_DESKTOP_WALLPAPER_BYTES     = 3145728
+K64_DESKTOP_WALLPAPER_SHA0      = 0xF9F8A12E5406E04B
+K64_DESKTOP_WALLPAPER_SHA1      = 0x2007028BD168F72E
+K64_DESKTOP_WALLPAPER_SHA2      = 0x9C25386D5BF92EF5
+K64_DESKTOP_WALLPAPER_SHA3      = 0xECB1AAEB18F36FEC
+
+if K64_DESKTOP_START_X <> DESKTOP_START_X | K64_DESKTOP_START_Y <> DESKTOP_START_Y | K64_DESKTOP_START_W <> DESKTOP_START_W | K64_DESKTOP_START_H <> DESKTOP_START_H
+        err 'the DESKTOP-v2 start button geometry disagrees with the module copy'
+end if
+if K64_DESKTOP_MENU_X <> DESKTOP_MENU_X | K64_DESKTOP_MENU_Y <> DESKTOP_MENU_Y | K64_DESKTOP_MENU_W <> DESKTOP_MENU_W | K64_DESKTOP_MENU_H <> DESKTOP_MENU_H
+        err 'the DESKTOP-v2 menu geometry disagrees with the module copy'
+end if
+if K64_DESKTOP_MENU_COLOR <> DESKTOP_MENU_COLOR | K64_DESKTOP_ACCENT_COLOR <> DESKTOP_ACCENT_COLOR
+        err 'the DESKTOP-v2 menu colours disagree with the module copy'
+end if
+if K64_DESKTOP_MENU_TEXT_X <> DESKTOP_MENU_TEXT_X | K64_DESKTOP_MENU_TEXT_Y <> DESKTOP_MENU_TEXT_Y | K64_DESKTOP_MENU_TEXT_LEN <> DESKTOP_MENU_TEXT_LEN
+        err 'the DESKTOP-v2 entry label placement disagrees with the module copy'
+end if
+if K64_DESKTOP_ENTRY_CX <> DESKTOP_ENTRY_CX | K64_DESKTOP_ENTRY_CY <> DESKTOP_ENTRY_CY
+        err 'the DESKTOP-v2 entry centre disagrees with the module copy'
+end if
+if K64_DESKTOP_MENU_SAVE_BYTES <> DESKTOP_MENU_SAVE_BYTES | K64_DESKTOP_OFF_MENU_SAVE <> DESKTOP_DATA_OFF_MENU_SAVE | K64_DESKTOP_DATA_PAGES <> DESKTOP_DATA_PAGES
+        err 'the DESKTOP-v2 menu save page disagrees with the module copy'
+end if
+if K64_DESKTOP_OFF_PREV_BUTTONS <> DESKTOP_DATA_OFF_PREV_BUTTONS | K64_DESKTOP_OFF_MENU_FLAG <> DESKTOP_DATA_OFF_MENU_FLAG | K64_DESKTOP_OFF_APP_LAUNCH <> DESKTOP_DATA_OFF_APP_LAUNCH
+        err 'the DESKTOP-v2 state offsets disagree with the module copy'
+end if
+if K64_DESKTOP_OFF_TEST_CLICKS <> DESKTOP_DATA_OFF_TEST_CLICKS | K64_DESKTOP_OFF_TEST_MENU_OPENS <> DESKTOP_DATA_OFF_TEST_MENU_OPENS
+        err 'the DESKTOP-v2 click evidence offsets disagree with the module copy'
+end if
+if K64_DESKTOP_WALLPAPER_W <> DESKTOP_WALLPAPER_W | K64_DESKTOP_WALLPAPER_H <> DESKTOP_WALLPAPER_H | K64_DESKTOP_WALLPAPER_BYTES <> DESKTOP_WALLPAPER_BYTES
+        err 'the DESKTOP-v2 wallpaper extent disagrees with the module copy'
+end if
+if K64_DESKTOP_WALLPAPER_SHA0 <> DESKTOP_WALLPAPER_SHA0 | K64_DESKTOP_WALLPAPER_SHA1 <> DESKTOP_WALLPAPER_SHA1 | K64_DESKTOP_WALLPAPER_SHA2 <> DESKTOP_WALLPAPER_SHA2 | K64_DESKTOP_WALLPAPER_SHA3 <> DESKTOP_WALLPAPER_SHA3
+        err 'the DESKTOP-v2 wallpaper digest disagrees with the module copy'
+end if
+if DESKTOP_MENU_Y <> DESKTOP_BAR_H
+        err 'the DESKTOP-v2 menu must hang directly under the taskbar'
+end if
+if DESKTOP_START_H <> DESKTOP_BAR_H | DESKTOP_MENU_Y + DESKTOP_MENU_H > DESKTOP_SCREEN_H
+        err 'the DESKTOP-v2 start button spans the bar and the menu fits the screen'
+end if
+
+; ------------------------------------------------------------------
+; task 125 DESKTOP-v2 T4/T5 contract: the app launch wiring. Pure
+; tail append, every frozen segment above stays byte identical.
+;
+; Call site adjudication: the foundation boot leg no longer calls
+; app_launch directly; it calls desktop_app_boot, which sets
+; desktop_app_launch_requested (offset 1928) and enters
+; desktop_launch_pump in boot mode (ecx = 0). The resident loop calls
+; the same pump in click mode (ecx = 1) right after desktop_pump.
+; The pump is the SINGLE app_launch consumer: clear flag, suspend the
+; cursor (blit of the save), draw the running indicator, call
+; app_launch, account runs/exits. The frozen serial verdict markers
+; (K64-APP-OK / K64-APP-SKIP) and the 185/255/259 three-leg caliber
+; are unchanged; the click stages 6..9 are published ONLY on the
+; click path, so the boot legs keep desktop_test_stage = 5.
+;
+; Relaunch adjudication: app_launch accepts APP_STAGE_IDLE and
+; APP_STAGE_DONE (double compare) and resets the per-run state
+; (stage/exit_code/fault_vector/blit_count/interactive) with pure
+; stores before the frozen ordered call chain. The teardown receipts
+; (released = 3, pages_held = 0), the user VA domain, the +3 budget
+; and the anchor 0 US bit are re-established on EVERY run. The
+; cumulative counters (key/poll/fd_swept) stay additive by design;
+; the host judge derives per-run deltas. No one-shot limitation
+; remains: ESC back to the desktop and a second entry click relaunch.
+;
+; The teardown redraw delegates the base frame to desktop_repaint_base
+; (wallpaper + bar + accents + title, the self test leg 0+1 sequence),
+; so the --app final frame is the v2 wallpaper desktop; the echo save
+; rectangle blit and the cursor place stay frozen after it.
+; ------------------------------------------------------------------
+
+K64_DESKTOP_STAGE_START_CLICK      = 6
+K64_DESKTOP_STAGE_ENTRY_CLICK      = 7
+K64_DESKTOP_STAGE_APP_RUNNING      = 8
+K64_DESKTOP_STAGE_APP_EXIT         = 9
+K64_DESKTOP_RUN_X                  = 992
+K64_DESKTOP_RUN_Y                  = 8
+K64_DESKTOP_RUN_W                  = 24
+K64_DESKTOP_RUN_H                  = 16
+K64_DESKTOP_OFF_TEST_START_CLICKS  = 1952
+K64_DESKTOP_OFF_TEST_ENTRY_CLICKS  = 1960
+K64_DESKTOP_OFF_TEST_APP_RUNS      = 1968
+K64_DESKTOP_OFF_TEST_APP_EXITS     = 1976
+
+if K64_DESKTOP_STAGE_START_CLICK <> DESKTOP_STAGE_START_CLICK | K64_DESKTOP_STAGE_ENTRY_CLICK <> DESKTOP_STAGE_ENTRY_CLICK | K64_DESKTOP_STAGE_APP_RUNNING <> DESKTOP_STAGE_APP_RUNNING | K64_DESKTOP_STAGE_APP_EXIT <> DESKTOP_STAGE_APP_EXIT
+        err 'the task 125 click stages disagree with the module copy'
+end if
+if K64_DESKTOP_RUN_X <> DESKTOP_RUN_X | K64_DESKTOP_RUN_Y <> DESKTOP_RUN_Y | K64_DESKTOP_RUN_W <> DESKTOP_RUN_W | K64_DESKTOP_RUN_H <> DESKTOP_RUN_H
+        err 'the task 125 running indicator geometry disagrees with the module copy'
+end if
+if K64_DESKTOP_OFF_TEST_START_CLICKS <> DESKTOP_DATA_OFF_TEST_START_CLICKS | K64_DESKTOP_OFF_TEST_ENTRY_CLICKS <> DESKTOP_DATA_OFF_TEST_ENTRY_CLICKS | K64_DESKTOP_OFF_TEST_APP_RUNS <> DESKTOP_DATA_OFF_TEST_APP_RUNS | K64_DESKTOP_OFF_TEST_APP_EXITS <> DESKTOP_DATA_OFF_TEST_APP_EXITS
+        err 'the task 125 evidence offsets disagree with the module copy'
+end if
+if K64_DESKTOP_OFF_TEST_START_CLICKS <> K64_DESKTOP_OFF_TEST_MENU_OPENS + 8 | K64_DESKTOP_OFF_TEST_APP_EXITS + 8 > 0x1000
+        err 'the task 125 evidence extends the v2 block inside data page 1'
+end if
+if K64_DESKTOP_RUN_X + K64_DESKTOP_RUN_W > DESKTOP_BAR_W | K64_DESKTOP_RUN_Y + K64_DESKTOP_RUN_H > DESKTOP_BAR_H
+        err 'the task 125 running indicator must fit the taskbar'
+end if
+

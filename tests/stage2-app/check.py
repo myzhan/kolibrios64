@@ -190,7 +190,8 @@ M = [
     'cpu_set_rsp0', 'cpu_tss_rsp0', 'cpu_syscall_handlers',
     'video_fill_rect', 'video_blit_rect', 'video_readback_rect',
     'video_puts', 'video_fb_state',
-    'desktop_cursor_sync', 'desktop_cursor_place', 'desktop_title',
+    'desktop_cursor_sync', 'desktop_cursor_place', 'desktop_repaint_base',
+    'desktop_title',
     'desktop_state', 'desktop_echo_row', 'desktop_cursor_x',
     'desktop_cursor_y',
     'input_kbd_buf', 'input_kbd_used', 'input_mouse_x', 'input_mouse_y',
@@ -485,8 +486,8 @@ def region(img, start, stop):
 def check_manifest(rep, img):
     rep.check('manifest.magic', True, MAGIC.decode())
     rep.equal('manifest.version', img['version'], MANIFEST_VERSION)
-    rep.equal('manifest.entry_count', len(M), 179)
-    rep.equal('manifest.count_field', img['count'], 179)
+    rep.equal('manifest.entry_count', len(M), 180)
+    rep.equal('manifest.count_field', img['count'], 180)
     for name, want in CONSTANTS.items():
         rep.equal('manifest.%s' % name, img[name], want & 0xFFFFFFFFFFFFFFFF)
 
@@ -925,6 +926,26 @@ def check_init(rep, img):
              if t == img.at('ready')]
     rep.check('init.marks_ready_once',
               armed == [(img.at('ready'), struct.pack('<I', 1))])
+    # task 125 relaunch fix: the fsprobe guest evidence snapshot is
+    # taken ONCE here at init (the foundation runs fsys_probe right
+    # before app_init), never per launch: a relaunch would re-copy the
+    # previous run's file payloads out of the reused fsys_bounce page
+    snap = body.find(b'\xF3\x48\xA5')
+    rep.check('init.snapshot_rep_movsq', snap >= 0)
+    rep.check('init.snapshot_cld_before_copy',
+              snap >= 0 and b'\xFC' in body[:snap])
+    rep.check('init.snapshot_count_512',
+              bytes.fromhex('B9 00 02 00 00') in body)
+    rsi = body.find(b'\x48\xC7\xC6')
+    rdi = body.find(b'\x48\xC7\xC7')
+    rep.check('init.snapshot_source_load', rsi >= 0)
+    rep.check('init.snapshot_target_page20',
+              rdi >= 0 and
+              struct.unpack('<I', body[rdi + 3:rdi + 7])[0] ==
+              img['fs_snapshot'])
+    rep.check('init.snapshot_order',
+              0 <= rsi < rdi < snap,
+              'source load, target load, rep movsq')
     rep.check('init.eperm', (b'\xB8' + struct.pack('<i', EPERM)) in body)
     rep.check('init.ealready', (b'\xB8' + struct.pack('<i', EALREADY)) in body)
 
@@ -933,24 +954,25 @@ def check_redraw(rep, img):
     at, end = region(img, 'redraw_desktop', 'launch')
     d = img.data
     body = d[at:end]
+    # task 125: the FULL v2 base (wallpaper, taskbar, start accents,
+    # title) is delegated to desktop_repaint_base; its pixel content is
+    # pinned by the stage2-desktop gate (taskbar.repaint_*), here the
+    # delegation itself and the app-owned tail are pinned
     calls = [t for _, t in call_sites(img, at, end)]
     rep.equal('redraw.call_chain', calls,
-              [img.at('video_fill_rect'), img.at('video_fill_rect'),
-               img.at('video_puts'), img.at('video_blit_rect'),
+              [img.at('desktop_repaint_base'), img.at('video_blit_rect'),
                img.at('desktop_cursor_place')],
-              'background, bar, title, saved echo line, cursor')
-    rep.check('redraw.background_color',
+              'delegated full base, saved echo line, cursor')
+    sites = [s for s, _ in call_sites(img, at, end)]
+    rep.check('redraw.base_repaint_first',
+              len(sites) == 3 and sites[0] < sites[1] < sites[2],
+              'base before the echo blit before the cursor place')
+    rep.check('redraw.no_local_base_draw',
               bytes.fromhex('C7 44 24 20') +
-              struct.pack('<I', DESKTOP_BG_COLOR) in body)
-    rep.check('redraw.bar_color',
+              struct.pack('<I', DESKTOP_BG_COLOR) not in body and
               bytes.fromhex('C7 44 24 20') +
-              struct.pack('<I', DESKTOP_BAR_COLOR) in body)
-    rep.check('redraw.full_screen',
-              (b'\x41\xB8' + struct.pack('<I', SCREEN_W)) in body and
-              (b'\x41\xB9' + struct.pack('<I', SCREEN_H)) in body)
-    rep.equal('redraw.title_text',
-              len(rip_refs(img, at, end, b'\x4C\x8D', 0x0D, 0,
-                           'desktop_title')), 1)
+              struct.pack('<I', DESKTOP_BAR_COLOR) not in body,
+              'the base colors live in desktop_repaint_base, not here')
     gate = [(s, t, imm) for s, t, imm in
             rip_sites(img, at, end, b'\x48\x83', 0x3D, 1)
             if t == img.at('echo_saved') and imm == b'\x01']
@@ -1003,11 +1025,46 @@ def check_launch(rep, img):
     rep.check('launch.echo_row_gate',
               len(echo) == 1 and jne_at(d, echo[0][0] + 8),
               'the echo save covers only row 0')
+    # task 125 relaunch: IDLE passes directly, DONE (a finished run)
+    # passes through the reset, everything else is EALREADY
     idle = [(s, t, imm) for s, t, imm in
             rip_sites(img, at, end, b'\x48\x83', 0x3D, 1)
             if t == img.at('stage') and imm == bytes((STAGE_IDLE,))]
     rep.check('launch.stage_idle_gate',
-              len(idle) == 1 and jne_at(d, idle[0][0] + 8))
+              len(idle) == 1 and je_at(d, idle[0][0] + 8),
+              'cmp qword [app_stage], IDLE; je .stage_ok')
+    done_gate = [(s, t, imm) for s, t, imm in
+                 rip_sites(img, at, end, b'\x48\x83', 0x3D, 1)
+                 if t == img.at('stage') and imm == bytes((STAGE_DONE,))]
+    rep.check('launch.stage_done_gate',
+              len(done_gate) == 1 and jne_at(d, done_gate[0][0] + 8) and
+              bool(idle) and done_gate[0][0] > idle[0][0],
+              'cmp qword [app_stage], DONE; jne .ealready')
+    # the per-run state is reset with pure stores behind the gate; the
+    # cumulative evidence counters stay additive across runs
+    for label in ('stage', 'exit_code', 'fault_vector', 'blit_count',
+                  'interactive'):
+        resets = [(s, t, imm) for s, t, imm in
+                  rip_sites(img, at, end, b'\x48\xC7', 0x05, 4)
+                  if t == img.at(label) and imm == bytes(4)]
+        rep.check('launch.relaunch_resets_%s' % label,
+                  len(resets) == 1 and bool(done_gate) and
+                  resets[0][0] > done_gate[0][0],
+                  'mov qword [%s], 0 after the gate' % label)
+    for label in ('key_count', 'poll_count', 'fd_swept'):
+        rep.check('launch.relaunch_keeps_%s' % label,
+                  not [1 for _, t, _ in
+                       rip_sites(img, at, end, b'\x48\xC7', 0x05, 4)
+                       if t == img.at(label)],
+                  'the cumulative evidence counters stay additive')
+    # task 125: the one-shot fsys_bounce snapshot lives in app_init
+    # ONLY; a per-launch copy would clobber the fsprobe guest evidence
+    # with the previous run's file payloads on every relaunch
+    rep.check('launch.no_snapshot_copy',
+              b'\xF3\x48\xA5' not in body and
+              abs32(bytes.fromhex('48 C7 C7'),
+                    img['fs_snapshot']) not in body,
+              'the relaunch never re-copies the bounce page')
 
     # ---- the frozen counter and table baselines ----
     for src, dst in (('fs_test_reads', 'saved_fs_reads'),
@@ -1284,11 +1341,13 @@ def check_launch(rep, img):
                  if t == img.at('pages_held')]
     rep.check('launch.clears_pages_held',
               held_zero == [(img.at('pages_held'), bytes(4))])
-    done = [(t, imm) for _, t, imm in
+    done = [(s, t, imm) for s, t, imm in
             rip_sites(img, at, end, b'\x48\xC7', 0x05, 4)
-            if t == img.at('stage')]
+            if t == img.at('stage') and
+            imm == struct.pack('<I', STAGE_DONE)]
     rep.check('launch.publishes_done',
-              done == [(img.at('stage'), struct.pack('<I', STAGE_DONE))])
+              len(done) == 1 and bool(idle) and done[0][0] > idle[0][0],
+              'the DONE store sits in the teardown, after the reset')
     # the verdict travels through r15d across the teardown
     rep.check('launch.success_verdict_zero',
               bytes.fromhex('45 31 FF') in body, 'xor r15d, r15d')
@@ -1355,7 +1414,7 @@ def check_module_hygiene(rep, img):
     windows = [(img.at('check_range'), img.at('program_path')),
                (img.at('selftest'), img.at('data_start'))]
     d = img.data
-    seams = {img.at(n) for n in M[48:87]} - {
+    seams = {img.at(n) for n in M[48:88]} - {
         img.at('fs_test_reads'), img.at('blk_test_reads'),
         img.at('fs_fd_table'), img.at('mm_vmm_state'),
         img.at('cpu_tss_rsp0'), img.at('cpu_syscall_handlers'),
@@ -1444,8 +1503,15 @@ def check_module_hygiene(rep, img):
                 skip.update(range(p + 2, p + 6))
         for p in find_all(code, b'\x3D'):
             skip.update(range(p + 1, p + 5))
+        # task 124: the B8-BF mov-imm scan must not re-interpret call
+        # rel32 operand bytes as opcodes. The kernel grew +3MiB (the
+        # embedded wallpaper), so a cross-module call displacement byte
+        # (e.g. 0xBC) can land in the B8-BF range and its phantom imm32
+        # window would swallow the real STI right after the call. The
+        # call operand windows are already excluded above; scan B8-BF
+        # only on the remaining bytes (strictly tighter, never weaker).
         for i, b in enumerate(code):
-            if 0xB8 <= b <= 0xBF and i + 5 <= len(code):
+            if 0xB8 <= b <= 0xBF and i + 5 <= len(code) and i not in skip:
                 skip.update(range(i + 1, i + 5))
         for i, b in enumerate(code):
             if 0x70 <= b <= 0x7F or b == 0xEB:
@@ -1536,6 +1602,11 @@ def model_poll(x, y, buttons, ticks):
 
 def model_size_gate(size):
     return OK if 0 < size <= CODE_SIZE else EIO
+
+
+def model_relaunch_gate(stage):
+    """task 125: a fresh module and a finished run may both launch."""
+    return OK if stage in (STAGE_IDLE, STAGE_DONE) else EALREADY
 
 
 def model_launch_chunks(size):
@@ -1650,6 +1721,15 @@ def check_model(rep, img):
               [PAGE] * 4)
     rep.equal('model.chunks_ragged', model_launch_chunks(8229),
               [PAGE, PAGE, 37])
+
+    # task 125 relaunch decision table: IDLE/DONE launch, a live run
+    # refuses with EALREADY, unknown stages never slip through
+    for stage, want in ((STAGE_IDLE, OK), (STAGE_DONE, OK),
+                        (STAGE_IBM_READY, EALREADY),
+                        (STAGE_EXIT_REQ, EALREADY), (4, EALREADY),
+                        (99, EALREADY)):
+        rep.equal('model.relaunch_gate_%d' % stage,
+                  model_relaunch_gate(stage), want)
 
 
 # ----------------------------------------------------------------------
@@ -1968,7 +2048,7 @@ def check_sources(rep, root):
     apos = found.find('call    app_init')
     ppos = found.find('vmm_boot_protect', apos)
     spos = found.find('call    app_selftest')
-    lpos = found.find('call    app_launch')
+    lpos = found.find('call    desktop_app_boot')
     opos = found.find('k64_report kmsg_app_ok')
     tpos = found.find('k64_report kmsg_foundation_ok')
     rep.check('source.foundation_app_stage_order',
@@ -1984,6 +2064,12 @@ def check_sources(rep, root):
     rep.check('source.foundation_app_markers',
               "db 'K64-APP-OK', 13, 10, 0" in found and
               "db 'K64-APP-SKIP', 13, 10, 0" in found)
+    # task 125: the foundation hands the launch to the desktop pump;
+    # the direct app_launch call site is gone (the boot leg and the
+    # CHIP-8 menu entry share one consumer)
+    rep.check('source.foundation_delegates_to_desktop',
+              'call    desktop_app_boot' in found and
+              'call    app_launch' not in found)
 
     # the fs self test leg 4 (10) third state: the APP-v1 image carries
     # /PROGRAMS/CHIP8.BIN instead of BIG.BIN, so the frozen plain/b BIG
@@ -2052,6 +2138,7 @@ def check_sources(rep, root):
                'cpu_user_fault_set_handler',
                'video_fill_rect', 'video_blit_rect', 'video_readback_rect',
                'video_puts', 'desktop_cursor_sync', 'desktop_cursor_place',
+               'desktop_repaint_base',
                'input_ioapic_write'}
     stray = []
     text = (root / 'kernel' / 'app' / 'app.inc').read_text(encoding='utf-8')
@@ -2060,14 +2147,23 @@ def check_sources(rep, root):
             stray.append(m.group(1))
     rep.check('source.call_targets', not stray, repr(stray))
 
-    # the snapshot copy sits inside app_launch BEFORE the program load
+    # task 125: the snapshot copy sits inside app_init (ONE shot, the
+    # foundation runs fsys_probe right before it), NEVER inside
+    # app_launch: a relaunch would copy the previous run's file payloads
+    # out of the reused bounce page and destroy the guest evidence
+    ip = text.find('app_init:')
+    rp = text.find('app_redraw_desktop:', ip)
+    cp = text.find('mov     rdi, app_fs_snapshot', ip)
+    rep.check('source.init_snapshot_copy',
+              0 <= ip < cp < rp and
+              'mov     rsi, fsys_bounce' in text[ip:rp] and
+              'rep     movsq' in text[ip:rp])
     lp = text.find('app_launch:')
-    cp = text.find('mov     rdi, app_fs_snapshot', lp)
     op = text.find('call    fs_open', lp)
-    rep.check('source.launch_snapshot_copy',
-              0 <= lp < cp < op and
-              'mov     rsi, fsys_bounce' in text[lp:op] and
-              'rep     movsq' in text[lp:op])
+    rep.check('source.launch_no_snapshot_copy',
+              0 <= lp < op and
+              'mov     rdi, app_fs_snapshot' not in text[lp:op] and
+              'rep     movsq' not in text[lp:op])
 
     # the hosted chip8: FS wrappers, no embedded ROM, frozen mirrors
     chip8_asm = (root / 'user' / 'chip8' / 'chip8.asm').read_text(
@@ -2158,7 +2254,7 @@ def check_position_independence(rep, asm_, root, out, low):
         return
     hi = load_image(hi_path, KERNEL_BASE)
     delta = KERNEL_BASE
-    labels = M[3:87]      # every address label: app, seams, data
+    labels = M[3:88]      # every address label: app, seams, data
     shifted = all(hi[n] == low[n] + delta for n in labels)
     rep.check('reloc.labels_shift_by_kernel_base', shifted)
     for name in CONSTANTS:
@@ -2353,6 +2449,42 @@ FIXTURES = [
      '        call    cpu_syscall_set_handler\n'
      '        mov     ecx, APP_SYS_BLIT\n',
      '        mov     ecx, APP_SYS_BLIT\n', 'check'),
+    # defect class: task 125 relaunch gate. Without the DONE compare a
+    # finished run can never launch again (IDLE-only gate -> EALREADY)
+    ('relaunch-done-gate-removed', 'kernel/app/app.inc',
+     '        cmp     qword [app_stage], APP_STAGE_DONE\n'
+     '        jne     .ealready\n', '', 'check'),
+    # defect class: task 125 relaunch reset. Stale BLIT evidence would
+    # let a second run pass the verdict without drawing anything
+    ('relaunch-reset-removed', 'kernel/app/app.inc',
+     '        mov     qword [app_blit_count], 0\n', '', 'check'),
+    # defect class: task 125 redraw delegation. The exit frame must be
+    # the full v2 base, not a partial or flat-color desktop
+    ('redraw-delegation-removed', 'kernel/app/app.inc',
+     '        call    desktop_repaint_base\n', '', 'check'),
+    # defect class: task 125 call-site migration regression. Calling
+    # app_launch directly bypasses the desktop launch pump
+    ('foundation-direct-launch-regression', 'kernel/core/foundation.inc',
+     '        call    desktop_app_boot\n', '        call    app_launch\n',
+     'check'),
+    # defect class: task 125 hidden one-shot state. Removing the init
+    # snapshot leaves the judge reading a clobbered bounce page
+    ('init-snapshot-removed', 'kernel/app/app.inc',
+     '        cld\n'
+     '        mov     rsi, fsys_bounce\n'
+     '        mov     rdi, app_fs_snapshot\n'
+     '        mov     ecx, 4096 / 8\n'
+     '        rep     movsq\n', '', 'check'),
+    # defect class: task 125 relaunch snapshot regression. A per-launch
+    # copy re-snapshots the previous run's payloads on every relaunch
+    ('launch-snapshot-regression', 'kernel/app/app.inc',
+     '        mov     qword [app_interactive], 0\n',
+     '        mov     qword [app_interactive], 0\n'
+     '        cld\n'
+     '        mov     rsi, fsys_bounce\n'
+     '        mov     rdi, app_fs_snapshot\n'
+     '        mov     ecx, 4096 / 8\n'
+     '        rep     movsq\n', 'check'),
 ]
 
 

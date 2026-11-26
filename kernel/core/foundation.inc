@@ -470,10 +470,14 @@ k64_foundation_init:
         jnz     .fail
 
         ; the hosted run: load, Ring 3, EXIT, teardown, desktop redraw.
-        ; The verdict covers the exit code, the fault seam and the BLIT
-        ; evidence; a failure is a real fault that panics.
+        ; Task 125: the call site moved into the desktop launch pump;
+        ; desktop_app_boot sets the request flag and calls the SAME
+        ; consumer the CHIP-8 menu entry uses (boot mode, no click
+        ; stage publication). The verdict covers the exit code, the
+        ; fault seam and the BLIT evidence; a failure is a real fault
+        ; that panics.
         mov     qword [rbp-16], kmsg_fail_app
-        call    app_launch
+        call    desktop_app_boot
         test    eax, eax
         jz      .app_ok
         ; a disk without /PROGRAMS/CHIP8.BIN reports ENOENT: the app

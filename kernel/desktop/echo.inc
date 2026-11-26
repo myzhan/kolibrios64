@@ -11,7 +11,9 @@
 ;; index (the input module stays untouched): every new entry with a
 ;; printable ascii 0x20..0x7E is drawn into the frozen text area and
 ;; counted, Enter starts a new line, Backspace erases the last glyph
-;; cell with the background color. A full line wraps to the next row;
+;; cell by restoring the wallpaper source row by row (DESKTOP-v2: the
+;; background is the embedded image, not a flat color). A full line
+;; wraps to the next row;
 ;; a full screen STOPS and counts drops (first version policy, frozen).
 ;; Enter and Backspace never count into desktop_test_keys. All drawing
 ;; runs in the main loop with IF = 0, never in interrupt context.
@@ -107,19 +109,33 @@ desktop_echo_key:
         cmp     qword [desktop_echo_col], 0
         je      .out                    ; line start: nothing to erase
         dec     qword [desktop_echo_col]
-        ; erase the glyph cell with the frozen background color
+        ; DESKTOP-v2: restore the glyph cell from the wallpaper source,
+        ; one packed 8 pixel row per blit, 16 rows top to bottom
         mov     rax, [desktop_echo_col]
         shl     rax, 3
         add     rax, DESKTOP_ECHO_X
-        mov     rcx, rax
+        mov     r14, rax                ; the cell x
         mov     rax, [desktop_echo_row]
         shl     rax, 4
         add     rax, DESKTOP_ECHO_Y
-        mov     rdx, rax
-        mov     r8d, DESKTOP_FONT_W
-        mov     r9d, DESKTOP_FONT_H
-        mov     dword [rsp+32], DESKTOP_BG_COLOR
-        call    video_fill_rect
+        mov     r15, rax                ; the running row y
+        mov     r13d, DESKTOP_FONT_H
+.erase_row:
+        ; source = desktop_wallpaper + (y * 1024 + x) * 4
+        mov     rax, r15
+        shl     rax, 10                 ; the wallpaper row stride 1024
+        add     rax, r14
+        shl     rax, 2                  ; one BGRX dword per pixel
+        lea     rcx, [desktop_wallpaper]
+        add     rcx, rax
+        mov     rdx, r14
+        mov     r8, r15
+        mov     r9d, DESKTOP_FONT_W
+        mov     dword [rsp+32], 1
+        call    video_blit_rect
+        inc     r15
+        dec     r13d
+        jnz     .erase_row
 .out:
         xor     eax, eax
         desktop_leave

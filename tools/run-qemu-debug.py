@@ -159,12 +159,22 @@ FORBIDDEN_MARKERS = ("K64-CPU-PANIC", "K64-BOOT-FAIL")
 # The GUI probes are the frozen task-77 pattern spec plus the task-108
 # mirror-sensitive 'K' row 3 pixels, the same 32 hand written pixels as
 # the stage2-fb spec model. Common desktop probes
-# hold in BOTH desktop frames: deep blue background 0x1A2B3C,
-# title bar 0x2C3E50 (0,0,1024,32), "K64 Desktop v0.1" at (8,8) in
-# white on the bar, the echoed "hi" at (16,64) in white on the blue.
+# hold in BOTH desktop frames. DESKTOP-v2: the background is the full
+# screen wallpaper (the T1 asset kernel/desktop/assets/wallpaper.bgrx,
+# truth sampled from build/desktop-wallpaper/wallpaper-probes.json and
+# the asset itself, NEVER from the renderer): deep blue-gray 0x182028
+# with a gray band 0x9594A2 around (557..568,411..416). The taskbar
+# 0x2C3E50 (0,0,1024,32), "K64 Desktop v0.1" at (8,8) in white on the
+# bar, the echoed "hi" at (16,64) in white on the wallpaper.
 PPM_WIDTH, PPM_HEIGHT = 1024, 768
+# DESKTOP_BG stays the frozen v1 plain color, kept ONLY as a negative
+# reference: task 125 app_redraw_desktop delegates to desktop_repaint_base,
+# so the --app final frame is the FULL wallpaper desktop again and the
+# *_APP_* probe tables are the identity transform of the common ones
 DESKTOP_BG = 0x1A2B3C
 DESKTOP_BAR = 0x2C3E50
+WALLPAPER_BG = 0x182028     # T1 JSON: the deep blue-gray wallpaper base
+WALLPAPER_BAND = 0x9594A2   # T1 JSON: the gray band, also the accent color
 # the GUI-G1 pattern frame: 8 color bars x 128 px, white border, the
 # centered 200x200 gray rectangle at (412,284), "K64 GUI-G1" at (8,8)
 PPM_GUI_PROBES = (
@@ -204,11 +214,11 @@ PPM_GUI_PROBES = (
     (10, 11, 0xFF0000),                 # 'K' glyph row 3 col 2 not lit
 )
 PPM_COMMON_PROBES = (
-    (900, 700, DESKTOP_BG),             # background, far from everything
-    (16, 767, DESKTOP_BG),              # background, bottom left corner
-    (500, 16, DESKTOP_BAR),             # title bar fill
-    (500, 31, DESKTOP_BAR),             # title bar last row
-    (500, 32, DESKTOP_BG),              # first row below the bar
+    (900, 700, WALLPAPER_BG),           # wallpaper, far from everything
+    (16, 767, WALLPAPER_BG),            # wallpaper, bottom left corner
+    (500, 16, DESKTOP_BAR),             # taskbar fill
+    (500, 31, DESKTOP_BAR),             # taskbar last row
+    (500, 32, WALLPAPER_BG),            # first row below the bar
     (9, 10, 0xFFFFFF), (14, 10, 0xFFFFFF),   # 'K' glyph row 2 lit
     (8, 10, DESKTOP_BAR), (8, 8, DESKTOP_BAR),  # 'K' glyph off pixels
     # task-108 mirror-sensitive: 'K' row 3 = 0x22 lights cols 1 and 5
@@ -219,35 +229,179 @@ PPM_COMMON_PROBES = (
     (130, 12, 0xFFFFFF),                # '1' row 4 col 2 flag lit
     (133, 12, DESKTOP_BAR),             # '1' row 4 col 5 not lit
     (131, 11, 0xFFFFFF), (132, 11, 0xFFFFFF),  # '1' row 3 symmetric lit
-    # task-108: 'h'/'i' probes re-derived from the charUni.mt LSB truth
+    # task-108: 'h'/'i' probes re-derived from the charUni.mt LSB truth;
+    # DESKTOP-v2: the off pixels sit on the wallpaper base (asset truth)
     (17, 69, 0xFFFFFF),                 # 'h' row 5 col 1 lit
-    (18, 69, DESKTOP_BG),               # 'h' row 5 col 2 off
-    (16, 69, DESKTOP_BG),               # 'h' row 5 col 0 off
+    (18, 69, WALLPAPER_BG),             # 'h' row 5 col 2 off
+    (16, 69, WALLPAPER_BG),             # 'h' row 5 col 0 off
     (17, 66, 0xFFFFFF),                 # 'h' row 2 col 1 lit
-    (22, 66, DESKTOP_BG),               # 'h' row 2 col 6 off
+    (22, 66, WALLPAPER_BG),             # 'h' row 2 col 6 off
     (28, 66, 0xFFFFFF),                 # 'i' row 2 col 4 lit
-    (27, 66, DESKTOP_BG),               # 'i' row 2 col 3 off
+    (27, 66, WALLPAPER_BG),             # 'i' row 2 col 3 off
     (26, 75, 0xFFFFFF),                 # 'i' row 11 col 2 base lit
-    (25, 75, DESKTOP_BG),               # 'i' row 11 col 1 off
-    (24, 66, DESKTOP_BG),               # 'i' row 2 col 0 off
+    (25, 75, WALLPAPER_BG),             # 'i' row 11 col 1 off
+    (24, 66, WALLPAPER_BG),             # 'i' row 2 col 0 off
 )
 # the echo frame: the cursor sprite at the frozen initial (517,387)
 PPM_ECHO_PROBES = (
     (517, 387, 0x000000),               # sprite row 0 col 0 outline
     (519, 392, 0xFFFFFF),               # sprite row 5 col 2 white fill
-    (528, 387, DESKTOP_BG),             # sprite row 0 col 11 transparent
+    (528, 387, WALLPAPER_BG),           # sprite row 0 col 11 transparent
 )
 # the final frame: the cursor moved to (557,411), the old position
-# restored to the background pixel for pixel
+# restored to the wallpaper pixel for pixel; (568,411) sits inside the
+# T1 JSON gray band, the transparent sprite column shows the band
 PPM_FINAL_PROBES = (
     (557, 411, 0x000000),               # sprite row 0 col 0 outline
     (559, 416, 0xFFFFFF),               # sprite row 5 col 2 white fill
     (562, 416, 0xFFFFFF),               # sprite row 5 col 5 white fill
-    (568, 411, DESKTOP_BG),             # sprite row 0 col 11 transparent
-    (517, 387, DESKTOP_BG),             # old outline pixel restored
-    (519, 392, DESKTOP_BG),             # old white fill pixel restored
-    (528, 397, DESKTOP_BG),             # old row 10 outline pixel restored
+    (568, 411, WALLPAPER_BAND),         # sprite row 0 col 11 transparent
+    (517, 387, WALLPAPER_BG),           # old outline pixel restored
+    (519, 392, WALLPAPER_BG),           # old white fill pixel restored
+    (528, 397, WALLPAPER_BG),           # old row 10 outline pixel restored
 )
+
+
+# the frozen app echo save rectangle (kernel/app/api.inc APP_ECHO_SAVE_*,
+# pinned to the desktop echo first line): the teardown blits it back
+# VERBATIM, and it was captured from the wallpaper desktop, so pixels
+# inside keep the wallpaper truth while the rest of the frame is the
+# frozen plain repaint
+APP_ECHO_SAVE_RECT = (16, 64, 1008, 16)
+
+
+def _app_flat(probes):
+    # task 125: the teardown redraw delegates to desktop_repaint_base
+    # (the full wallpaper + taskbar + accents + title), so the --app
+    # final frame keeps the wallpaper truth EVERYWHERE, the echo save
+    # rectangle included (the base repaints it identically). The
+    # transform is the identity; it is kept so the *_APP_* tables and
+    # the frozen --app probe counts survive unchanged.
+    return tuple(probes)
+
+
+PPM_APP_COMMON_PROBES = _app_flat(PPM_COMMON_PROBES)
+PPM_APP_FINAL_PROBES = _app_flat(PPM_FINAL_PROBES)
+
+# DESKTOP-v2 T3 menu frames (--menu). Truth derived independently from
+# the frozen geometry contract (start button (0,0,64,32), menu rect
+# (0,32,200,34), 1px accent border, inner panel (1,33,198,32) in
+# DESKTOP_BAR, 'CHIP-8' at (76,41), entry center (100,49)), the
+# charUni.mt LSB-first font bytes and the wallpaper asset samples.
+PPM_MENU_OPEN_PROBES = (
+    # the accent border corners of the menu rectangle
+    (0, 32, WALLPAPER_BAND), (199, 32, WALLPAPER_BAND),
+    (0, 65, WALLPAPER_BAND), (199, 65, WALLPAPER_BAND),
+    # the inner panel
+    (1, 33, DESKTOP_BAR), (198, 64, DESKTOP_BAR),
+    # the taskbar accents: underline (0,31,64,1), separator (64,24,1,8)
+    (10, 31, WALLPAPER_BAND), (64, 24, WALLPAPER_BAND),
+    # the wallpaper outside the menu
+    (900, 700, WALLPAPER_BG), (16, 767, WALLPAPER_BG),
+    (500, 40, WALLPAPER_BG),
+    # 'CHIP-8' glyph truth, LSB-first (bit0 = leftmost), text at (76,41)
+    (78, 44, 0xFFFFFF),                 # 'C' row 3 = 0x44 col 2 lit
+    (77, 44, DESKTOP_BAR),              # 'C' row 3 col 1 off (mirror)
+    (85, 43, 0xFFFFFF),                 # 'H' row 2 = 0x42 col 1 lit
+    (84, 43, DESKTOP_BAR),              # 'H' row 2 col 0 off
+    (94, 43, 0xFFFFFF),                 # 'I' row 2 = 0x7C col 2 lit
+    (92, 43, DESKTOP_BAR),              # 'I' row 2 col 0 off
+    (101, 43, 0xFFFFFF),                # 'P' row 2 = 0x3E col 1 lit
+    (106, 43, DESKTOP_BAR),             # 'P' row 2 col 6 off
+    (109, 48, 0xFFFFFF),                # '-' row 7 = 0x7E col 1 lit
+    (108, 48, DESKTOP_BAR),             # '-' row 7 col 0 off
+    (118, 43, 0xFFFFFF),                # '8' row 2 = 0x3C col 2 lit
+    (117, 43, DESKTOP_BAR),             # '8' row 2 col 1 off
+    # the cursor sprite on the start button (32,16)
+    (32, 16, 0x000000),                 # sprite row 0 col 0 outline
+    (34, 21, 0xFFFFFF),                 # sprite row 5 col 2 white fill
+    # the echo survives below the menu rectangle
+    (17, 69, 0xFFFFFF), (18, 69, WALLPAPER_BG),
+)
+# the launch frame: the CHIP-8 entry click closed the menu, the whole
+# rectangle is restored from the page-2 save, the cursor sits at the
+# entry center (100,49)
+PPM_MENU_LAUNCH_PROBES = (
+    (0, 32, WALLPAPER_BG), (199, 65, WALLPAPER_BG),
+    (1, 33, WALLPAPER_BG), (198, 64, WALLPAPER_BG),
+    (78, 44, WALLPAPER_BG),             # a former glyph pixel restored
+    (109, 48, WALLPAPER_BG),            # a former '-' pixel restored
+    (557, 411, WALLPAPER_BAND),         # the gray band intact
+    (900, 700, WALLPAPER_BG),
+    (500, 16, DESKTOP_BAR), (10, 31, WALLPAPER_BAND),
+    (100, 49, 0x000000),                # sprite row 0 col 0 outline
+    (102, 54, 0xFFFFFF),                # sprite row 5 col 2 white fill
+)
+# the close frame: the blank click at (700,600) closed the menu, the
+# rectangle (including the two echo rows y=64,65 it covered) is
+# restored from the save pixel for pixel
+PPM_MENU_CLOSE_PROBES = (
+    (1, 33, WALLPAPER_BG), (198, 64, WALLPAPER_BG),
+    (78, 44, WALLPAPER_BG),
+    (16, 64, WALLPAPER_BG),             # echo top row background restored
+    (17, 69, 0xFFFFFF),                 # 'h' row 5 col 1 still lit
+    (557, 411, WALLPAPER_BAND), (517, 387, WALLPAPER_BG),
+    (900, 700, WALLPAPER_BG),
+    (10, 31, WALLPAPER_BAND),
+    (700, 600, 0x000000),               # sprite row 0 col 0 outline
+    (702, 605, 0xFFFFFF),               # sprite row 5 col 2 white fill
+    # task 125: the ENOENT launch cleanup erased the running indicator
+    (1000, 12, DESKTOP_BAR),
+)
+
+# task 125 T5: the taskbar running indicator while the app runs, the
+# frozen geometry (DESKTOP_RUN_X/Y/W/H = 992,8,24,16) in the accent
+# color, the surrounding bar pixels untouched
+PPM_RUN_LIT_PROBES = (
+    (992, 8, WALLPAPER_BAND), (1015, 23, WALLPAPER_BAND),
+    (1000, 12, WALLPAPER_BAND),
+    (991, 8, DESKTOP_BAR), (1016, 8, DESKTOP_BAR),
+    (992, 7, DESKTOP_BAR), (992, 24, DESKTOP_BAR),
+)
+
+# task 143 (DEFECT-1): the start-button click box (32,16)-(43,33), the
+# exact 12x18 sprite footprint of the start press. While the cursor is
+# SUSPENDED (game/game2 frames) or elsewhere (menu launch/close frames)
+# this box must hold the bar / button-white / underline / wallpaper
+# truth; a sprite pattern here is the captured-cursor residue defect.
+# The truth derives from the clean full-repaint exit frame, NOT from
+# the defective capture.
+RESIDUE_BOX_X, RESIDUE_BOX_Y = 32, 16
+RESIDUE_BOX_W, RESIDUE_BOX_H = 12, 18
+PPM_RESIDUE_BOX_PROBES = (
+    (32, 16, DESKTOP_BAR),              # sprite r0c0 outline -> bar
+    (33, 17, DESKTOP_BAR),              # r1c1 white fill -> bar
+    (34, 18, DESKTOP_BAR),              # r2c2 white fill -> bar
+    (40, 19, DESKTOP_BAR),              # r3c8 transparent -> bar
+    (42, 26, DESKTOP_BAR),              # r10c10 white fill -> bar
+    (43, 26, DESKTOP_BAR),              # r10c11 outline -> bar
+    (37, 28, DESKTOP_BAR),              # r12c5 outline -> bar
+    (41, 16, 0xFFFFFF),                 # the start button white graphic
+    (43, 19, 0xFFFFFF),                 # the start button white graphic
+    (32, 31, WALLPAPER_BAND),           # r15c0 outline -> underline
+    (38, 32, WALLPAPER_BG),             # r16c6 outline -> wallpaper
+    (39, 33, WALLPAPER_BG),             # r17c7 outline -> wallpaper
+    (40, 33, WALLPAPER_BG),             # r17c8 outline -> wallpaper
+)
+
+
+def residue_box(raw):
+    """The flat 12x18 start-click box of a captured PPM (task 143), or
+    None on any parse/size defect: the full-box residue comparison."""
+    if raw is None:
+        return None
+    try:
+        w, h, px = parse_ppm(raw)
+    except ValueError:
+        return None
+    if (w, h) != (PPM_WIDTH, PPM_HEIGHT):
+        return None
+    out = []
+    for y in range(RESIDUE_BOX_Y, RESIDUE_BOX_Y + RESIDUE_BOX_H):
+        for x in range(RESIDUE_BOX_X, RESIDUE_BOX_X + RESIDUE_BOX_W):
+            off = (y * w + x) * 3
+            out.append((px[off] << 16) | (px[off + 1] << 8) | px[off + 2])
+    return tuple(out)
 
 # frozen task-60 verdict values. passed comes from the serial report line;
 # the counters are memory-only on the success path, so their VAs are
@@ -296,6 +450,71 @@ EXPECTED_COUNTERS_SKIP = dict(EXPECTED_COUNTERS,
                               desktop_test_cursor_x=0,
                               desktop_test_cursor_y=0,
                               desktop_gui_frame_stage=0)
+# DESKTOP-v2 --menu mode: the frozen chain above plus the 21-packet
+# host menu drive (5 moves + press/release to the start button, 1 move
+# + press/release to the CHIP-8 entry, 1 move + press/release back to
+# the start button, 6 moves + press/release to the blank (700,600)):
+# mouse = 6 + 21 = 27, the cursor evidence ends at (700,600); ticks
+# stays 11 (the resident loop keeps the LVT timer masked). Task 125:
+# the entry click REALLY launches through desktop_launch_pump; on the
+# plain disk.img app_launch reports ENOENT (pixel-neutral cleanup), the
+# click-mode pump publishes APP_RUNNING/APP_EXIT (8/9) and the LAST
+# start press re-publishes START_CLICK (6), so the final stage is 6
+EXPECTED_COUNTERS_MENU = dict(EXPECTED_COUNTERS,
+                              input_test_mouse_count=27,
+                              desktop_test_stage=6,
+                              desktop_test_cursor_x=700,
+                              desktop_test_cursor_y=600)
+# DESKTOP-v2 --five mode (task 125 T5): the boot hosted run (--app
+# handshake, runs=1/exits=1, boot mode keeps stage 5) plus TWO resident
+# click rounds of 8 packets each: 5 moves + start press/release + 1 move
+# + entry press/release (round 1), 1 move back + start press/release +
+# 1 move + entry press/release (round 2). mouse = 6 + 16 = 22, the
+# cursor ends at the entry center (100,49), the last click-mode pump
+# published APP_EXIT (9); ticks stays 11, kbd stays 6
+EXPECTED_COUNTERS_FIVE = dict(EXPECTED_COUNTERS,
+                              input_test_mouse_count=22,
+                              desktop_test_stage=9,
+                              desktop_test_cursor_x=100,
+                              desktop_test_cursor_y=49)
+# the nine DESKTOP-v2 private labels, read on the --menu and --five legs
+MENU_COUNTER_SYMBOLS = (("desktop_test_clicks", 8),
+                        ("desktop_test_menu_opens", 8),
+                        ("desktop_menu_flag", 8),
+                        ("desktop_app_launch_requested", 8),
+                        ("desktop_prev_buttons", 8),
+                        ("desktop_test_start_clicks", 8),
+                        ("desktop_test_entry_clicks", 8),
+                        ("desktop_test_app_runs", 8),
+                        ("desktop_test_app_exits", 8))
+# the frozen --menu end state: clicks = 1 (the selftest leg 4 press at
+# (557,411), frozen by the guest selftest) + 4 menu presses = 5; 2 menu
+# opens, 2 start presses, 1 entry press; task 125: the launch pump
+# CONSUMED the flag (0); runs counts EVERY launch attempt in BOTH modes:
+# the boot attempt (ENOENT on the plain image) + the entry click = 2,
+# exits 0 (neither found /PROGRAMS/CHIP8.BIN), the menu closed, no
+# button held
+EXPECTED_MENU_FINAL = {"desktop_test_clicks": 5,
+                       "desktop_test_menu_opens": 2,
+                       "desktop_menu_flag": 0,
+                       "desktop_app_launch_requested": 0,
+                       "desktop_prev_buttons": 0,
+                       "desktop_test_start_clicks": 2,
+                       "desktop_test_entry_clicks": 1,
+                       "desktop_test_app_runs": 2,
+                       "desktop_test_app_exits": 0}
+# the frozen --five end state: the boot run plus two click rounds, all
+# three clean teardowns accounted (runs 3 / exits 3), the relaunch reset
+# proven by the second IBM_READY and the pixel-identical exit frames
+EXPECTED_FIVE_FINAL = {"desktop_test_clicks": 5,
+                       "desktop_test_menu_opens": 2,
+                       "desktop_menu_flag": 0,
+                       "desktop_app_launch_requested": 0,
+                       "desktop_prev_buttons": 0,
+                       "desktop_test_start_clicks": 2,
+                       "desktop_test_entry_clicks": 2,
+                       "desktop_test_app_runs": 3,
+                       "desktop_test_app_exits": 3}
 # -d int vector delivery expectations, DETERMINISTICALLY derived from
 # the whole injection chain (one delivery per 8042 byte, the task-94
 # measured structure): ok mode v=0x21 = 2 (sendkey a) + 4 (h and i
@@ -303,7 +522,11 @@ EXPECTED_COUNTERS_SKIP = dict(EXPECTED_COUNTERS,
 # packet) + 9 (desktop move/press/release) = 18. sendkey b is fully
 # drained under the mask, it never delivers. skip mode: input only.
 EXPECTED_VECTORS = {"ok": {"21": 6, "2c": 18},
-                    "skip": {"21": 2, "2c": 9}}
+                    "skip": {"21": 2, "2c": 9},
+                    # --menu: 18 + 21 packets * 3 bytes = 81, kbd unchanged
+                    "menu": {"21": 6, "2c": 81},
+                    # --five: 18 + 16 packets * 3 bytes = 66, kbd unchanged
+                    "five": {"21": 6, "2c": 66}}
 PASSED_RE = re.compile(r"K64-CPU-SELFTEST passed = (0x[0-9A-Fa-f]+)")
 
 # the IRQ-v2 host injection script, one monitor command per handshake
@@ -322,6 +545,56 @@ INPUT_STAGE_INJECT = {1: "sendkey b", 2: "sendkey a", 3: "mouse_move 5 3"}
 # + press 1), so QEMU can never coalesce press+release. Stage 5 (done)
 # needs no host action.
 DESKTOP_STAGE_INJECT = {1: "sendkey h", 2: "sendkey i", 3: "mouse_move 40 24"}
+
+# DESKTOP-v2 T3 (--menu): the host-side menu drive, run ONLY after the
+# terminal marker against the resident desktop_run loop. Zero new guest
+# handshake stages: every step is gated on input_test_mouse_count (one
+# PS/2 packet per monitor command) and, for the presses, on the desktop
+# private labels the click pump publishes. Path (screen coordinates,
+# QEMU mouse_move deltas are down-positive, the input module sign
+# extends the PS/2 deltas): (557,411) -> 5 moves -> (32,16) start button
+# press = menu open frame -> release -> 1 move -> (100,49) CHIP-8 entry
+# press = launch flag + menu close frame -> release -> 1 move -> (32,16)
+# press = reopen -> release -> 6 moves -> (700,600) blank press = menu
+# close frame -> release. Every move delta stays <= 127 in absolute
+# value: the QEMU PS/2 device splits larger deltas into MULTIPLE packets
+# (measured: 125 -> 1 packet, 200 -> 2), which would drift the derived
+# delivery counts. 21 packets: mouse 6 -> 27, v=0x2c 18 -> 81.
+MENU_LEG_TIMEOUT = 60.0
+# task 125 T5 (--five): two resident click rounds, each waits for a full
+# hosted run (IBM_READY -> EXIT_REQ -> DONE) on top of the packet gates
+FIVE_LEG_TIMEOUT = 120.0
+MENU_INJECT_SCRIPT = (
+    # (monitor command, mouse_count gate, guest label gates, capture)
+    ("mouse_move -125 -100", 7, (), None),
+    ("mouse_move -125 -100", 8, (), None),
+    ("mouse_move -125 -100", 9, (), None),
+    ("mouse_move -125 -100", 10, (), None),
+    ("mouse_move -25 5", 11, (), None),
+    ("mouse_button 1", 12, (("desktop_test_clicks", ">=", 1),
+                            ("desktop_menu_flag", "==", 1)), "open"),
+    ("mouse_button 0", 13, (), None),
+    ("mouse_move 68 33", 14, (), None),
+    # task 125: the launch pump consumes the flag synchronously inside
+    # the resident loop, so the persistent entry_clicks counter is the
+    # gate (the flag == 1 window is never observable from the host)
+    ("mouse_button 1", 15, (("desktop_test_entry_clicks", ">=", 1),
+                            ("desktop_menu_flag", "==", 0)), "launch"),
+    ("mouse_button 0", 16, (), None),
+    ("mouse_move -68 -33", 17, (), None),
+    ("mouse_button 1", 18, (("desktop_menu_flag", "==", 1),
+                            ("desktop_test_menu_opens", ">=", 2)), None),
+    ("mouse_button 0", 19, (), None),
+    ("mouse_move 125 125", 20, (), None),
+    ("mouse_move 125 125", 21, (), None),
+    ("mouse_move 125 125", 22, (), None),
+    ("mouse_move 125 125", 23, (), None),
+    ("mouse_move 125 84", 24, (), None),
+    ("mouse_move 43 0", 25, (), None),
+    ("mouse_button 1", 26, (("desktop_test_clicks", ">=", 4),
+                            ("desktop_menu_flag", "==", 0)), "close"),
+    ("mouse_button 0", 27, (), None),
+)
 
 # the GUI frame forensic handshake stages (core/contracts.inc
 # K64_GUI_FRAME_*): after K64-GUI-OK the guest publishes READY (1) in
@@ -475,12 +748,30 @@ APP_COUNTER_SYMBOLS = (("app_ready", 8), ("app_stage", 8),
                        ("app_pages", APP_LAUNCH_PAGES * 8),
                        ("fs_test_reads", 8), ("blk_test_reads", 8),
                        ("mm_vmm_state", 56))
-# the exit frame: the game rectangle is repainted to the background,
-# the desktop cursor sits again at the frozen final (557,411)
+# the exit frame: task 125 the teardown redraw delegates to
+# desktop_repaint_base, the game rectangle is repainted to the FULL
+# wallpaper desktop (the base color, never the v1 plain DESKTOP_BG)
 APP_EXIT_PROBES = (
-    (APP_FB_X + 5, APP_FB_Y + 5, DESKTOP_BG),
-    (500, 400, DESKTOP_BG),
-    (APP_FB_X + APP_FB_W - 1, APP_FB_Y + APP_FB_H - 1, DESKTOP_BG),
+    (APP_FB_X + 5, APP_FB_Y + 5, WALLPAPER_BG),
+    (500, 400, WALLPAPER_BG),
+    (APP_FB_X + APP_FB_W - 1, APP_FB_Y + APP_FB_H - 1, WALLPAPER_BG),
+)
+
+# task 125 T5: the --five exit frame, the full wallpaper desktop after
+# the teardown redraw with the cursor at the entry center (100,49), the
+# running indicator erased by the taskbar repaint, the game rectangle
+# residue-free and the old cursor positions restored to the asset truth
+PPM_FIVE_EXIT_PROBES = (
+    (100, 49, 0x000000),                # sprite row 0 col 0 outline
+    (102, 54, 0xFFFFFF),                # sprite row 5 col 2 white fill
+    (111, 49, WALLPAPER_BG),            # sprite row 0 col 11 transparent
+    (992, 8, DESKTOP_BAR), (1015, 23, DESKTOP_BAR),
+    (1000, 12, DESKTOP_BAR),            # the running indicator erased
+    (APP_FB_X + 5, APP_FB_Y + 5, WALLPAPER_BG),
+    (500, 400, WALLPAPER_BG),
+    (APP_FB_X + APP_FB_W - 1, APP_FB_Y + APP_FB_H - 1, WALLPAPER_BG),
+    (557, 411, WALLPAPER_BAND),         # the gray band intact
+    (517, 387, WALLPAPER_BG),           # the initial position restored
 )
 
 # task 141 W1: the interactive tetris leg (--app-interactive). Keys are
@@ -776,6 +1067,15 @@ def read_counters(port, addrs):
             counters[name] = gdb_read_mem(port, addrs[name], size)
         except OSError as e:
             errors.append(f"counter {name}: {e}")
+    # task 124: the five --menu private desktop labels resolve through
+    # the same wrapper; read them only when their addresses are present
+    # (--menu), the frozen legs never pass them and stay unchanged
+    for name, size in MENU_COUNTER_SYMBOLS:
+        if name in addrs and name not in counters:
+            try:
+                counters[name] = gdb_read_mem(port, addrs[name], size)
+            except OSError as e:
+                errors.append(f"counter {name}: {e}")
     return counters, errors
 
 
@@ -1802,7 +2102,8 @@ def app_frame_lit(ppm_data):
 
 def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None,
           ppm_echo=None, ppm_gui=None, blk=None, fs=None, fsprobe=None,
-          app=None, ppm_game=None, app_interactive=False):
+          app=None, ppm_game=None, app_interactive=False, menu=None,
+          five=None):
     """Pure smoke verdict: (ok, report lines). No I/O in here, so the
     decision can be exercised unit-style against mutated serial/debug
     fixtures (the task-67 sensitivity evidence).
@@ -1874,7 +2175,10 @@ def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None,
         passed = int(matches[0], 16)
         req(passed == EXPECTED_PASSED,
             f"CPU selftest passed = {passed:#x} (need {EXPECTED_PASSED:#x})")
-    expected = EXPECTED_COUNTERS if gui_mode == "ok" else EXPECTED_COUNTERS_SKIP
+    expected = (EXPECTED_COUNTERS_FIVE if five is not None
+                else EXPECTED_COUNTERS_MENU if menu is not None
+                else EXPECTED_COUNTERS if gui_mode == "ok"
+                else EXPECTED_COUNTERS_SKIP)
     for name, _ in COUNTER_SYMBOLS:
         want = expected[name]
         if name not in counters:
@@ -1886,7 +2190,9 @@ def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None,
     # -d int vector delivery evidence: one delivery per 8042 byte, the
     # expectation derives from the whole injection chain, never from a
     # runtime observation (the IRQ-v2 deferred item, landed by task 96)
-    for vec, want in EXPECTED_VECTORS[gui_mode].items():
+    vec_mode = ("five" if five is not None
+                else "menu" if menu is not None else gui_mode)
+    for vec, want in EXPECTED_VECTORS[vec_mode].items():
         got = len(re.findall(r"\bv=" + vec + r"\b", debug))
         req(got == want,
             f"-d int v={vec} deliveries = {got} (need {want}, derived)")
@@ -1918,8 +2224,27 @@ def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None,
             "no K64-DESKTOP-SKIP in serial (ok mode)")
         judge_ppm(ppm_gui, PPM_GUI_PROBES, "gui")
         judge_ppm(ppm_echo, PPM_COMMON_PROBES + PPM_ECHO_PROBES, "echo")
-        judge_ppm(ppm, PPM_COMMON_PROBES + PPM_FINAL_PROBES
-                  + (APP_EXIT_PROBES if app is not None else ()), "final")
+        # DESKTOP-v2: the default final frame is the wallpaper desktop;
+        # the --app final frame is the frozen plain app_redraw_desktop
+        # repaint (same coordinates, same count, the *_APP_* tables);
+        # the --menu final frame is the blank-click close frame: the
+        # cursor ended at (700,600) and the menu rectangle is restored
+        if menu is not None:
+            judge_ppm(ppm, PPM_COMMON_PROBES + PPM_MENU_CLOSE_PROBES,
+                      "final")
+        elif five is not None:
+            # task 125 T5: the --five final capture is the SECOND exit
+            # frame, the full wallpaper desktop with the cursor at the
+            # entry center (100,49) and the running indicator erased
+            judge_ppm(ppm, PPM_COMMON_PROBES + PPM_FIVE_EXIT_PROBES,
+                      "final")
+        else:
+            final_common = (PPM_APP_COMMON_PROBES if app is not None
+                            else PPM_COMMON_PROBES)
+            final_extra = (PPM_APP_FINAL_PROBES if app is not None
+                           else PPM_FINAL_PROBES)
+            judge_ppm(ppm, final_common + final_extra
+                      + (APP_EXIT_PROBES if app is not None else ()), "final")
     else:
         req(GUI_OK_MARKER not in serial,
             "no K64-GUI-OK in serial (skip mode)")
@@ -2202,6 +2527,82 @@ def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None,
                 req(False, f"interactive leg: {e}")
         for e in app.get("errors", ()):
             req(False, f"app evidence: {e}")
+
+    # DESKTOP-v2 T3 verdict, appended AFTER every frozen decision above;
+    # runs only when menu= is passed (--menu), so the frozen judge
+    # fixtures keep their exact check count and decisions
+    if menu is not None:
+        for name, want in EXPECTED_MENU_FINAL.items():
+            got = counters.get(name)
+            req(got == want,
+                f"{name} = {got if got is None else hex(got)} "
+                f"(need {want:#x})")
+        judge_ppm(menu.get("open"), PPM_MENU_OPEN_PROBES, "menu-open")
+        judge_ppm(menu.get("launch"), PPM_MENU_LAUNCH_PROBES, "menu-launch")
+        judge_ppm(menu.get("close"), PPM_MENU_CLOSE_PROBES, "menu-close")
+        # task 143 (DEFECT-1): the start-click box must be sprite-free
+        # once the cursor moved on to the entry / away to (700,600)
+        judge_ppm(menu.get("launch"), PPM_RESIDUE_BOX_PROBES,
+                  "menu-launch-residue")
+        judge_ppm(menu.get("close"), PPM_RESIDUE_BOX_PROBES,
+                  "menu-close-residue")
+        mb = residue_box(ppm)
+        lb = residue_box(menu.get("launch"))
+        req(mb is not None and lb == mb,
+            "menu launch start-click box == the final frame box "
+            "pixel for pixel (no cursor residue)")
+        for e in menu.get("errors", ()):
+            req(False, f"menu leg: {e}")
+
+    # DESKTOP-v2 T5 verdict (task 125), appended AFTER every frozen
+    # decision above; runs only when five= is passed (--five), so the
+    # frozen judge fixtures keep their exact check count and decisions
+    if five is not None:
+        for name, want in EXPECTED_FIVE_FINAL.items():
+            got = counters.get(name)
+            req(got == want,
+                f"{name} = {got if got is None else hex(got)} "
+                f"(need {want:#x})")
+        judge_ppm(five.get("menu"), PPM_MENU_OPEN_PROBES, "five-menu")
+        judge_ppm(five.get("game"), PPM_RUN_LIT_PROBES,
+                  "five-game-indicator")
+        judge_ppm(five.get("game2"), PPM_RUN_LIT_PROBES,
+                  "five-game2-indicator")
+        # task 143 (DEFECT-1): the cursor is SUSPENDED in both game
+        # frames -- the start-click box must equal the clean exit frame
+        # box (the full-repaint truth) pixel for pixel, all 216 pixels
+        judge_ppm(five.get("game"), PPM_RESIDUE_BOX_PROBES,
+                  "five-game-residue")
+        judge_ppm(five.get("game2"), PPM_RESIDUE_BOX_PROBES,
+                  "five-game2-residue")
+        base_box = residue_box(ppm)
+        gb = residue_box(five.get("game"))
+        g2b = residue_box(five.get("game2"))
+        req(base_box is not None and gb == base_box,
+            "five game start-click box == the exit frame box "
+            "pixel for pixel (no cursor residue)")
+        req(base_box is not None and g2b == base_box,
+            "five game2 start-click box == the exit frame box "
+            "pixel for pixel (no relaunch residue)")
+        # the relaunch game frame == the chip8 model expected frame: the
+        # DONE-gate reset re-published IBM_READY and blitted the logo
+        # again (a one-shot blit gate would leave the rectangle black)
+        req(app_frame_match(five.get("game2"),
+                            (app or {}).get("expected_frame")),
+            "five game2 frame == the chip8 model expected frame "
+            "pixel for pixel (the relaunch really re-ran)")
+        g1, g2 = five.get("game"), five.get("game2")
+        req(g1 is not None and g2 is not None and g1 == g2,
+            "five game2 frame == game frame byte for byte "
+            "(no relaunch drawing leak)")
+        judge_ppm(five.get("exit"),
+                  PPM_COMMON_PROBES + PPM_FIVE_EXIT_PROBES, "five-exit")
+        e1, e2 = five.get("exit"), five.get("exit2")
+        req(e1 is not None and e2 is not None and e1 == e2,
+            "five exit2 frame == exit frame pixel for pixel "
+            "(no relaunch leak, the full repaint is deterministic)")
+        for e in five.get("errors", ()):
+            req(False, f"five leg: {e}")
     return ok, lines
 
 
@@ -2284,6 +2685,239 @@ def read_log(path):
             return f.read()
     except FileNotFoundError:
         return ""
+
+
+def menu_leg(args, art, counter_addrs):
+    """DESKTOP-v2 T3: drive the frozen MENU_INJECT_SCRIPT against the
+    resident desktop loop and capture the three menu frames. Returns
+    the evidence dict the judge menu= block asserts; every failure is
+    recorded, never silently skipped."""
+    ev = {"open": None, "launch": None, "close": None,
+          "errors": [], "log": []}
+    if counter_addrs.get("input_test_mouse_count") is None:
+        ev["errors"].append("input_test_mouse_count address unresolved")
+        return ev
+    deadline = time.monotonic() + MENU_LEG_TIMEOUT
+
+    def read(name):
+        addr = counter_addrs.get(name)
+        if addr is None:
+            return None
+        try:
+            return gdb_read_mem(args.port, addr, 8)
+        except OSError:
+            return None
+
+    def gates_ok(gates):
+        for name, op, want in gates:
+            v = read(name)
+            if v is None:
+                return False
+            if op == ">=" and v < want:
+                return False
+            if op == "==" and v != want:
+                return False
+        return True
+
+    for i, (cmd, count_gate, gates, capture) in enumerate(MENU_INJECT_SCRIPT):
+        sent = False
+        while time.monotonic() < deadline:
+            try:
+                reply = monitor_command(art, cmd)
+            except OSError as e:
+                reply = f"Error: {e}"
+            low = reply.lower()
+            if not (low.startswith("error") or low.startswith("unknown")):
+                sent = True
+                break
+            time.sleep(0.2)
+        if not sent:
+            ev["errors"].append(f"menu step {i}: {cmd!r} never accepted")
+            return ev
+        ev["log"].append(f"menu step {i}: {cmd!r} sent")
+        reached = False
+        while time.monotonic() < deadline:
+            n = read("input_test_mouse_count")
+            if n is not None and n >= count_gate and gates_ok(gates):
+                reached = True
+                break
+            time.sleep(0.05)
+        if not reached:
+            ev["errors"].append(
+                f"menu step {i}: guest gate never reached "
+                f"(mouse_count >= {count_gate}, gates {gates})")
+            return ev
+        ev["log"].append(f"menu step {i}: mouse_count={n} "
+                         f"(gate {count_gate})")
+        if capture:
+            # let the pump finish the redraw after the published labels
+            time.sleep(0.2)
+            name = f"screen-menu-{capture}.ppm"
+            try:
+                ev[capture] = screendump(art, name=name)
+                ev["log"].append(f"menu {capture}: {name} captured")
+            except OSError as e:
+                ev["errors"].append(f"menu {capture}: screendump failed: {e}")
+    return ev
+
+
+def five_leg(args, art, counter_addrs):
+    """DESKTOP-v2 T5 (task 125): drive TWO resident click rounds against
+    desktop_run after the boot hosted run (--app handshake, runs=1).
+    Each round: start button press (menu frame) -> CHIP-8 entry press ->
+    wait IBM_READY (game frame, running indicator lit) -> write EXIT_REQ
+    -> wait DONE + the exits counter (exit frame, full wallpaper
+    repaint). Round 2 proves the relaunch: the DONE-gate reset must
+    re-publish IBM_READY and the exit frames must be pixel identical.
+    16 packets total: mouse 6 -> 22, gates 7..22. Every failure is
+    recorded, never silently skipped."""
+    ev = {"menu": None, "game": None, "exit": None,
+          "game2": None, "exit2": None, "errors": [], "log": []}
+    for name in ("input_test_mouse_count", "app_stage",
+                 "desktop_test_app_exits"):
+        if counter_addrs.get(name) is None:
+            ev["errors"].append(f"{name} address unresolved")
+            return ev
+    deadline = time.monotonic() + FIVE_LEG_TIMEOUT
+
+    def read(name):
+        addr = counter_addrs.get(name)
+        if addr is None:
+            return None
+        try:
+            return gdb_read_mem(args.port, addr, 8)
+        except OSError:
+            return None
+
+    def gates_ok(gates):
+        for name, op, want in gates:
+            v = read(name)
+            if v is None:
+                return False
+            if op == ">=" and v < want:
+                return False
+            if op == "==" and v != want:
+                return False
+        return True
+
+    def send(i, cmd):
+        while time.monotonic() < deadline:
+            try:
+                reply = monitor_command(art, cmd)
+            except OSError as e:
+                reply = f"Error: {e}"
+            low = reply.lower()
+            if not (low.startswith("error") or low.startswith("unknown")):
+                ev["log"].append(f"five step {i}: {cmd!r} sent")
+                return True
+            time.sleep(0.2)
+        ev["errors"].append(f"five step {i}: {cmd!r} never accepted")
+        return False
+
+    def wait(i, count_gate, gates=()):
+        while time.monotonic() < deadline:
+            n = read("input_test_mouse_count")
+            if n is not None and n >= count_gate and gates_ok(gates):
+                ev["log"].append(f"five step {i}: mouse_count={n} "
+                                 f"(gate {count_gate})")
+                return True
+            time.sleep(0.05)
+        ev["errors"].append(
+            f"five step {i}: guest gate never reached "
+            f"(mouse_count >= {count_gate}, gates {gates})")
+        return False
+
+    def cap(key):
+        # let the pump finish the redraw after the published labels
+        time.sleep(0.2)
+        name = f"screen-five-{key}.ppm"
+        try:
+            ev[key] = screendump(art, name=name)
+            ev["log"].append(f"five {key}: {name} captured")
+        except OSError as e:
+            ev["errors"].append(f"five {key}: screendump failed: {e}")
+
+    def app_round(tag, exits_gate, gkey, ekey):
+        # the entry press launched through desktop_launch_pump; the app
+        # runs with IF = 0, the gdbstub still answers. Wait IBM_READY
+        # (the relaunch reset re-publishes it), capture, request the
+        # exit, wait the clean teardown accounting, capture the repaint
+        while time.monotonic() < deadline:
+            if read("app_stage") == APP_STAGE_IBM_READY:
+                break
+            time.sleep(0.05)
+        else:
+            ev["errors"].append(f"five {tag}: IBM_READY never published")
+            return False
+        cap(gkey)
+        try:
+            gdb_write_mem(args.port, counter_addrs["app_stage"],
+                          APP_STAGE_EXIT_REQ, 8)
+            ev["log"].append(f"five {tag}: EXIT_REQ written")
+        except OSError as e:
+            ev["errors"].append(f"five {tag}: EXIT_REQ failed: {e}")
+            return False
+        while time.monotonic() < deadline:
+            if (read("app_stage") == APP_STAGE_DONE
+                    and gates_ok((("desktop_test_app_exits", ">=",
+                                   exits_gate),))):
+                break
+            time.sleep(0.05)
+        else:
+            ev["errors"].append(
+                f"five {tag}: DONE/exits >= {exits_gate} never reached")
+            return False
+        cap(ekey)
+        return True
+
+    # round 1: (557,411) -> 5 moves -> (32,16) start press -> release ->
+    # 1 move -> (100,49) entry press -> hosted run -> release
+    moves1 = (("mouse_move -125 -100", 7), ("mouse_move -125 -100", 8),
+              ("mouse_move -125 -100", 9), ("mouse_move -125 -100", 10),
+              ("mouse_move -25 5", 11))
+    for cmd, gate in moves1:
+        if not send(gate, cmd) or not wait(gate, gate):
+            return ev
+    if not send(12, "mouse_button 1") or not wait(
+            12, 12, (("desktop_test_start_clicks", ">=", 1),
+                     ("desktop_menu_flag", "==", 1))):
+        return ev
+    cap("menu")
+    if not send(13, "mouse_button 0") or not wait(13, 13):
+        return ev
+    if not send(14, "mouse_move 68 33") or not wait(14, 14):
+        return ev
+    if not send(15, "mouse_button 1") or not wait(
+            15, 15, (("desktop_test_entry_clicks", ">=", 1),
+                     ("desktop_test_app_runs", ">=", 2),
+                     ("desktop_menu_flag", "==", 0))):
+        return ev
+    if not app_round("round1", 2, "game", "exit"):
+        return ev
+    if not send(16, "mouse_button 0") or not wait(16, 16):
+        return ev
+    # round 2: 1 move back -> (32,16) start press -> release -> 1 move ->
+    # (100,49) entry press -> the RELAUNCH hosted run -> release
+    if not send(17, "mouse_move -68 -33") or not wait(17, 17):
+        return ev
+    if not send(18, "mouse_button 1") or not wait(
+            18, 18, (("desktop_test_start_clicks", ">=", 2),
+                     ("desktop_menu_flag", "==", 1))):
+        return ev
+    if not send(19, "mouse_button 0") or not wait(19, 19):
+        return ev
+    if not send(20, "mouse_move 68 33") or not wait(20, 20):
+        return ev
+    if not send(21, "mouse_button 1") or not wait(
+            21, 21, (("desktop_test_entry_clicks", ">=", 2),
+                     ("desktop_test_app_runs", ">=", 3),
+                     ("desktop_menu_flag", "==", 0))):
+        return ev
+    if not app_round("round2", 3, "game2", "exit2"):
+        return ev
+    if not send(22, "mouse_button 0") or not wait(22, 22):
+        return ev
+    return ev
 
 
 def smoke(args, art, proc, counter_addrs, counter_errors):
@@ -2483,6 +3117,30 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
                             inject_log.append(
                                 f"app frame: EXIT_REQ FAILED: {e}")
         time.sleep(0.5)
+    # DESKTOP-v2 T3: the menu drive runs only after the terminal marker,
+    # against the resident desktop_run (sti+hlt) loop; the guest needs
+    # no new handshake stage, the host gates on the public counters
+    menu_ev = None
+    if args.menu and not args.gui_skip:
+        if terminal_seen and proc.poll() is None:
+            menu_ev = menu_leg(args, art, counter_addrs)
+            inject_log.extend(menu_ev["log"])
+        else:
+            menu_ev = {"open": None, "launch": None, "close": None,
+                       "errors": ["menu leg not driven: no terminal marker "
+                                  "or QEMU exited early"], "log": []}
+    # DESKTOP-v2 T5 (task 125): the five-frame drive, two resident click
+    # rounds after the boot hosted run; the same terminal-marker gate
+    five_ev = None
+    if args.five and not args.gui_skip:
+        if terminal_seen and proc.poll() is None:
+            five_ev = five_leg(args, art, counter_addrs)
+            inject_log.extend(five_ev["log"])
+        else:
+            five_ev = {"menu": None, "game": None, "exit": None,
+                       "game2": None, "exit2": None,
+                       "errors": ["five leg not driven: no terminal marker "
+                                  "or QEMU exited early"], "log": []}
     # give the kernel a moment to finish its report, then read the
     # memory-only counters while QEMU (and the halted kernel) still lives
     time.sleep(1.0)
@@ -2498,7 +3156,10 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
     # forensic evidence: on any input counter mismatch, dump the raw
     # mouse packet state before killing QEMU
     forensic = []
-    expected = EXPECTED_COUNTERS_SKIP if args.gui_skip else EXPECTED_COUNTERS
+    expected = (EXPECTED_COUNTERS_FIVE if args.five
+                else EXPECTED_COUNTERS_MENU if args.menu
+                else EXPECTED_COUNTERS_SKIP if args.gui_skip
+                else EXPECTED_COUNTERS)
     if proc.poll() is None and any(
             counters.get(n) != expected[n]
             for n in ("input_test_selftest_mask", "input_test_kbd_count",
@@ -2569,7 +3230,8 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
                       ppm_echo=echo_ppm, ppm_gui=gui_ppm, blk=blk_ev,
                       fs=fs_ev, fsprobe=fsprobe_ev, app=app_ev,
                       ppm_game=game_ppm,
-                      app_interactive=args.app_interactive)
+                      app_interactive=args.app_interactive, menu=menu_ev,
+                      five=five_ev)
     print()
     print("=" * 72)
     print(f"run-qemu-debug: smoke verdict: {'PASS' if ok else 'FAIL'}")
@@ -2592,6 +3254,16 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
           f"({'captured' if gui_ppm is not None else 'MISSING'})")
     print(f"  echo screendump PPM : {os.path.join(art, 'screen-echo.ppm')} "
           f"({'captured' if echo_ppm is not None else 'MISSING'})")
+    if menu_ev is not None:
+        for cap in ("open", "launch", "close"):
+            print(f"  menu-{cap} screendump : "
+                  f"{os.path.join(art, f'screen-menu-{cap}.ppm')} "
+                  f"({'captured' if menu_ev[cap] is not None else 'MISSING'})")
+    if five_ev is not None:
+        for cap in ("menu", "game", "exit", "game2", "exit2"):
+            print(f"  five-{cap} screendump : "
+                  f"{os.path.join(art, f'screen-five-{cap}.ppm')} "
+                  f"({'captured' if five_ev[cap] is not None else 'MISSING'})")
     print(f"  screendump PPM : {ppm_path} "
           f"({'captured' if ppm is not None else 'MISSING'})")
     if fb_note:
@@ -2691,9 +3363,31 @@ def main():
                          "tests/stage2-app/check.py first: it builds "
                          "interactive-probes.json and the tetris-int-* "
                          "reference frames this leg compares against")
+    ap.add_argument("--menu", action="store_true",
+                    help="DESKTOP-v2 T3: after the terminal marker, drive "
+                         "the 21-packet host menu script (start button "
+                         "open, CHIP-8 entry launch flag, blank close), "
+                         "capture screen-menu-open/launch/close.ppm and "
+                         "assert the menu frames plus the five private "
+                         "desktop labels (clicks 5 = selftest 1 + menu 4, opens 2, launch 1)")
+    ap.add_argument("--five", action="store_true",
+                    help="DESKTOP-v2 T5 (task 125): implies --app and "
+                         "switches the default plain disk to "
+                         "build/fs-v1/disk-app.img. After the boot hosted "
+                         "run, drive TWO resident click rounds (start "
+                         "button -> CHIP-8 entry -> IBM_READY -> EXIT_REQ "
+                         "-> DONE), capture screen-five-menu/game/exit/"
+                         "game2/exit2.ppm and assert the relaunch (runs 3 "
+                         "/ exits 3, pixel-identical exit frames)")
     args = ap.parse_args()
     if args.app_interactive:
         args.app = True
+    if args.five:
+        args.app = True
+        # the five-frame leg needs /PROGRAMS/CHIP8.BIN on the disk; the
+        # default plain image would ENOENT every click round
+        if args.disk == os.path.join(REPO, "build", "fs-v1", "disk.img"):
+            args.disk = os.path.join(REPO, "build", "fs-v1", "disk-app.img")
 
     if shutil.which(args.qemu) is None and not os.path.exists(args.qemu):
         print(f"run-qemu-debug: {args.qemu} not found", file=sys.stderr)
@@ -2716,7 +3410,11 @@ def main():
                   "blk-evidence.log", "fs-evidence.log",
                   "fsprobe-evidence.log", "screen-game.ppm",
                   "app-evidence.log", "screen-int-20.ppm",
-                  "screen-int-71-key.ppm"):
+                  "screen-int-71-key.ppm", "screen-menu-open.ppm",
+                  "screen-menu-launch.ppm", "screen-menu-close.ppm",
+                  "screen-five-menu.ppm", "screen-five-game.ppm",
+                  "screen-five-exit.ppm", "screen-five-game2.ppm",
+                  "screen-five-exit2.ppm"):
         p = os.path.join(art, stale)
         if os.path.exists(p):
             os.unlink(p)
@@ -2737,6 +3435,8 @@ def main():
             extra += APP_COUNTER_SYMBOLS
             if args.app_interactive:
                 extra += APP_INT_SYMBOLS
+        if args.menu or args.five:
+            extra += MENU_COUNTER_SYMBOLS
         if args.gui_skip:
             extra += (("video_fb_state", 64),)
         counter_addrs, counter_errors = counter_addresses(art, extra)

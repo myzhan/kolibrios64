@@ -142,6 +142,7 @@ app_probe_manifest:
         dq      video_fb_state
         dq      desktop_cursor_sync
         dq      desktop_cursor_place
+        dq      desktop_repaint_base
         dq      desktop_title
         dq      desktop_state
         dq      desktop_echo_row
@@ -250,6 +251,6 @@ app_probe_manifest:
         dq      FS_KERNEL_BASE
 app_probe_manifest_end:
 
-if (app_probe_manifest_end - app_probe_manifest) <> 179 * 8
+if (app_probe_manifest_end - app_probe_manifest) <> 180 * 8
         err 'the manifest must keep its fixed entry count'
 end if

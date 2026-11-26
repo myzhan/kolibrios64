@@ -54,6 +54,35 @@ desktop_cursor_draw:        dd DESKTOP_SPRITE_BYTES dup 0
 msg_desktop_selftest  db 'K64-DESKTOP-SELFTEST failed legs = ', 0
 msg_desktop_nl        db 13, 10, 0
 
+; one alignment byte: the v1 messages end at 1911, the v2 qword block
+; is pinned to the 8 byte boundary 1912
+        db 0
+
+; DESKTOP-v2 state, appended AFTER the frozen v1 block (0..1911):
+; the private button edge memory, the menu flag, the launch request
+; label task 125 wires to the loader, and the two click evidences
+desktop_prev_buttons:         dq 0      ; 1912, input_mouse_b1 & 1 edge memory
+desktop_menu_flag:            dq 0      ; 1920, 1 while the menu is drawn
+desktop_app_launch_requested: dq 0      ; 1928, CHIP-8 entry clicked (task 125)
+desktop_test_clicks:          dq 0      ; 1936, press edges, frozen 1 after ST
+desktop_test_menu_opens:      dq 0      ; 1944, menu opens, frozen 0 after ST
+
+; task 125 evidence, appended AFTER the frozen v2 qwords: the start
+; button and CHIP-8 entry press edges, the app_launch invocations and
+; the clean teardowns (a relaunch after ESC advances them again)
+desktop_test_start_clicks:    dq 0      ; 1952, start button press edges
+desktop_test_entry_clicks:    dq 0      ; 1960, CHIP-8 entry press edges
+desktop_test_app_runs:        dq 0      ; 1968, app_launch invocations
+desktop_test_app_exits:       dq 0      ; 1976, clean app teardowns
+
+; page 1 tail padding, emitted as data so every zero byte stays real
+        db (DESKTOP_PAGE_SIZE - (($ - desktop_data_start) and (DESKTOP_PAGE_SIZE - 1))) and (DESKTOP_PAGE_SIZE - 1) dup 0
+
+; data page 2: the menu background save, one packed BGRX dword per
+; pixel of the frozen (0,32,200,34) rectangle, exactly the compact
+; layout video_readback_rect produces and video_blit_rect consumes
+desktop_menu_save:            dd (DESKTOP_MENU_SAVE_BYTES / 4) dup 0
+
 ; tail padding, emitted as data so the file keeps every zero byte
         db (DESKTOP_PAGE_SIZE - (($ - desktop_data_start) and (DESKTOP_PAGE_SIZE - 1))) and (DESKTOP_PAGE_SIZE - 1) dup 0
 desktop_data_end:
@@ -114,6 +143,39 @@ if desktop_cursor_draw - desktop_data_start <> DESKTOP_DATA_OFF_CURSOR_DRAW
 end if
 if msg_desktop_selftest - desktop_data_start <> DESKTOP_DATA_OFF_MESSAGES
         err 'the DESKTOP messages must follow the draw buffer'
+end if
+if desktop_prev_buttons - desktop_data_start <> DESKTOP_DATA_OFF_PREV_BUTTONS
+        err 'DESKTOP v2 prev_buttons label offset'
+end if
+if desktop_menu_flag - desktop_data_start <> DESKTOP_DATA_OFF_MENU_FLAG
+        err 'DESKTOP v2 menu flag label offset'
+end if
+if desktop_app_launch_requested - desktop_data_start <> DESKTOP_DATA_OFF_APP_LAUNCH
+        err 'DESKTOP v2 launch request label offset'
+end if
+if desktop_test_clicks - desktop_data_start <> DESKTOP_DATA_OFF_TEST_CLICKS
+        err 'DESKTOP v2 click evidence label offset'
+end if
+if desktop_test_menu_opens - desktop_data_start <> DESKTOP_DATA_OFF_TEST_MENU_OPENS
+        err 'DESKTOP v2 menu open evidence label offset'
+end if
+if desktop_test_start_clicks - desktop_data_start <> DESKTOP_DATA_OFF_TEST_START_CLICKS
+        err 'DESKTOP task 125 start click evidence label offset'
+end if
+if desktop_test_entry_clicks - desktop_data_start <> DESKTOP_DATA_OFF_TEST_ENTRY_CLICKS
+        err 'DESKTOP task 125 entry click evidence label offset'
+end if
+if desktop_test_app_runs - desktop_data_start <> DESKTOP_DATA_OFF_TEST_APP_RUNS
+        err 'DESKTOP task 125 app run evidence label offset'
+end if
+if desktop_test_app_exits - desktop_data_start <> DESKTOP_DATA_OFF_TEST_APP_EXITS
+        err 'DESKTOP task 125 app exit evidence label offset'
+end if
+if desktop_menu_save - desktop_data_start <> DESKTOP_DATA_OFF_MENU_SAVE
+        err 'the DESKTOP v2 menu save must own data page 2'
+end if
+if desktop_data_end - desktop_data_start <> DESKTOP_DATA_PAGES * DESKTOP_PAGE_SIZE
+        err 'the DESKTOP v2 data region is exactly 8 pages'
 end if
 if desktop_data_end <= desktop_data_start
         err 'the desktop data region must not be empty'

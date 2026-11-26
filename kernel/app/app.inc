@@ -365,6 +365,18 @@ app_init:
         cmp     qword [app_ready], 0
         jne     .ealready
         mov     qword [app_ready], 1
+        ; task 125 relaunch fix: preserve the fsprobe guest evidence ONCE
+        ; here at init (the foundation runs fsys_probe right before this),
+        ; while fsys_bounce still holds the probe's guest data page. The
+        ; hosted program's file syscalls reuse fsys_bounce as their payload
+        ; page, so a per-launch copy would clobber the snapshot with the
+        ; previous run's payload on every relaunch. The copy lands in the
+        ; private app snapshot page (data region page 20).
+        cld
+        mov     rsi, fsys_bounce
+        mov     rdi, app_fs_snapshot
+        mov     ecx, 4096 / 8
+        rep     movsq
         xor     eax, eax
         jmp     .out
 .eperm:
@@ -378,32 +390,17 @@ app_init:
         ret
 
 ; ------------------------------------------------------------------
-; repaint the frozen desktop frame after the teardown: background,
-; title bar, title text, the saved echo first line and the cursor at
-; the desktop's own current coordinates (the frozen self test exit
-; position, the app never moved them). desktop_cursor_place re-saves
-; the fresh background under the sprite, no stale save is reused.
+; repaint the frozen desktop frame after the teardown: the FULL v2
+; base (wallpaper, taskbar, start button accents, title) through
+; desktop_repaint_base (task 125, the self test leg 0+1 sequence),
+; then the saved echo first line and the cursor at the desktop's own
+; current coordinates. desktop_cursor_place re-saves the fresh
+; background under the sprite, no stale save is reused.
 ; ------------------------------------------------------------------
 
 app_redraw_desktop:
         app_enter
-        mov     dword [rsp+32], DESKTOP_BG_COLOR
-        xor     ecx, ecx
-        xor     edx, edx
-        mov     r8d, APP_SCREEN_W
-        mov     r9d, APP_SCREEN_H
-        call    video_fill_rect
-        mov     dword [rsp+32], DESKTOP_BAR_COLOR
-        xor     ecx, ecx
-        xor     edx, edx
-        mov     r8d, DESKTOP_BAR_W
-        mov     r9d, DESKTOP_BAR_H
-        call    video_fill_rect
-        mov     ecx, DESKTOP_TITLE_X
-        mov     edx, DESKTOP_TITLE_Y
-        mov     r8d, DESKTOP_TITLE_COLOR
-        lea     r9, [desktop_title]
-        call    video_puts
+        call    desktop_repaint_base
         cmp     qword [app_echo_saved], 1
         jne     .cursor
         mov     dword [rsp+32], APP_ECHO_SAVE_H
@@ -424,6 +421,10 @@ app_redraw_desktop:
 ; the kernel-internal fs API, maps the frozen 516 page footprint,
 ; asserts the +3 table budget, saves the echo first line, enters ring 3
 ; and after EXIT/fault tears everything down and repaints the desktop.
+; Task 125: RE-ENTRANT. A completed run (APP_STAGE_DONE) may launch
+; again; the per-run verdict/handshake state is reset at the gate, the
+; cumulative evidence counters (key/poll/fd_swept) stay additive and
+; the host derives per-run deltas.
 ; out
 ; eax = 0 on a clean run, ENOTREADY/EALREADY/ENOMEM/EIO or a setup status
 ; the frozen fs/blk sector counters are snapshotted and restored, so
@@ -453,17 +454,22 @@ app_launch:
         cmp     qword [desktop_echo_row], 0
         jne     .early_eio              ; the save covers only row 0
         cmp     qword [app_stage], APP_STAGE_IDLE
+        je      .stage_ok
+        cmp     qword [app_stage], APP_STAGE_DONE
         jne     .ealready
-        ; preserve the fsprobe guest evidence before anything can reuse
-        ; the bounce page: the hosted program's file syscalls stage their
-        ; payloads through fsys_bounce, which still holds the probe's
-        ; guest data page snapshot the QEMU judge reads back. The copy
-        ; lands in the private app snapshot page (data region page 20).
-        cld
-        mov     rsi, fsys_bounce
-        mov     rdi, app_fs_snapshot
-        mov     ecx, 4096 / 8
-        rep     movsq
+.stage_ok:
+        ; task 125 relaunch: reset the per-run state so a second run
+        ; publishes IBM_READY again and judges on its OWN exit code,
+        ; fault seam and BLIT evidence; pure stores, the ordered call
+        ; chain below is untouched
+        mov     qword [app_stage], APP_STAGE_IDLE
+        mov     qword [app_exit_code], 0
+        mov     qword [app_fault_vector], 0
+        mov     qword [app_blit_count], 0
+        mov     qword [app_interactive], 0
+        ; the fsprobe guest evidence snapshot was taken ONCE by app_init
+        ; (task 125): a relaunch must NOT re-copy fsys_bounce, the previous
+        ; run's file payloads already clobbered it
         ; snapshot the frozen counters and the table alloc/drop baseline
         mov     rax, [fs_test_reads]
         mov     [app_saved_fs_reads], rax

@@ -422,6 +422,98 @@ if DESKTOP_DATA_OFF_CURSOR_SAVE + DESKTOP_SPRITE_BYTES * 4 <> DESKTOP_DATA_OFF_C
 end if
 
 ; ------------------------------------------------------------------
+; DESKTOP-v2: the wallpaper taskbar, the start button and the single
+; entry menu. The frozen v1 values above stay untouched; this block
+; is a pure extension. The wallpaper asset constants live in
+; wallpaper.inc (included inside the code region, after selftest.inc).
+; ------------------------------------------------------------------
+
+; the start button area inside the taskbar, frozen geometry
+DESKTOP_START_X     = 0
+DESKTOP_START_Y     = 0
+DESKTOP_START_W     = 64
+DESKTOP_START_H     = 32
+
+; the single entry menu, frozen geometry: a 1 pixel accent frame and
+; the inner panel one pixel inside on every side
+DESKTOP_MENU_X      = 0
+DESKTOP_MENU_Y      = 32
+DESKTOP_MENU_W      = 200
+DESKTOP_MENU_H      = 34
+DESKTOP_MENU_COLOR  = 0x2C3E50          ; the inner panel, the bar color
+DESKTOP_ACCENT_COLOR = 0x9594A2         ; the frame + taskbar accents,
+                                        ; the wallpaper gray band color
+DESKTOP_MENU_INNER_X = DESKTOP_MENU_X + 1
+DESKTOP_MENU_INNER_Y = DESKTOP_MENU_Y + 1
+DESKTOP_MENU_INNER_W = DESKTOP_MENU_W - 2
+DESKTOP_MENU_INNER_H = DESKTOP_MENU_H - 2
+
+; the single entry label 'CHIP-8', centered in the menu: the entry
+; center DERIVES from the text origin and the font cell, never magic
+DESKTOP_MENU_TEXT_LEN = 6
+DESKTOP_MENU_TEXT_X = 76
+DESKTOP_MENU_TEXT_Y = 41
+DESKTOP_ENTRY_CX = DESKTOP_MENU_TEXT_X + DESKTOP_MENU_TEXT_LEN * DESKTOP_FONT_W / 2
+DESKTOP_ENTRY_CY = DESKTOP_MENU_TEXT_Y + DESKTOP_FONT_H / 2
+
+; the menu background save rectangle, one packed BGRX dword per pixel
+DESKTOP_MENU_SAVE_BYTES = DESKTOP_MENU_W * DESKTOP_MENU_H * 4
+
+; the v2 data labels, appended AFTER the frozen v1 block (0..1911):
+; the messages end at 1872 + 36 + 3 = 1911, the first new qword sits
+; at 1912. The menu save buffer owns data page 2 (offset 4096).
+DESKTOP_DATA_OFF_PREV_BUTTONS    = 1912
+DESKTOP_DATA_OFF_MENU_FLAG       = 1920
+DESKTOP_DATA_OFF_APP_LAUNCH      = 1928
+DESKTOP_DATA_OFF_TEST_CLICKS     = 1936
+DESKTOP_DATA_OFF_TEST_MENU_OPENS = 1944
+DESKTOP_DATA_OFF_MENU_SAVE       = DESKTOP_PAGE_SIZE
+DESKTOP_DATA_PAGES               = 8
+
+if DESKTOP_START_X <> 0 | DESKTOP_START_Y <> 0 | DESKTOP_START_W <> 64 | DESKTOP_START_H <> 32
+        err 'the start button geometry is frozen at (0,0,64,32)'
+end if
+if DESKTOP_START_W > DESKTOP_BAR_W | DESKTOP_START_H <> DESKTOP_BAR_H
+        err 'the start button must stay inside the taskbar'
+end if
+if DESKTOP_MENU_X <> 0 | DESKTOP_MENU_Y <> 32 | DESKTOP_MENU_W <> 200 | DESKTOP_MENU_H <> 34
+        err 'the menu geometry is frozen at (0,32,200,34)'
+end if
+if DESKTOP_MENU_Y <> DESKTOP_BAR_H
+        err 'the menu must hang directly below the taskbar'
+end if
+if DESKTOP_MENU_COLOR <> DESKTOP_BAR_COLOR | DESKTOP_ACCENT_COLOR <> 0x9594A2
+        err 'the menu panel and accent colors are frozen'
+end if
+if DESKTOP_MENU_INNER_X <> 1 | DESKTOP_MENU_INNER_Y <> 33 | DESKTOP_MENU_INNER_W <> 198 | DESKTOP_MENU_INNER_H <> 32
+        err 'the inner panel is the menu minus the 1 pixel accent frame'
+end if
+if DESKTOP_ENTRY_CX <> 100 | DESKTOP_ENTRY_CY <> 49
+        err 'the CHIP-8 entry center derives to (100,49)'
+end if
+if DESKTOP_MENU_TEXT_X + DESKTOP_MENU_TEXT_LEN * DESKTOP_FONT_W > DESKTOP_MENU_X + DESKTOP_MENU_W
+        err 'the entry label must fit inside the menu'
+end if
+if DESKTOP_MENU_TEXT_Y + DESKTOP_FONT_H > DESKTOP_MENU_Y + DESKTOP_MENU_H
+        err 'the entry label must fit inside the menu vertically'
+end if
+if DESKTOP_MENU_SAVE_BYTES <> 27200
+        err 'the menu save buffer is exactly 200*34 packed BGRX dwords'
+end if
+if DESKTOP_DATA_OFF_PREV_BUTTONS <> DESKTOP_DATA_OFF_MESSAGES + 36 + 3 + 1
+        err 'the v2 labels start right after the frozen v1 messages'
+end if
+if DESKTOP_DATA_OFF_MENU_FLAG <> DESKTOP_DATA_OFF_PREV_BUTTONS + 8 | DESKTOP_DATA_OFF_APP_LAUNCH <> DESKTOP_DATA_OFF_MENU_FLAG + 8 | DESKTOP_DATA_OFF_TEST_CLICKS <> DESKTOP_DATA_OFF_APP_LAUNCH + 8 | DESKTOP_DATA_OFF_TEST_MENU_OPENS <> DESKTOP_DATA_OFF_TEST_CLICKS + 8
+        err 'the v2 state qwords are consecutive'
+end if
+if DESKTOP_DATA_OFF_MENU_SAVE <> DESKTOP_PAGE_SIZE
+        err 'the menu save buffer owns data page 2'
+end if
+if DESKTOP_DATA_PAGES <> (DESKTOP_DATA_OFF_MENU_SAVE + DESKTOP_MENU_SAVE_BYTES + DESKTOP_PAGE_SIZE - 1) / DESKTOP_PAGE_SIZE
+        err 'the v2 data region is exactly 8 pages'
+end if
+
+; ------------------------------------------------------------------
 ; register helper macros, the same full frame the other modules use:
 ; eight pushes keep RSP mod 16 = 8, sub 40 realigns to 0 and provides
 ; the 32 byte shadow space plus one 8 byte slot for a fifth argument
@@ -450,3 +542,55 @@ macro desktop_leave
         pop     rbx
         pop     rbp
 end macro
+
+; ------------------------------------------------------------------
+; task 125 DESKTOP-v2 T4/T5: the app launch wiring. Pure extension,
+; every frozen v1/v2 value above stays untouched. The menu entry flag
+; (offset 1928) is now consumed by desktop_launch_pump (taskbar.inc),
+; the single consumer of app_launch; the foundation boot call site
+; routes through desktop_app_boot into the same pump.
+; ------------------------------------------------------------------
+
+; the new host handshake stages, published ONLY on the click path:
+; the boot self test never clicks the start button, so the frozen
+; three-leg desktop_test_stage = 5 final stays intact
+DESKTOP_STAGE_START_CLICK = 6           ; a start button press edge
+DESKTOP_STAGE_ENTRY_CLICK = 7           ; the CHIP-8 entry press edge
+DESKTOP_STAGE_APP_RUNNING = 8           ; app_launch entered (click mode)
+DESKTOP_STAGE_APP_EXIT    = 9           ; app_launch returned (click mode)
+
+; the taskbar running indicator: an accent block at the bar's right
+; end, drawn while the hosted program runs. The successful teardown
+; repaint erases it with the whole bar; the failure cleanup fills it
+; back with the bar color. It never overlaps the title or accents.
+DESKTOP_RUN_X     = 992
+DESKTOP_RUN_Y     = 8
+DESKTOP_RUN_W     = 24
+DESKTOP_RUN_H     = 16
+DESKTOP_RUN_COLOR = DESKTOP_ACCENT_COLOR
+
+; the new evidence qwords, appended AFTER the frozen v2 block
+; (1912..1951); page 1 tail padding shrinks, the page count stays 8
+DESKTOP_DATA_OFF_TEST_START_CLICKS = 1952
+DESKTOP_DATA_OFF_TEST_ENTRY_CLICKS = 1960
+DESKTOP_DATA_OFF_TEST_APP_RUNS     = 1968
+DESKTOP_DATA_OFF_TEST_APP_EXITS    = 1976
+
+if DESKTOP_STAGE_START_CLICK <> DESKTOP_STAGE_DONE + 1 | DESKTOP_STAGE_ENTRY_CLICK <> DESKTOP_STAGE_START_CLICK + 1 | DESKTOP_STAGE_APP_RUNNING <> DESKTOP_STAGE_ENTRY_CLICK + 1 | DESKTOP_STAGE_APP_EXIT <> DESKTOP_STAGE_APP_RUNNING + 1
+        err 'the task 125 click stages extend the frozen handshake 0..5'
+end if
+if DESKTOP_DATA_OFF_TEST_START_CLICKS <> DESKTOP_DATA_OFF_TEST_MENU_OPENS + 8 | DESKTOP_DATA_OFF_TEST_ENTRY_CLICKS <> DESKTOP_DATA_OFF_TEST_START_CLICKS + 8 | DESKTOP_DATA_OFF_TEST_APP_RUNS <> DESKTOP_DATA_OFF_TEST_ENTRY_CLICKS + 8 | DESKTOP_DATA_OFF_TEST_APP_EXITS <> DESKTOP_DATA_OFF_TEST_APP_RUNS + 8
+        err 'the task 125 evidence qwords are consecutive after the v2 block'
+end if
+if DESKTOP_DATA_OFF_TEST_APP_EXITS + 8 > DESKTOP_PAGE_SIZE
+        err 'the task 125 evidence must stay inside data page 1'
+end if
+if DESKTOP_RUN_X <> 992 | DESKTOP_RUN_Y <> 8 | DESKTOP_RUN_W <> 24 | DESKTOP_RUN_H <> 16
+        err 'the running indicator geometry is frozen at (992,8,24,16)'
+end if
+if DESKTOP_RUN_X + DESKTOP_RUN_W > DESKTOP_BAR_W | DESKTOP_RUN_Y + DESKTOP_RUN_H > DESKTOP_BAR_H | DESKTOP_RUN_X <= DESKTOP_START_W
+        err 'the running indicator must fit the bar right of the start button'
+end if
+if DESKTOP_RUN_COLOR <> DESKTOP_ACCENT_COLOR
+        err 'the running indicator uses the frozen accent color'
+end if

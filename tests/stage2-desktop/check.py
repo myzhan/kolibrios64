@@ -194,6 +194,85 @@ OFF_MESSAGES = OFF_CURSOR_DRAW + SPRITE_BYTES * 4
 MSG_SELFTEST = b'K64-DESKTOP-SELFTEST failed legs = \x00'
 MSG_NL = b'\r\n\x00'
 
+# ----------------------------------------------------------------------
+# contract DESKTOP-v2, task 124: the wallpaper background, the taskbar
+# start button and the single entry start menu, duplicated here
+# independently of the module sources as well
+# ----------------------------------------------------------------------
+
+START_X = 0
+START_Y = 0
+START_W = 64
+START_H = 32
+MENU_X = 0
+MENU_Y = BAR_H                          # the menu hangs under the bar
+MENU_W = 200
+MENU_H = 34
+MENU_COLOR = 0x2C3E50
+ACCENT_COLOR = 0x9594A2                 # the gray band of the wallpaper
+MENU_TEXT = b'CHIP-8\x00'
+MENU_TEXT_LEN = 6
+MENU_TEXT_X = 76
+MENU_TEXT_Y = 41
+# the entry centre DERIVES from the label placement, never magic
+ENTRY_CX = MENU_TEXT_X + MENU_TEXT_LEN * FONT_W // 2
+ENTRY_CY = MENU_TEXT_Y + FONT_H // 2
+MENU_SAVE_BYTES = MENU_W * MENU_H * 4
+
+# the v2 qword block follows the v1 messages plus one alignment byte
+OFF_PREV_BUTTONS = OFF_MESSAGES + len(MSG_SELFTEST) + len(MSG_NL) + 1
+OFF_MENU_FLAG = OFF_PREV_BUTTONS + 8
+OFF_APP_LAUNCH = OFF_MENU_FLAG + 8
+OFF_TEST_CLICKS = OFF_APP_LAUNCH + 8
+OFF_TEST_MENU_OPENS = OFF_TEST_CLICKS + 8
+OFF_MENU_SAVE = PAGE                    # the menu save owns data page 2
+DATA_PAGES = 8
+
+# the self test leg 4 press/release at (557,411) is exactly ONE click
+# outside the menu; no menu may have opened during the frozen legs
+ST_CLICKS_FINAL = 1
+ST_MENU_OPENS_FINAL = 0
+
+WALLPAPER_W = 1024
+WALLPAPER_H = 768
+WALLPAPER_BYTES = WALLPAPER_W * WALLPAPER_H * 4
+WALLPAPER_SHA256 = ('f9f8a12e5406e04b2007028bd168f72e'
+                    '9c25386d5bf92ef5ecb1aaeb18f36fec')
+WALLPAPER_SHA_QWORDS = struct.unpack('>4Q', bytes.fromhex(WALLPAPER_SHA256))
+
+# ----------------------------------------------------------------------
+# contract task 125, DESKTOP-v2 T4/T5: the app launch wiring. The
+# click stages extend the frozen handshake 0..5; the boot self test
+# never publishes them (it never clicks the start button)
+# ----------------------------------------------------------------------
+
+STAGE_START_CLICK = STAGE_DONE + 1
+STAGE_ENTRY_CLICK = STAGE_START_CLICK + 1
+STAGE_APP_RUNNING = STAGE_ENTRY_CLICK + 1
+STAGE_APP_EXIT = STAGE_APP_RUNNING + 1
+
+# the taskbar running indicator, frozen geometry right of the title
+RUN_X = 992
+RUN_Y = 8
+RUN_W = 24
+RUN_H = 16
+RUN_COLOR = ACCENT_COLOR
+
+# the task 125 evidence qwords extend the v2 block inside data page 1
+OFF_TEST_START_CLICKS = OFF_TEST_MENU_OPENS + 8
+OFF_TEST_ENTRY_CLICKS = OFF_TEST_START_CLICKS + 8
+OFF_TEST_APP_RUNS = OFF_TEST_ENTRY_CLICKS + 8
+OFF_TEST_APP_EXITS = OFF_TEST_APP_RUNS + 8
+# the T1 probe truth sampled from the ASSET (not a rendered frame):
+# 7 deep blue-gray field points and 4 gray band points
+WALLPAPER_PROBES = [
+    (900, 700, 0x182028), (16, 767, 0x182028), (500, 32, 0x182028),
+    (0, 0, 0x182028), (517, 387, 0x182028), (519, 392, 0x182028),
+    (16, 64, 0x182028),
+    (557, 411, 0x9594A2), (568, 411, 0x9594A2),
+    (559, 416, 0x9594A2), (562, 416, 0x9594A2),
+]
+
 MAGIC = b'K64DTP1'
 MANIFEST_VERSION = 1
 
@@ -234,6 +313,30 @@ M = [
     'off_test_cursor_x', 'off_test_cursor_y',
     'off_cursor_save', 'off_cursor_draw', 'off_messages',
     'screen_w', 'screen_h',
+    # DESKTOP-v2 tail appendix, task 124, same order as layout.asm
+    'click_pump', 'menu_open', 'menu_close', 'menu_text', 'menu_text_end',
+    'wallpaper', 'wallpaper_end',
+    'prev_buttons', 'menu_flag', 'app_launch',
+    'test_clicks', 'test_menu_opens', 'menu_save',
+    'input_mouse_b1',
+    'start_x', 'start_y', 'start_w', 'start_h',
+    'menu_x', 'menu_y', 'menu_w', 'menu_h',
+    'entry_cx', 'entry_cy', 'menu_color', 'accent_color',
+    'menu_text_x', 'menu_text_y', 'menu_text_len',
+    'off_prev_buttons', 'off_menu_flag', 'off_app_launch',
+    'off_test_clicks', 'off_test_menu_opens', 'off_menu_save',
+    'menu_save_bytes',
+    'wallpaper_w', 'wallpaper_h', 'wallpaper_bytes',
+    'wallpaper_sha0', 'wallpaper_sha1', 'wallpaper_sha2', 'wallpaper_sha3',
+    # task 125 tail appendix, same order as layout.asm
+    'repaint_base', 'launch_pump', 'app_boot', 'app_launch_fn',
+    'test_start_clicks', 'test_entry_clicks', 'test_app_runs',
+    'test_app_exits',
+    'stage_start_click', 'stage_entry_click', 'stage_app_running',
+    'stage_app_exit',
+    'run_x', 'run_y', 'run_w', 'run_h', 'run_color',
+    'off_test_start_clicks', 'off_test_entry_clicks',
+    'off_test_app_runs', 'off_test_app_exits',
 ]
 
 # label name -> frozen offset inside the data region
@@ -248,6 +351,13 @@ DATA_LABELS = {
     'gui_frame': OFF_GUI_FRAME,
     'cursor_save': OFF_CURSOR_SAVE, 'cursor_draw': OFF_CURSOR_DRAW,
     'msg_selftest': OFF_MESSAGES,
+    'prev_buttons': OFF_PREV_BUTTONS, 'menu_flag': OFF_MENU_FLAG,
+    'app_launch': OFF_APP_LAUNCH,
+    'test_clicks': OFF_TEST_CLICKS, 'test_menu_opens': OFF_TEST_MENU_OPENS,
+    'test_start_clicks': OFF_TEST_START_CLICKS,
+    'test_entry_clicks': OFF_TEST_ENTRY_CLICKS,
+    'test_app_runs': OFF_TEST_APP_RUNS, 'test_app_exits': OFF_TEST_APP_EXITS,
+    'menu_save': OFF_MENU_SAVE,
 }
 
 # manifest constants that must not drift from the copies above
@@ -284,6 +394,35 @@ CONSTANTS = {
     'off_cursor_save': OFF_CURSOR_SAVE, 'off_cursor_draw': OFF_CURSOR_DRAW,
     'off_messages': OFF_MESSAGES,
     'screen_w': SCREEN_W, 'screen_h': SCREEN_H,
+    'start_x': START_X, 'start_y': START_Y,
+    'start_w': START_W, 'start_h': START_H,
+    'menu_x': MENU_X, 'menu_y': MENU_Y, 'menu_w': MENU_W, 'menu_h': MENU_H,
+    'entry_cx': ENTRY_CX, 'entry_cy': ENTRY_CY,
+    'menu_color': MENU_COLOR, 'accent_color': ACCENT_COLOR,
+    'menu_text_x': MENU_TEXT_X, 'menu_text_y': MENU_TEXT_Y,
+    'menu_text_len': MENU_TEXT_LEN,
+    'off_prev_buttons': OFF_PREV_BUTTONS, 'off_menu_flag': OFF_MENU_FLAG,
+    'off_app_launch': OFF_APP_LAUNCH,
+    'off_test_clicks': OFF_TEST_CLICKS,
+    'off_test_menu_opens': OFF_TEST_MENU_OPENS,
+    'off_menu_save': OFF_MENU_SAVE,
+    'menu_save_bytes': MENU_SAVE_BYTES,
+    'wallpaper_w': WALLPAPER_W, 'wallpaper_h': WALLPAPER_H,
+    'wallpaper_bytes': WALLPAPER_BYTES,
+    'wallpaper_sha0': WALLPAPER_SHA_QWORDS[0],
+    'wallpaper_sha1': WALLPAPER_SHA_QWORDS[1],
+    'wallpaper_sha2': WALLPAPER_SHA_QWORDS[2],
+    'wallpaper_sha3': WALLPAPER_SHA_QWORDS[3],
+    'stage_start_click': STAGE_START_CLICK,
+    'stage_entry_click': STAGE_ENTRY_CLICK,
+    'stage_app_running': STAGE_APP_RUNNING,
+    'stage_app_exit': STAGE_APP_EXIT,
+    'run_x': RUN_X, 'run_y': RUN_Y, 'run_w': RUN_W, 'run_h': RUN_H,
+    'run_color': RUN_COLOR,
+    'off_test_start_clicks': OFF_TEST_START_CLICKS,
+    'off_test_entry_clicks': OFF_TEST_ENTRY_CLICKS,
+    'off_test_app_runs': OFF_TEST_APP_RUNS,
+    'off_test_app_exits': OFF_TEST_APP_EXITS,
 }
 
 FRAME_ENTER = bytes.fromhex('55 53 56 57 41 54 41 55 41 56 41 57 48 83 EC 28')
@@ -294,6 +433,8 @@ FRAME_LEAVE = bytes.fromhex('48 83 C4 28 41 5F 41 5E 41 5D 41 5C 5F 5E 5B 5D')
 CALL_TARGETS = [
     'init', 'wait_count', 'pump', 'run', 'cursor_place',
     'cursor_composite', 'cursor_sync', 'echo_pump', 'echo_key', 'selftest',
+    'click_pump', 'menu_open', 'menu_close',
+    'repaint_base', 'launch_pump', 'app_boot', 'app_launch_fn',
     'video_fill_rect', 'video_blit_rect', 'video_readback_rect',
     'video_puts', 'input_ioapic_write', 'irq_sti_wait',
     'cpu_com1_puts', 'cpu_com1_puthex',
@@ -436,16 +577,50 @@ def cmp_qword_sites(img, at, end):
     return out
 
 
-def real_sti_sites(img):
-    """FB bytes in the code region that are NOT part of a call rel32
-    operand targeting a known function: the real STI instructions."""
-    at, end = img.at('code_start'), img.at('code_end')
-    targets = {img.at(n) for n in CALL_TARGETS}
+def operand_cover(img, at, end):
+    """Byte positions inside instruction OPERANDS (call rel32 targeting
+    a known function, rip-relative disp32, imm32/imm8 immediates of the
+    REX.W forms the module emits). An FB/F4/FA byte inside an operand
+    is data, never an STI/HLT/CLI instruction."""
+    body = img.data[at:end]
     covered = set()
+    targets = {img.at(n) for n in CALL_TARGETS}
     for s, t in call_sites(img, at, end):
         if t in targets:
             covered.update(range(s + 1, s + 5))
-    return [at + p for p in find_all(img.data[at:end], b'\xFB')
+    rex = {0x48, 0x49, 0x4A, 0x4B, 0x4C, 0x4D, 0x4E, 0x4F}
+    rip_ops = {0x8B, 0x89, 0x8D, 0x3B, 0x39, 0x01, 0x29, 0x03, 0x2B,
+               0x33, 0x31, 0x09, 0x0B, 0xFF}
+    for p in range(len(body) - 7):
+        if body[p] not in rex:
+            continue
+        op, modrm = body[p + 1], body[p + 2]
+        q = at + p
+        if (modrm & 0xC7) == 0x05 and (op in rip_ops or op in (0x81, 0x83, 0xC7)):
+            covered.update(range(q + 3, q + 7))     # the disp32
+            if op == 0x83:
+                covered.add(q + 7)                  # imm8
+            elif op in (0x81, 0xC7):
+                covered.update(range(q + 7, q + 11))  # imm32
+        elif (modrm & 0xC0) == 0xC0:
+            if op == 0xC7:
+                covered.update(range(q + 3, q + 7))   # mov r64, imm32
+            elif op == 0x81:
+                covered.update(range(q + 3, q + 7))   # cmp r64, imm32
+            elif op == 0x83:
+                covered.add(q + 3)                    # cmp r64, imm8
+    return covered
+
+
+def real_sti_sites(img):
+    """FB bytes in the code region that are NOT instruction operand
+    bytes: the real STI instructions. The embedded wallpaper is DATA
+    inside the code region: its 3 MiB of pixels carry thousands of
+    stray FB bytes, so the wallpaper extent is excluded entirely."""
+    at, end = img.at('code_start'), img.at('code_end')
+    wp, we = img.at('wallpaper'), img.at('wallpaper_end')
+    covered = operand_cover(img, at, wp)
+    return [at + p for p in find_all(img.data[at:wp], b'\xFB')
             if at + p not in covered]
 
 
@@ -565,7 +740,7 @@ def region(img, start, stop):
 def check_manifest(rep, img):
     rep.check('manifest.magic', True, MAGIC.decode())
     rep.equal('manifest.version', img['version'], MANIFEST_VERSION)
-    rep.equal('manifest.entry_count', len(M), 119)
+    rep.equal('manifest.entry_count', len(M), 183)
     for name, want in CONSTANTS.items():
         rep.equal('manifest.%s' % name, img[name], want)
     # the frozen derivations, pinned here as well
@@ -576,6 +751,22 @@ def check_manifest(rep, img):
     rep.equal('contract.echo_tiles_height', ECHO_Y + ECHO_ROWS * FONT_H, SCREEN_H)
     rep.equal('contract.kbd_final_derived', ST_KBD_FINAL, INPUT_KBD_BASE + 4)
     rep.equal('contract.mouse_final_derived', ST_MOUSE_FINAL, INPUT_MOUSE_BASE + 3)
+    # the v2 derivations, pinned here as well
+    rep.equal('contract.entry_centre_derived', (ENTRY_CX, ENTRY_CY), (100, 49))
+    rep.equal('contract.menu_hangs_under_bar', MENU_Y, BAR_H)
+    rep.equal('contract.prev_buttons_derived', OFF_PREV_BUTTONS, 1912)
+    rep.equal('contract.menu_save_bytes_derived', MENU_SAVE_BYTES, 27200)
+    rep.equal('contract.wallpaper_bytes_derived', WALLPAPER_BYTES, 3145728)
+    # the task 125 derivations, pinned here as well
+    rep.equal('contract.click_stages_derived',
+              (STAGE_START_CLICK, STAGE_ENTRY_CLICK,
+               STAGE_APP_RUNNING, STAGE_APP_EXIT), (6, 7, 8, 9))
+    rep.equal('contract.start_clicks_derived', OFF_TEST_START_CLICKS, 1952)
+    rep.equal('contract.app_exits_derived', OFF_TEST_APP_EXITS, 1976)
+    rep.check('contract.evidence_inside_page1', OFF_TEST_APP_EXITS + 8 <= PAGE)
+    rep.check('contract.run_indicator_fits_bar',
+              RUN_X + RUN_W <= BAR_W and RUN_Y + RUN_H <= BAR_H and
+              RUN_X > START_W)
 
     for name, off in DATA_LABELS.items():
         rep.equal('layout.%s_offset' % name,
@@ -586,17 +777,29 @@ def check_manifest(rep, img):
     rep.equal('layout.api_emits_no_code', img['init'], lo)
     order = ['init', 'wait_count', 'pump', 'run', 'cursor_place',
              'cursor_composite', 'cursor_sync', 'echo_pump', 'echo_key',
-             'selftest']
+             'click_pump', 'menu_open', 'menu_close',
+             'repaint_base', 'launch_pump', 'app_boot', 'selftest']
     chain = [img[name] for name in order]
     rep.check('layout.function_order', chain == sorted(chain) and
               all(lo <= v < hi for v in chain),
               'emission order follows the include order')
     rep.check('layout.constants_inside_code',
               lo <= img['sprite'] < img['sprite_end'] <= img['echo_pump'] <
-              img['echo_key'] < img['title'] < img['title_end'] <= img['selftest'])
+              img['echo_key'] < img['title'] < img['title_end'] <=
+              img['click_pump'] < img['menu_open'] < img['menu_close'] <
+              img['menu_text'] < img['menu_text_end'] <=
+              img['repaint_base'] < img['launch_pump'] < img['app_boot'] <=
+              img['selftest'] <
+              img['wallpaper'] < img['wallpaper_end'] <= hi)
     rep.equal('layout.title_bytes', img['title_end'] - img['title'], TITLE_LEN + 1)
     rep.equal('layout.sprite_bytes', img['sprite_end'] - img['sprite'], SPRITE_BYTES)
-    rep.equal('layout.selftest_after_title', img['selftest'], img['title_end'])
+    rep.equal('layout.menu_text_bytes',
+              img['menu_text_end'] - img['menu_text'], MENU_TEXT_LEN + 1)
+    rep.equal('layout.selftest_after_taskbar',
+              img['app_boot'] < img['selftest'] and
+              img['menu_text_end'] <= img['repaint_base'], True)
+    rep.equal('layout.wallpaper_bytes',
+              img['wallpaper_end'] - img['wallpaper'], WALLPAPER_BYTES)
     rep.check('layout.code_before_data', hi <= img['data_start'])
     rep.check('layout.data_page_aligned',
               img['data_start'] % PAGE == 0 and img['data_end'] % PAGE == 0)
@@ -604,12 +807,15 @@ def check_manifest(rep, img):
               (img['data_end'] - img['data_start']) % PAGE == 0 and
               img['data_end'] - img['data_start'] >= PAGE)
     rep.equal('layout.module_ends_with_data', img.at('data_end'), img.probe_at)
+    rep.equal('layout.data_region_eight_pages',
+              img['data_end'] - img['data_start'], DATA_PAGES * PAGE)
     for name in ('video_fill_rect', 'video_blit_rect', 'video_readback_rect',
                  'video_puts', 'video_fb_state', 'input_ioapic_write',
                  'input_kbd_buf', 'input_kbd_used', 'input_kbd_drops',
-                 'input_mouse_x', 'input_mouse_y', 'input_test_kbd_count',
+                 'input_mouse_x', 'input_mouse_y', 'input_mouse_b1',
+                 'input_test_kbd_count',
                  'input_test_mouse_count', 'irq_sti_wait', 'irq_test_ticks',
-                 'cpu_com1_puts', 'cpu_com1_puthex'):
+                 'cpu_com1_puts', 'cpu_com1_puthex', 'app_launch_fn'):
         rep.check('layout.%s_before_module' % name, 0 < img[name] < lo,
                   '%#x' % img[name])
 
@@ -638,6 +844,16 @@ def check_data(rep, img):
               '%d non-zero tail bytes' % len(rest.strip(b'\x00')))
     rep.check('data.messages_ascii',
               all(0x20 <= ch < 0x80 for ch in MSG_SELFTEST[:-1]))
+    # the v2 qword block starts on the 8 byte boundary after the one
+    # alignment pad; the whole tail (state + page 2 save) stays zero
+    rep.equal('data.v2_alignment_pad',
+              d[img.at('msg_nl') + len(MSG_NL)], 0)
+    rep.equal('data.menu_save_size',
+              img.at('data_end') - img.at('menu_save') -
+              (DATA_PAGES * PAGE - OFF_MENU_SAVE - MENU_SAVE_BYTES),
+              MENU_SAVE_BYTES)
+    rep.check('data.menu_save_inside_region',
+              img.at('menu_save') + MENU_SAVE_BYTES <= img.at('data_end'))
 
 
 def check_sprite(rep, img):
@@ -656,7 +872,9 @@ def check_sprite(rep, img):
 def check_ownership(rep, img, root):
     """Exactly one real STI, in desktop_run, never an EOI write."""
     d = img.data
-    at, end = region(img, 'code_start', 'code_end')
+    # the instruction scan stops at the wallpaper: pixel bytes are not
+    # code and may spell any opcode by accident
+    at, end = region(img, 'code_start', 'wallpaper')
     stis = real_sti_sites(img)
     rep.equal('ownership.single_real_sti', len(stis), 1)
     ra, re_ = region(img, 'run', 'cursor_place')
@@ -670,8 +888,11 @@ def check_ownership(rep, img, root):
     rep.check('ownership.no_eoi_write_r13',
               d.find(b'\x41\xC7\x85' + struct.pack('<i', LAPIC_EOI), at, end) < 0)
     pa, pe = region(img, 'pump', 'run')
+    pcov = operand_cover(img, pa, pe)
     rep.check('ownership.pump_no_interrupt_bytes',
-              not any(b in d[pa:pe] for b in (b'\xFB', b'\xF4', b'\xFA')))
+              not any(pa + p not in pcov
+                      for b in (b'\xFB', b'\xF4', b'\xFA')
+                      for p in find_all(d[pa:pe], b)))
     hits = []
     for path in sorted((root / 'kernel' / 'desktop').rglob('*')):
         if path.suffix not in ('.asm', '.inc') or not path.is_file():
@@ -757,8 +978,16 @@ def check_run(rep, img):
     pumps = calls_to(img, at, end, 'pump')
     rep.check('run.pump_after_cli', len(pumps) == 1 and sti >= 0 and
               pumps[0] > sti + 2)
-    if pumps:
-        j = pumps[0] + 5
+    # task 125: the launch pump follows the redraw pump in the same
+    # IF = 0 window, click mode (ecx = 1), then the loop jumps back
+    launches = calls_to(img, at, end, 'launch_pump')
+    rep.equal('run.launch_pump_once', len(launches), 1)
+    if pumps and launches:
+        rep.check('run.launch_pump_after_pump', pumps[0] < launches[0])
+        rep.check('run.click_mode_arg',
+                  d[pumps[0] + 5:pumps[0] + 10] == mov_ecx(1) and
+                  launches[0] == pumps[0] + 10)
+        j = launches[0] + 5
         ok = (d[j] == 0xEB and
               j + 2 + struct.unpack_from('<b', d, j + 1)[0] == sti)
         rep.check('run.jmp_back_to_sti', ok, 'the resident loop never exits')
@@ -766,14 +995,81 @@ def check_run(rep, img):
 
 
 def check_pump(rep, img):
+    """The DESKTOP-v2 frozen redraw order, decoded from the bytes:
+    restore OLD -> click_pump (menu/taskbar) -> echo_pump -> place NEW."""
     at, end = region(img, 'pump', 'run')
     d = img.data
     rep.check('pump.full_frame', d[at:at + len(FRAME_ENTER)] == FRAME_ENTER)
+    # the clamp/evidence publication mirrors the frozen cursor_sync
+    rep.equal('pump.reads_input_x',
+              len(rip_refs(img, at, end, b'\x4C\x8B', 0x25, 0, 'input_mouse_x')), 1)
+    rep.equal('pump.reads_input_y',
+              len(rip_refs(img, at, end, b'\x4C\x8B', 0x2D, 0, 'input_mouse_y')), 1)
+    rep.equal('pump.publishes_evidence_x',
+              len(rip_refs(img, at, end, b'\x4C\x89', 0x25, 0, 'test_cursor_x')), 1)
+    rep.equal('pump.publishes_evidence_y',
+              len(rip_refs(img, at, end, b'\x4C\x89', 0x2D, 0, 'test_cursor_y')), 1)
+    # step 1: the OLD position restore, save buffer blit
+    restores = rip_refs(img, at, end, b'\x48\x8D', 0x0D, 0, 'cursor_save')
+    old_x = rip_refs(img, at, end, b'\x48\x8B', 0x15, 0, 'cursor_x')
+    old_y = rip_refs(img, at, end, b'\x4C\x8B', 0x05, 0, 'cursor_y')
+    blits = calls_to(img, at, end, 'video_blit_rect')
+    clicks = calls_to(img, at, end, 'click_pump')
     echoes = calls_to(img, at, end, 'echo_pump')
-    syncs = calls_to(img, at, end, 'cursor_sync')
-    rep.check('pump.echo_then_cursor',
-              len(echoes) == 1 and len(syncs) == 1 and echoes[0] < syncs[0])
-    rep.equal('pump.no_other_calls', len(call_sites(img, at, end)), 2)
+    places = calls_to(img, at, end, 'cursor_place')
+    rep.check('pump.frozen_redraw_order',
+              len(restores) == 1 and len(old_x) == 1 and len(old_y) == 1 and
+              len(blits) == 1 and len(clicks) == 1 and len(echoes) == 1 and
+              len(places) == 1 and
+              restores[0] < blits[0] < clicks[0] < echoes[0] < places[0],
+              'restore OLD -> menu/taskbar -> echo -> place NEW')
+    rep.equal('pump.no_other_calls', len(call_sites(img, at, end)), 4)
+    # task 143 (DEFECT-1): the stationary path FALLS THROUGH to the OLD
+    # restore -- no menu_flag gate, no shortcut to .restored. A start
+    # press with a stationary cursor opens the menu; menu_open's
+    # readback and the place readback must never capture a live sprite
+    # (the task-125 menu-open gate only covered the menu-close sister)
+    menu_gates = [(s, t, v) for s, t, v in cmp_qword_sites(img, at, end)
+                  if t == img.at('menu_flag')]
+    rep.equal('pump.no_menu_flag_gate', len(menu_gates), 0)
+    ycmp = find_all(d[at:end], b'\x4C\x3B\x2D')
+    jne_ok = False
+    fall_ok = False
+    if len(ycmp) == 1:
+        p = at + ycmp[0] + 7
+        nb = d[p:p + 2]
+        after = p
+        if nb[0] == 0x75:
+            jne_ok = True
+            after = p + 2
+        elif nb == b'\x0F\x85':
+            jne_ok = True
+            after = p + 6
+        # right after the jne .moved: mov r14d,1 + lea rcx,[cursor_save]
+        # -- the fall-through IS the restore, no conditional skip
+        fall_ok = d[after:after + 9] == b'\x41\xBE\x01\x00\x00\x00\x48\x8D\x0D'
+    rep.check('pump.stationary_y_branches_moved',
+              len(ycmp) == 1 and jne_ok,
+              'cmp r13,[cursor_y] / jne .moved')
+    rep.check('pump.stationary_falls_through_to_restore',
+              len(ycmp) == 1 and fall_ok,
+              'mov r14d,1 / lea rcx,[cursor_save] right after the y jne')
+    # a menu redraw under a stationary cursor forces the re-place:
+    # or r14d, eax right after the click pump returns
+    if clicks:
+        rep.check('pump.menu_redraw_forces_replace',
+                  d.find(b'\x41\x09\xC6', clicks[0], end) >= 0)
+    # step 4 args: the clamped NEW coordinates from r12/r13
+    if echoes:
+        pos = ordered_positions(img, at, end,
+                                [b'\x4C\x89\xE1', b'\x4C\x89\xEA'],
+                                start=echoes[0])
+        rep.check('pump.place_new_position_args', pos is not None)
+    upd_x = rip_refs(img, at, end, b'\x4C\x89', 0x25, 0, 'cursor_x')
+    upd_y = rip_refs(img, at, end, b'\x4C\x89', 0x2D, 0, 'cursor_y')
+    rep.check('pump.position_update_after_place',
+              len(upd_x) == 1 and len(upd_y) == 1 and len(places) == 1 and
+              places[0] < upd_x[0] and places[0] < upd_y[0])
 
 
 def check_cursor(rep, img):
@@ -850,6 +1146,18 @@ def check_cursor(rep, img):
               len(rip_refs(img, at, end, b'\x4C\x89', 0x25, 0, 'cursor_x')), 1)
     rep.equal('cursor.sync_updates_position_y',
               len(rip_refs(img, at, end, b'\x4C\x89', 0x2D, 0, 'cursor_y')), 1)
+    # task 143 sister audit: the sync stationary shortcut jumps to .out
+    # BEFORE any restore/place -- a stationary sync never readbacks, so
+    # it can neither capture nor restore a live sprite (the app POLL
+    # path stays frozen)
+    sync_ycmp = find_all(d[at:end], b'\x4C\x3B\x2D')
+    sync_je = False
+    if len(sync_ycmp) == 1:
+        nb = d[at + sync_ycmp[0] + 7:at + sync_ycmp[0] + 9]
+        sync_je = nb[0] == 0x74 or nb == b'\x0F\x84'
+    rep.check('cursor.sync_stationary_skips_place',
+              len(sync_ycmp) == 1 and sync_je,
+              'cmp r13,[cursor_y] / je .out (no readback when stationary)')
 
 
 def check_echo(rep, img):
@@ -904,17 +1212,33 @@ def check_echo(rep, img):
     zeros = [p for p in rip_refs(img, at, end, b'\x48\xC7', 0x05, 4, 'echo_col')
              if u32(d, p + 7) == 0]
     rep.equal('echo.column_reset_wrap_and_enter', len(zeros), 2)
-    # the backspace erase: one glyph cell of the frozen background color
+    # the backspace erase, DESKTOP-v2: restore the glyph cell from the
+    # wallpaper source, one packed 8 pixel row per blit, 16 rows
     rep.check('echo.erase_cell_width',
-              d.find(b'\x41\xB8' + struct.pack('<I', FONT_W), at, end) >= 0)
-    rep.check('echo.erase_cell_height',
-              d.find(b'\x41\xB9' + struct.pack('<I', FONT_H), at, end) >= 0)
-    rep.check('echo.erase_bg_color', d.find(stack_color(BG_COLOR), at, end) >= 0)
-    rep.equal('echo.erase_fill_call', len(calls_to(img, at, end, 'video_fill_rect')), 1)
+              d.find(b'\x41\xB9' + struct.pack('<I', FONT_W), at, end) >= 0)
+    rep.check('echo.erase_row_count',
+              d.find(b'\x41\xBD' + struct.pack('<I', FONT_H), at, end) >= 0)
+    rep.equal('echo.erase_wallpaper_lea',
+              len(rip_refs(img, at, end, b'\x48\x8D', 0x0D, 0, 'wallpaper')), 1)
+    rep.check('echo.erase_row_stride_1024',
+              d.find(b'\x48\xC1\xE0\x0A', at, end) >= 0)
+    rep.check('echo.erase_dword_stride',
+              d.find(b'\x48\xC1\xE0\x02', at, end) >= 0)
+    rep.check('echo.erase_single_row_height',
+              d.find(stack_color(1), at, end) >= 0)
+    rep.equal('echo.erase_blit_call',
+              len(calls_to(img, at, end, 'video_blit_rect')), 1)
+    rep.equal('echo.erase_no_flat_fill',
+              len(calls_to(img, at, end, 'video_fill_rect')), 0)
+    dec = d.find(b'\x41\xFF\xCD', at, end)              # dec r13d
+    j = jcc_after(img, dec + 3, 2) if dec >= 0 else None
+    rep.check('echo.erase_bounded_16_rows', j is not None and j[1] < dec + 3)
 
 
 def check_selftest(rep, img):
-    at, end = region(img, 'selftest', 'data_start')
+    # the region stops at the wallpaper: the embedded image is data,
+    # its stray bytes must never decode as self test instructions
+    at, end = region(img, 'selftest', 'wallpaper')
     d = img.data
     rep.check('selftest.full_frame', d[at:at + len(FRAME_ENTER)] == FRAME_ENTER)
     rep.check('selftest.entry_cli', d[at + len(FRAME_ENTER):at + len(FRAME_ENTER) + 2]
@@ -927,29 +1251,46 @@ def check_selftest(rep, img):
     rep.check('selftest.consumed_snapshot',
               len(loads) == 1 and len(stores) == 1 and loads[0] < stores[0],
               'the input self test keys are never re-echoed')
-    # leg 0: the full screen background fill
+    # leg 0, DESKTOP-v2: the full screen wallpaper blit from the
+    # embedded asset, never a flat color fill
+    wp_lea = rip_refs(img, at, end, b'\x48\x8D', 0x0D, 0, 'wallpaper')
+    rep.equal('selftest.wallpaper_lea', len(wp_lea), 1)
     pos = ordered_positions(img, at, end, [
-        b'\x31\xC9\x31\xD2',
-        b'\x41\xB8' + struct.pack('<I', SCREEN_W),
-        b'\x41\xB9' + struct.pack('<I', SCREEN_H),
-        stack_color(BG_COLOR),
-    ])
-    rep.check('selftest.bg_fill_args', pos is not None)
-    # leg 1: the bar rectangle and the title text
+        b'\x31\xD2',                                    # xor edx, edx
+        b'\x45\x31\xC0',                                # xor r8d, r8d
+        b'\x41\xB9' + struct.pack('<I', WALLPAPER_W),
+        stack_color(WALLPAPER_H),
+    ], start=wp_lea[0] if wp_lea else None)
+    rep.check('selftest.wallpaper_blit_args', pos is not None)
+    st_blits = calls_to(img, at, end, 'video_blit_rect')
+    rep.check('selftest.wallpaper_blit_call',
+              len(st_blits) == 1 and wp_lea and wp_lea[0] < st_blits[0])
+    # leg 1: the bar rectangle, the start button accents, the title
     pos = ordered_positions(img, at, end, [
         mov_ecx(BAR_X), mov_edx(BAR_Y),
         b'\x41\xB8' + struct.pack('<I', BAR_W),
         b'\x41\xB9' + struct.pack('<I', BAR_H),
         stack_color(BAR_COLOR),
+        # the underline: (0, BAR_H-1, START_W, 1) in the accent gray
+        b'\x31\xC9',                                    # xor ecx, ecx
+        mov_edx(BAR_H - 1),
+        b'\x41\xB8' + struct.pack('<I', START_W),
+        b'\x41\xB9' + struct.pack('<I', 1),
+        stack_color(ACCENT_COLOR),
+        # the separator: (START_W, TITLE_Y+FONT_H, 1, 8), below the text
+        mov_ecx(START_W), mov_edx(TITLE_Y + FONT_H),
+        b'\x41\xB8' + struct.pack('<I', 1),
+        b'\x41\xB9' + struct.pack('<I', BAR_H - TITLE_Y - FONT_H),
+        stack_color(ACCENT_COLOR),
         mov_ecx(TITLE_X), mov_edx(TITLE_Y),
         b'\x41\xB8' + struct.pack('<I', TITLE_COLOR),
     ])
-    rep.check('selftest.title_args', pos is not None)
+    rep.check('selftest.taskbar_args', pos is not None)
     rep.equal('selftest.title_lea',
               len(rip_refs(img, at, end, b'\x4C\x8D', 0x0D, 0, 'title')), 1)
     fills = calls_to(img, at, end, 'video_fill_rect')
     puts = calls_to(img, at, end, 'video_puts')
-    rep.equal('selftest.two_fills_one_puts', (len(fills), len(puts)), (2, 1))
+    rep.equal('selftest.three_fills_one_puts', (len(fills), len(puts)), (3, 1))
     # leg 2: the initial cursor at the derived position
     cx = rip_refs(img, at, end, b'\x48\xC7', 0x05, 4, 'cursor_x')
     cy = rip_refs(img, at, end, b'\x48\xC7', 0x05, 4, 'cursor_y')
@@ -1004,6 +1345,12 @@ def check_selftest(rep, img):
         (img.at('echo_col'), ST_KEYS_FINAL): 2,
         (img.at('echo_row'), 0): 2,
         (img.at('echo_drops'), 0): 2,
+        # DESKTOP-v2: the leg 4 click landed outside the menu
+        (img.at('test_clicks'), ST_CLICKS_FINAL): 1,
+        (img.at('test_menu_opens'), ST_MENU_OPENS_FINAL): 1,
+        (img.at('menu_flag'), 0): 1,
+        (img.at('app_launch'), 0): 1,
+        (img.at('prev_buttons'), 0): 1,
     })
     got = Counter((t, imm) for _, t, imm in cmp_qword_sites(img, at, end))
     rep.check('selftest.final_compares_exact', got == want,
@@ -1022,17 +1369,297 @@ def check_selftest(rep, img):
               d.find(b'\xB8' + struct.pack('<i', EIO), at, end) >= 0)
 
 
+def check_menu(rep, img):
+    """DESKTOP-v2 T3: the click edge pump and the menu open/close,
+    every geometry immediate and every state write read from bytes."""
+    d = img.data
+    # click pump: private edge memory, press-only clicks, frozen rects
+    at, end = region(img, 'click_pump', 'menu_open')
+    rep.check('menu.click_full_frame', d[at:at + len(FRAME_ENTER)] == FRAME_ENTER)
+    rep.equal('menu.reads_mouse_b1',
+              len(rip_refs(img, at, end, b'\x4C\x8B', 0x25, 0, 'input_mouse_b1')), 1)
+    rep.check('menu.button_mask_1',
+              d.find(b'\x49\x83\xE4\x01', at, end) >= 0)   # and r12, 1
+    rep.equal('menu.prev_read',
+              len(rip_refs(img, at, end, b'\x4C\x8B', 0x2D, 0, 'prev_buttons')), 1)
+    rep.equal('menu.prev_write',
+              len(rip_refs(img, at, end, b'\x4C\x89', 0x25, 0, 'prev_buttons')), 1)
+    rep.check('menu.edge_compare',
+              d.find(b'\x4D\x39\xEC', at, end) >= 0)       # cmp r12, r13
+    rep.equal('menu.clicks_counted',
+              len(rip_refs(img, at, end, b'\x48\xFF', 0x05, 0, 'test_clicks')), 1)
+    # the start button hit test: x < 64 and y < 32
+    rep.check('menu.start_hit_x',
+              d.find(b'\x49\x83\xFE' + bytes((START_W,)), at, end) >= 0)
+    rep.check('menu.start_hit_y',
+              d.find(b'\x49\x83\xFF' + bytes((START_H,)), at, end) >= 0)
+    # the menu rectangle hit test: x < 200, 32 <= y < 66
+    rep.check('menu.entry_hit_x',
+              d.find(b'\x49\x81\xFE' + struct.pack('<I', MENU_W), at, end) >= 0)
+    rep.check('menu.entry_hit_ylo',
+              d.find(b'\x49\x83\xFF' + bytes((MENU_Y,)), at, end) >= 0)
+    rep.check('menu.entry_hit_yhi',
+              d.find(b'\x49\x83\xFF' + bytes((MENU_Y + MENU_H,)), at, end) >= 0)
+    launch = rip_refs(img, at, end, b'\x48\xC7', 0x05, 4, 'app_launch')
+    rep.check('menu.launch_flag_store',
+              len(launch) == 1 and u32(d, launch[0] + 7) == 1,
+              'the CHIP-8 entry only sets the private task 125 label')
+    # task 125: the start/entry press edges advance their own counters
+    # and publish the click stages 6/7 (the boot legs never see them)
+    rep.equal('menu.start_clicks_counted',
+              len(rip_refs(img, at, end, b'\x48\xFF', 0x05, 0,
+                           'test_start_clicks')), 1)
+    entry_clicks = rip_refs(img, at, end, b'\x48\xFF', 0x05, 0,
+                            'test_entry_clicks')
+    rep.equal('menu.entry_clicks_counted', len(entry_clicks), 1)
+    stages = rip_refs(img, at, end, b'\x48\xC7', 0x05, 4, 'test_stage')
+    vals = sorted(u32(d, p + 7) for p in stages)
+    rep.equal('menu.click_stage_sequence', vals,
+              [STAGE_START_CLICK, STAGE_ENTRY_CLICK])
+    rep.check('menu.entry_evidence_after_flag',
+              bool(launch) and bool(entry_clicks) and
+              launch[0] < entry_clicks[0])
+    rep.equal('menu.open_call_once', len(calls_to(img, at, end, 'menu_open')), 1)
+    rep.equal('menu.close_call_twice', len(calls_to(img, at, end, 'menu_close')), 2)
+    rep.equal('menu.click_no_direct_video',
+              len(calls_to(img, at, end, 'video_fill_rect')) +
+              len(calls_to(img, at, end, 'video_blit_rect')) +
+              len(calls_to(img, at, end, 'video_readback_rect')) +
+              len(calls_to(img, at, end, 'video_puts')), 0)
+
+    # open: readback save FIRST, then accent frame, panel, label
+    at, end = region(img, 'menu_open', 'menu_close')
+    rep.check('menu.open_full_frame', d[at:at + len(FRAME_ENTER)] == FRAME_ENTER)
+    saves = rip_refs(img, at, end, b'\x48\x8D', 0x0D, 0, 'menu_save')
+    rep.equal('menu.open_save_lea', len(saves), 1)
+    reads = calls_to(img, at, end, 'video_readback_rect')
+    fills = calls_to(img, at, end, 'video_fill_rect')
+    puts = calls_to(img, at, end, 'video_puts')
+    rep.check('menu.save_before_draw',
+              len(reads) == 1 and len(fills) == 2 and len(puts) == 1 and
+              saves and saves[0] < reads[0] < fills[0] < fills[1] < puts[0])
+    pos = ordered_positions(img, at, end, [
+        b'\x41\xB8' + struct.pack('<I', MENU_Y),
+        b'\x41\xB9' + struct.pack('<I', MENU_W),
+        stack_color(MENU_H),
+    ])
+    rep.check('menu.save_rect_args', pos is not None)
+    rep.check('menu.accent_frame_color',
+              d.find(stack_color(ACCENT_COLOR), at, end) >= 0)
+    pos = ordered_positions(img, at, end, [
+        mov_ecx(MENU_X + 1), mov_edx(MENU_Y + 1),
+        b'\x41\xB8' + struct.pack('<I', MENU_W - 2),
+        b'\x41\xB9' + struct.pack('<I', MENU_H - 2),
+        stack_color(MENU_COLOR),
+    ])
+    rep.check('menu.inner_panel_args', pos is not None)
+    pos = ordered_positions(img, at, end, [
+        mov_ecx(MENU_TEXT_X), mov_edx(MENU_TEXT_Y),
+        b'\x41\xB8' + struct.pack('<I', TITLE_COLOR),
+    ])
+    rep.check('menu.entry_label_args', pos is not None)
+    rep.equal('menu.entry_label_lea',
+              len(rip_refs(img, at, end, b'\x4C\x8D', 0x0D, 0, 'menu_text')), 1)
+    flag = rip_refs(img, at, end, b'\x48\xC7', 0x05, 4, 'menu_flag')
+    rep.check('menu.open_sets_flag',
+              len(flag) == 1 and u32(d, flag[0] + 7) == 1)
+    rep.equal('menu.opens_counted',
+              len(rip_refs(img, at, end, b'\x48\xFF', 0x05, 0, 'test_menu_opens')), 1)
+
+    # close: blit the saved background back, then clear the flag
+    at, end = region(img, 'menu_close', 'menu_text')
+    rep.check('menu.close_full_frame', d[at:at + len(FRAME_ENTER)] == FRAME_ENTER)
+    saves = rip_refs(img, at, end, b'\x48\x8D', 0x0D, 0, 'menu_save')
+    blits = calls_to(img, at, end, 'video_blit_rect')
+    rep.check('menu.close_restore_order',
+              len(saves) == 1 and len(blits) == 1 and saves[0] < blits[0])
+    pos = ordered_positions(img, at, end, [
+        b'\x41\xB8' + struct.pack('<I', MENU_Y),
+        b'\x41\xB9' + struct.pack('<I', MENU_W),
+        stack_color(MENU_H),
+    ])
+    rep.check('menu.close_rect_args', pos is not None)
+    flag = rip_refs(img, at, end, b'\x48\xC7', 0x05, 4, 'menu_flag')
+    rep.check('menu.close_clears_flag',
+              len(flag) == 1 and u32(d, flag[0] + 7) == 0 and
+              blits and blits[0] < flag[0])
+    rep.equal('menu.close_no_readback',
+              len(calls_to(img, at, end, 'video_readback_rect')), 0)
+    # the frozen entry label bytes
+    t = d[img.at('menu_text'):img.at('menu_text_end')]
+    rep.check('menu.entry_text_frozen', t == MENU_TEXT)
+
+
+def check_taskbar(rep, img):
+    """Task 125 T4: the repaint base, the launch pump and the boot
+    wrapper, every state write and call order read from the bytes."""
+    d = img.data
+    # repaint base: the exact self test leg 0+1 sequence, no legs
+    at, end = region(img, 'repaint_base', 'launch_pump')
+    rep.check('taskbar.repaint_full_frame',
+              d[at:at + len(FRAME_ENTER)] == FRAME_ENTER)
+    wp_lea = rip_refs(img, at, end, b'\x48\x8D', 0x0D, 0, 'wallpaper')
+    rep.equal('taskbar.repaint_wallpaper_lea', len(wp_lea), 1)
+    pos = ordered_positions(img, at, end, [
+        b'\x31\xD2',                                    # xor edx, edx
+        b'\x45\x31\xC0',                                # xor r8d, r8d
+        b'\x41\xB9' + struct.pack('<I', WALLPAPER_W),
+        stack_color(WALLPAPER_H),
+    ], start=wp_lea[0] if wp_lea else None)
+    rep.check('taskbar.repaint_wallpaper_args', pos is not None)
+    pos = ordered_positions(img, at, end, [
+        mov_ecx(BAR_X), mov_edx(BAR_Y),
+        b'\x41\xB8' + struct.pack('<I', BAR_W),
+        b'\x41\xB9' + struct.pack('<I', BAR_H),
+        stack_color(BAR_COLOR),
+        b'\x31\xC9',                                    # xor ecx, ecx
+        mov_edx(BAR_H - 1),
+        b'\x41\xB8' + struct.pack('<I', START_W),
+        b'\x41\xB9' + struct.pack('<I', 1),
+        stack_color(ACCENT_COLOR),
+        mov_ecx(START_W), mov_edx(TITLE_Y + FONT_H),
+        b'\x41\xB8' + struct.pack('<I', 1),
+        b'\x41\xB9' + struct.pack('<I', BAR_H - TITLE_Y - FONT_H),
+        stack_color(ACCENT_COLOR),
+        mov_ecx(TITLE_X), mov_edx(TITLE_Y),
+        b'\x41\xB8' + struct.pack('<I', TITLE_COLOR),
+    ])
+    rep.check('taskbar.repaint_taskbar_args', pos is not None)
+    blits = calls_to(img, at, end, 'video_blit_rect')
+    fills = calls_to(img, at, end, 'video_fill_rect')
+    puts = calls_to(img, at, end, 'video_puts')
+    rep.check('taskbar.repaint_order',
+              len(blits) == 1 and len(fills) == 3 and len(puts) == 1 and
+              wp_lea and wp_lea[0] < blits[0] < fills[0] < fills[1] <
+              fills[2] < puts[0],
+              'wallpaper -> bar -> underline -> separator -> title')
+    rep.equal('taskbar.repaint_title_lea',
+              len(rip_refs(img, at, end, b'\x4C\x8D', 0x0D, 0, 'title')), 1)
+    rep.equal('taskbar.repaint_no_readback',
+              len(calls_to(img, at, end, 'video_readback_rect')), 0)
+
+    # launch pump: the single app_launch consumer
+    at, end = region(img, 'launch_pump', 'app_boot')
+    rep.check('taskbar.launch_full_frame',
+              d[at:at + len(FRAME_ENTER)] == FRAME_ENTER)
+    cmps = {(t, imm) for _, t, imm in cmp_qword_sites(img, at, end)}
+    rep.check('taskbar.launch_flag_gate', (img.at('app_launch'), 0) in cmps)
+    clears = [p for p in rip_refs(img, at, end, b'\x48\xC7', 0x05, 4,
+                                  'app_launch') if u32(d, p + 7) == 0]
+    rep.equal('taskbar.launch_flag_clear_once', len(clears), 1)
+    rep.check('taskbar.launch_mode_save',
+              d.find(b'\x41\x89\xCD', at, end) >= 0)     # mov r13d, ecx
+    saves = rip_refs(img, at, end, b'\x48\x8D', 0x0D, 0, 'cursor_save')
+    blits = calls_to(img, at, end, 'video_blit_rect')
+    fills = calls_to(img, at, end, 'video_fill_rect')
+    places = calls_to(img, at, end, 'cursor_place')
+    launches = calls_to(img, at, end, 'app_launch_fn')
+    rep.equal('taskbar.launch_single_app_call', len(launches), 1)
+    rep.equal('taskbar.launch_two_save_blits', (len(saves), len(blits)), (2, 2))
+    rep.equal('taskbar.launch_two_fills', len(fills), 2)
+    rep.equal('taskbar.launch_one_place', len(places), 1)
+    rep.equal('taskbar.launch_no_readback',
+              len(calls_to(img, at, end, 'video_readback_rect')), 0)
+    # the running indicator draw args, then the cleanup erase args
+    pos = ordered_positions(img, at, end, [
+        mov_ecx(RUN_X), mov_edx(RUN_Y),
+        b'\x41\xB8' + struct.pack('<I', RUN_W),
+        b'\x41\xB9' + struct.pack('<I', RUN_H),
+        stack_color(RUN_COLOR),
+    ])
+    rep.check('taskbar.indicator_draw_args', pos is not None)
+    pos = ordered_positions(img, at, end, [
+        mov_ecx(RUN_X), mov_edx(RUN_Y),
+        b'\x41\xB8' + struct.pack('<I', RUN_W),
+        b'\x41\xB9' + struct.pack('<I', RUN_H),
+        stack_color(BAR_COLOR),
+    ])
+    rep.check('taskbar.indicator_erase_args', pos is not None)
+    runs = rip_refs(img, at, end, b'\x48\xFF', 0x05, 0, 'test_app_runs')
+    exits = rip_refs(img, at, end, b'\x48\xFF', 0x05, 0, 'test_app_exits')
+    rep.equal('taskbar.runs_counted', len(runs), 1)
+    rep.equal('taskbar.exits_counted', len(exits), 1)
+    stages = rip_refs(img, at, end, b'\x48\xC7', 0x05, 4, 'test_stage')
+    vals = sorted(u32(d, p + 7) for p in stages)
+    rep.equal('taskbar.launch_stage_sequence', vals,
+              [STAGE_APP_RUNNING, STAGE_APP_EXIT])
+    # the frozen order: clear flag -> suspend cursor (blit OLD) ->
+    # indicator -> runs++ -> app_launch -> exits++ on success; the
+    # failure cleanup erases the indicator, blits the save FIRST and
+    # places SECOND (the save can never capture a drawn sprite)
+    rep.check('taskbar.launch_order',
+              bool(clears) and len(blits) == 2 and len(fills) == 2 and
+              len(launches) == 1 and len(runs) == 1 and len(exits) == 1 and
+              clears[0] < blits[0] < fills[0] < runs[0] < launches[0] <
+              exits[0],
+              'clear -> suspend -> indicator -> run -> launch -> exit')
+    rep.check('taskbar.cleanup_blit_before_place',
+              len(blits) == 2 and len(places) == 1 and len(fills) == 2 and
+              launches[0] < fills[1] < blits[1] < places[0],
+              'the idempotent cleanup never re-saves a drawn cursor')
+    rep.check('taskbar.launch_no_pump_calls',
+              not calls_to(img, at, end, 'pump') and
+              not calls_to(img, at, end, 'click_pump') and
+              not calls_to(img, at, end, 'echo_pump'))
+
+    # boot wrapper: set the flag, boot mode (ecx = 0), one pump call
+    at, end = region(img, 'app_boot', 'selftest')
+    rep.check('taskbar.boot_full_frame',
+              d[at:at + len(FRAME_ENTER)] == FRAME_ENTER)
+    sets = [p for p in rip_refs(img, at, end, b'\x48\xC7', 0x05, 4,
+                                'app_launch') if u32(d, p + 7) == 1]
+    rep.equal('taskbar.boot_flag_set_once', len(sets), 1)
+    pumps = calls_to(img, at, end, 'launch_pump')
+    rep.equal('taskbar.boot_single_pump_call', len(pumps), 1)
+    xors = [at + p for p in find_all(d[at:end], b'\x31\xC9')
+            if not sets or at + p >= sets[0] + 11]
+    rep.check('taskbar.boot_mode_zero',
+              bool(xors) and bool(pumps) and xors[0] < pumps[0] and
+              bool(sets) and sets[0] < xors[0])
+    rep.equal('taskbar.boot_no_direct_app_call',
+              len(calls_to(img, at, end, 'app_launch_fn')), 0)
+    rep.equal('taskbar.boot_no_video',
+              len(calls_to(img, at, end, 'video_fill_rect')) +
+              len(calls_to(img, at, end, 'video_blit_rect')) +
+              len(calls_to(img, at, end, 'video_puts')), 0)
+
+
+def check_wallpaper(rep, img, root):
+    """The embedded asset byte for byte, its sha256, the manifest sha
+    mirror and the independently frozen T1 probe truth."""
+    asset_path = root / 'kernel' / 'desktop' / 'assets' / 'wallpaper.bgrx'
+    if not rep.check('wallpaper.asset_present', asset_path.is_file(),
+                     str(asset_path)):
+        return
+    asset = asset_path.read_bytes()
+    rep.equal('wallpaper.asset_size', len(asset), WALLPAPER_BYTES)
+    rep.equal('wallpaper.asset_sha256',
+              hashlib.sha256(asset).hexdigest(), WALLPAPER_SHA256)
+    got = img.data[img.at('wallpaper'):img.at('wallpaper_end')]
+    rep.check('wallpaper.embedded_bytes_identical', got == asset,
+              'the incbin image must equal the gated asset byte for byte')
+    digest = struct.unpack('>4Q', bytes.fromhex(WALLPAPER_SHA256))
+    for i in range(4):
+        rep.equal('wallpaper.sha_qword_%d' % i,
+                  img['wallpaper_sha%d' % i], digest[i])
+    # the T1 truth table sampled from the ASSET, independent of any
+    # rendering implementation: one little-endian BGRX dword per pixel
+    for x, y, color in WALLPAPER_PROBES:
+        rep.equal('wallpaper.probe_%d_%d' % (x, y),
+                  u32(asset, (y * WALLPAPER_W + x) * 4), color)
+
+
 def check_sources(rep, root):
     module = root / 'kernel' / 'desktop'
-    # the frozen seven-file module set. Whitelist style (task 138 W4):
-    # only directory entries (e.g. the assets/ tree of the desktop-v2
-    # track) and the known wallpaper.inc of that track are exempt; any
-    # other foreign file stays in the list and fails file_set instead
-    # of silently passing a name filter. The 386-check verdict here
-    # stays unchanged.
+    # the frozen nine-file module set of DESKTOP-v2 (task 124 added
+    # menu.inc and wallpaper.inc). Whitelist style (task 138 W4): only
+    # directory entries (the assets/ tree) are exempt; any other foreign
+    # file stays in the list and fails file_set instead of silently
+    # passing a name filter.
     module_files = ['api.inc', 'cursor.inc', 'data.inc', 'desktop.asm',
-                    'desktop.inc', 'echo.inc', 'selftest.inc']
-    exempt = {'wallpaper.inc'}
+                    'desktop.inc', 'echo.inc', 'menu.inc', 'selftest.inc',
+                    'taskbar.inc', 'wallpaper.inc']
+    exempt = set()
     files = sorted(p.name for p in module.glob('*')
                    if p.is_file() and p.name not in exempt)
     rep.equal('source.file_set', files, module_files)
@@ -1070,8 +1697,12 @@ def check_sources(rep, root):
               'if ~ defined DESKTOP_HOSTED' in agg)
     order = re.findall(r"^include\s+'([^']+)'", agg, re.M)
     rep.equal('source.include_order', order, [
-        'api.inc', 'desktop.inc', 'cursor.inc', 'echo.inc',
-        'selftest.inc', 'data.inc'])
+        'api.inc', 'desktop.inc', 'cursor.inc', 'echo.inc', 'menu.inc',
+        'taskbar.inc', 'selftest.inc', 'wallpaper.inc', 'data.inc'])
+    wp_text = (module / 'wallpaper.inc').read_text(encoding='utf-8')
+    rep.check('source.wallpaper_incbin',
+              re.search(r"^\s*file\s+'assets/wallpaper\.bgrx'", wp_text, re.M)
+              is not None)
 
 
 def check_position_independence(rep, asm_, root, out, low):
@@ -1085,12 +1716,16 @@ def check_position_independence(rep, asm_, root, out, low):
     labels = ['code_start', 'code_end', 'data_start', 'data_end',
               'init', 'wait_count', 'pump', 'run', 'cursor_place',
               'cursor_composite', 'cursor_sync', 'echo_pump', 'echo_key',
+              'click_pump', 'menu_open', 'menu_close',
+              'repaint_base', 'launch_pump', 'app_boot', 'app_launch_fn',
+              'menu_text', 'menu_text_end', 'wallpaper', 'wallpaper_end',
               'selftest', 'title', 'title_end', 'sprite', 'sprite_end',
               'msg_selftest', 'msg_nl',
               'video_fill_rect', 'video_blit_rect', 'video_readback_rect',
               'video_puts', 'video_fb_state', 'input_ioapic_write',
               'input_kbd_buf', 'input_kbd_used', 'input_kbd_drops',
-              'input_mouse_x', 'input_mouse_y', 'input_test_kbd_count',
+              'input_mouse_x', 'input_mouse_y', 'input_mouse_b1',
+              'input_test_kbd_count',
               'input_test_mouse_count', 'irq_sti_wait', 'irq_test_ticks',
               'cpu_com1_puts', 'cpu_com1_puthex']
     labels += list(DATA_LABELS)
@@ -1145,11 +1780,11 @@ FIXTURES = [
     # the pump runs with IF = 0: a second STI anywhere in the module
     # breaks the single-owner contract (source scan + byte decode)
     ('desktop-sti-leak', 'kernel/desktop/desktop.inc',
-     '        call    desktop_echo_pump\n'
-     '        call    desktop_cursor_sync\n',
+     '        ; 2. the menu / taskbar click operations\n'
+     '        call    desktop_click_pump\n',
      '        sti\n'
-     '        call    desktop_echo_pump\n'
-     '        call    desktop_cursor_sync\n', 'check'),
+     '        ; 2. the menu / taskbar click operations\n'
+     '        call    desktop_click_pump\n', 'check'),
     # the LVT timer mask must stay set BEFORE the loop STI: unmasking
     # it would let ticks advance past the frozen 11
     ('timer-unmask-drift', 'kernel/desktop/desktop.inc',
@@ -1165,13 +1800,12 @@ FIXTURES = [
      '        mov     r9d, DESKTOP_SPRITE_W\n'
      '        mov     dword [rsp+32], DESKTOP_SPRITE_H\n'
      '        call    video_blit_rect\n', '', 'check'),
-    # Backspace must erase the glyph cell with the background color:
-    # dropping the fill would leave the old glyph on screen
+    # Backspace must restore the glyph cell from the wallpaper source:
+    # dropping the row blit would leave the old glyph on screen
     ('echo-backspace-removed', 'kernel/desktop/echo.inc',
-     '        mov     r8d, DESKTOP_FONT_W\n'
-     '        mov     r9d, DESKTOP_FONT_H\n'
-     '        mov     dword [rsp+32], DESKTOP_BG_COLOR\n'
-     '        call    video_fill_rect\n', '', 'check'),
+     '        mov     dword [rsp+32], 1\n'
+     '        call    video_blit_rect\n',
+     '        mov     dword [rsp+32], 1\n', 'check'),
     # the sprite pattern is frozen byte for byte plus sha256
     ('sprite-data-drift', 'kernel/desktop/cursor.inc',
      '        db 1,2,2,2,2,1,1,1,1,1,1,0',
@@ -1186,6 +1820,82 @@ FIXTURES = [
      '        cmp     r12, DESKTOP_CURSOR_XMAX\n'
      '        jbe     .x_ok\n'
      '        mov     r12, DESKTOP_CURSOR_XMAX\n', '', 'check'),
+    # DESKTOP-v2: the wallpaper digest is frozen; a flipped sha qword
+    # assembles fine, the gate must catch the drift
+    ('wallpaper-sha-flip', 'kernel/desktop/wallpaper.inc',
+     'DESKTOP_WALLPAPER_SHA0 = 0xF9F8A12E5406E04B',
+     'DESKTOP_WALLPAPER_SHA0 = 0xF9F8A12E5406E04C', 'check'),
+    # DESKTOP-v2: the menu hit rectangle is frozen at (0,32,200,34);
+    # widening the click hit test assembles fine, the byte gate catches it
+    ('menu-geometry-drift', 'kernel/desktop/menu.inc',
+     '        cmp     r14, DESKTOP_MENU_W\n',
+     '        cmp     r14, DESKTOP_MENU_W + 8\n', 'check'),
+    # DESKTOP-v2: the frozen redraw order is restore OLD -> menu/taskbar
+    # -> echo -> place NEW; swapping the two pumps assembles fine, the
+    # byte order gate must catch it
+    ('redraw-order-swap', 'kernel/desktop/desktop.inc',
+     '        call    desktop_click_pump\n'
+     '        or      r14d, eax\n'
+     '        ; 3. the keyboard echo\n'
+     '        call    desktop_echo_pump\n',
+     '        call    desktop_echo_pump\n'
+     '        call    desktop_click_pump\n'
+     '        or      r14d, eax\n', 'check'),
+    # task 125: the launch request must be consumed exactly once; a
+    # missing flag clear would relaunch the app on every loop pass
+    ('launch-flag-leak', 'kernel/desktop/taskbar.inc',
+     '        mov     qword [desktop_app_launch_requested], 0\n',
+     '', 'check'),
+    # task 125: the failure cleanup must blit the save BEFORE the
+    # place; swapping them re-saves a drawn sprite and smears ghosts
+    ('cleanup-order-swap', 'kernel/desktop/taskbar.inc',
+     '        call    video_blit_rect\n'
+     '        mov     rcx, [desktop_cursor_x]\n'
+     '        mov     rdx, [desktop_cursor_y]\n'
+     '        call    desktop_cursor_place\n'
+     '.out:\n'
+     '        mov     eax, r12d\n',
+     '        mov     rcx, [desktop_cursor_x]\n'
+     '        mov     rdx, [desktop_cursor_y]\n'
+     '        call    desktop_cursor_place\n'
+     '        call    video_blit_rect\n'
+     '.out:\n'
+     '        mov     eax, r12d\n', 'check'),
+    # task 125: the resident loop must consume the launch request; a
+    # dropped launch pump call leaves the menu entry dead
+    ('run-loop-launch-removed', 'kernel/desktop/desktop.inc',
+     '        call    desktop_pump\n'
+     '        ; task 125: consume a CHIP-8 launch request in the same IF = 0\n'
+     '        ; window (click mode: publish the APP_RUNNING/APP_EXIT stages)\n'
+     '        mov     ecx, 1\n'
+     '        call    desktop_launch_pump\n'
+     '        jmp     .loop\n',
+     '        call    desktop_pump\n'
+     '        jmp     .loop\n', 'check'),
+    # task 125: the running indicator geometry is frozen; the private
+    # api assertion fires on drift
+    ('run-indicator-drift', 'kernel/desktop/api.inc',
+     'DESKTOP_RUN_X     = 992', 'DESKTOP_RUN_X     = 984', 'assemble'),
+    # task 143 (DEFECT-1): re-introducing the task-125 menu_flag gate
+    # leaves the start-press (stationary + menu CLOSED) path unrestored:
+    # menu_open/place readbacks capture the live sprite again
+    ('defect1-menu-gate-regression', 'kernel/desktop/desktop.inc',
+     '        ; task 143 (DEFECT-1): the stationary path FALLS THROUGH to the\n'
+     '        ; OLD restore as well. A start press with a stationary cursor\n'
+     '        ; opens the menu: menu_open\'s readback and the place readback\n'
+     '        ; below must never capture the live sprite (the task-125 gate\n'
+     '        ; only covered the menu-CLOSE sister). Restoring first keeps\n'
+     '        ; EVERY readback save sprite-free; the forced re-place is\n'
+     '        ; pixel-neutral because the cursor is drawn last.\n',
+     '        cmp     qword [desktop_menu_flag], 0\n'
+     '        je      .restored\n', 'check'),
+    # task 143: the pre-125 stationary shortcut (je .restored on equal
+    # coordinates) skips the restore for BOTH menu sisters
+    ('stationary-skip-restore', 'kernel/desktop/desktop.inc',
+     '        cmp     r13, [desktop_cursor_y]\n'
+     '        jne     .moved\n',
+     '        cmp     r13, [desktop_cursor_y]\n'
+     '        je      .restored\n', 'check'),
 ]
 
 
@@ -1274,7 +1984,10 @@ def main(argv):
     check_pump(rep, img)
     check_cursor(rep, img)
     check_echo(rep, img)
+    check_menu(rep, img)
+    check_taskbar(rep, img)
     check_selftest(rep, img)
+    check_wallpaper(rep, img, root)
     check_sources(rep, root)
     check_position_independence(rep, asm_, root, out, img)
 

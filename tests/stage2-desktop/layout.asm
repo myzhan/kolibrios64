@@ -5,7 +5,7 @@
 ;;                                                              ;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;
-;; Layout probe for the DESKTOP-v1 shell module, task 96.
+;; Layout probe for the DESKTOP-v1/v2 shell module, tasks 96 and 124.
 ;;
 ;; This file is a test harness, not part of the kernel. It assembles
 ;; kernel/desktop/desktop.asm exactly as the kernel will include it:
@@ -46,6 +46,12 @@ include '../../kernel/input/input.asm'
 
 VIDEO_HOSTED = 1
 include '../../kernel/video/video.asm'
+
+; task 125: the standalone app_launch stub. The kernel resolves the
+; real APP-v1 loader (kernel/app); this probe only needs the symbol
+; so the desktop_launch_pump call target links. Nothing here runs.
+app_launch:
+        ret
 
 DESKTOP_HOSTED = 1
 include '../../kernel/desktop/desktop.asm'
@@ -175,8 +181,76 @@ desktop_probe:
         dq      DESKTOP_DATA_OFF_MESSAGES
         dq      DESKTOP_SCREEN_W
         dq      DESKTOP_SCREEN_H
+        ; DESKTOP-v2 appendix, task 124: pure tail extension, the 119
+        ; frozen v1 entries above keep their exact order
+        dq      desktop_click_pump
+        dq      desktop_menu_open
+        dq      desktop_menu_close
+        dq      desktop_menu_text
+        dq      desktop_menu_text_end
+        dq      desktop_wallpaper
+        dq      desktop_wallpaper_end
+        dq      desktop_prev_buttons
+        dq      desktop_menu_flag
+        dq      desktop_app_launch_requested
+        dq      desktop_test_clicks
+        dq      desktop_test_menu_opens
+        dq      desktop_menu_save
+        dq      input_mouse_b1
+        dq      DESKTOP_START_X
+        dq      DESKTOP_START_Y
+        dq      DESKTOP_START_W
+        dq      DESKTOP_START_H
+        dq      DESKTOP_MENU_X
+        dq      DESKTOP_MENU_Y
+        dq      DESKTOP_MENU_W
+        dq      DESKTOP_MENU_H
+        dq      DESKTOP_ENTRY_CX
+        dq      DESKTOP_ENTRY_CY
+        dq      DESKTOP_MENU_COLOR
+        dq      DESKTOP_ACCENT_COLOR
+        dq      DESKTOP_MENU_TEXT_X
+        dq      DESKTOP_MENU_TEXT_Y
+        dq      DESKTOP_MENU_TEXT_LEN
+        dq      DESKTOP_DATA_OFF_PREV_BUTTONS
+        dq      DESKTOP_DATA_OFF_MENU_FLAG
+        dq      DESKTOP_DATA_OFF_APP_LAUNCH
+        dq      DESKTOP_DATA_OFF_TEST_CLICKS
+        dq      DESKTOP_DATA_OFF_TEST_MENU_OPENS
+        dq      DESKTOP_DATA_OFF_MENU_SAVE
+        dq      DESKTOP_MENU_SAVE_BYTES
+        dq      DESKTOP_WALLPAPER_W
+        dq      DESKTOP_WALLPAPER_H
+        dq      DESKTOP_WALLPAPER_BYTES
+        dq      DESKTOP_WALLPAPER_SHA0
+        dq      DESKTOP_WALLPAPER_SHA1
+        dq      DESKTOP_WALLPAPER_SHA2
+        dq      DESKTOP_WALLPAPER_SHA3
+        ; task 125 appendix: the app launch wiring, pure tail extension,
+        ; the 162 frozen v1/v2 entries above keep their exact order
+        dq      desktop_repaint_base
+        dq      desktop_launch_pump
+        dq      desktop_app_boot
+        dq      app_launch
+        dq      desktop_test_start_clicks
+        dq      desktop_test_entry_clicks
+        dq      desktop_test_app_runs
+        dq      desktop_test_app_exits
+        dq      DESKTOP_STAGE_START_CLICK
+        dq      DESKTOP_STAGE_ENTRY_CLICK
+        dq      DESKTOP_STAGE_APP_RUNNING
+        dq      DESKTOP_STAGE_APP_EXIT
+        dq      DESKTOP_RUN_X
+        dq      DESKTOP_RUN_Y
+        dq      DESKTOP_RUN_W
+        dq      DESKTOP_RUN_H
+        dq      DESKTOP_RUN_COLOR
+        dq      DESKTOP_DATA_OFF_TEST_START_CLICKS
+        dq      DESKTOP_DATA_OFF_TEST_ENTRY_CLICKS
+        dq      DESKTOP_DATA_OFF_TEST_APP_RUNS
+        dq      DESKTOP_DATA_OFF_TEST_APP_EXITS
 desktop_probe_end:
 
-if (desktop_probe_end - desktop_probe) <> 119 * 8
+if (desktop_probe_end - desktop_probe) <> 183 * 8
         err 'the manifest must keep its fixed entry count'
 end if

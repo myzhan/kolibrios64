@@ -16,8 +16,10 @@
 ;; a timeout is a leg failure and panics, never a silent pass.
 ;;
 ;; Legs (failure bits of desktop_test_selftest_mask):
-;;   0  background: the full screen frozen deep blue fill
-;;   1  title: the top bar rectangle plus "K64 Desktop v0.1" at (8,8)
+;;   0  background: the full screen wallpaper blit (DESKTOP-v2, the
+;;      embedded 1024x768 BGRX asset, sha256 frozen by the gate)
+;;   1  taskbar: the top bar rectangle, the start button accents and
+;;      "K64 Desktop v0.1" at (8,8)
 ;;   2  cursor: save + composite + draw at the frozen initial position
 ;;      (517,387), derived from the input self test exit coordinates
 ;;   3  keyboard echo: the host injects sendkey h then sendkey i, the
@@ -49,22 +51,40 @@ desktop_selftest:
         mov     rax, [input_kbd_used]
         mov     [desktop_kbd_consumed], rax
 
-        ; ---------------- leg 0: the background ----------------
-        xor     ecx, ecx
+        ; ---------------- leg 0: the wallpaper background ----------------
+        lea     rcx, [desktop_wallpaper]
         xor     edx, edx
-        mov     r8d, DESKTOP_SCREEN_W
-        mov     r9d, DESKTOP_SCREEN_H
-        mov     dword [rsp+32], DESKTOP_BG_COLOR
-        call    video_fill_rect
+        xor     r8d, r8d
+        mov     r9d, DESKTOP_WALLPAPER_W
+        mov     dword [rsp+32], DESKTOP_WALLPAPER_H
+        call    video_blit_rect
         test    eax, eax
         jnz     desktop_st_fail_bg
 
-        ; ---------------- leg 1: the title bar and text ----------------
+        ; ---------------- leg 1: the taskbar and text ----------------
         mov     ecx, DESKTOP_BAR_X
         mov     edx, DESKTOP_BAR_Y
         mov     r8d, DESKTOP_BAR_W
         mov     r9d, DESKTOP_BAR_H
         mov     dword [rsp+32], DESKTOP_BAR_COLOR
+        call    video_fill_rect
+        test    eax, eax
+        jnz     desktop_st_fail_title
+        ; the start button underline, the accent gray of the wallpaper
+        xor     ecx, ecx
+        mov     edx, DESKTOP_BAR_H - 1
+        mov     r8d, DESKTOP_START_W
+        mov     r9d, 1
+        mov     dword [rsp+32], DESKTOP_ACCENT_COLOR
+        call    video_fill_rect
+        test    eax, eax
+        jnz     desktop_st_fail_title
+        ; the separator right of the start button, below the text rows
+        mov     ecx, DESKTOP_START_W
+        mov     edx, DESKTOP_TITLE_Y + DESKTOP_FONT_H
+        mov     r8d, 1
+        mov     r9d, DESKTOP_BAR_H - DESKTOP_TITLE_Y - DESKTOP_FONT_H
+        mov     dword [rsp+32], DESKTOP_ACCENT_COLOR
         call    video_fill_rect
         test    eax, eax
         jnz     desktop_st_fail_title
@@ -163,6 +183,18 @@ desktop_selftest:
         cmp     qword [desktop_echo_row], 0
         jne     desktop_st_fail_final
         cmp     qword [desktop_echo_drops], 0
+        jne     desktop_st_fail_final
+        ; DESKTOP-v2: the leg 4 press/release at (557,411) is exactly
+        ; one click outside the menu, nothing else may have happened
+        cmp     qword [desktop_test_clicks], 1
+        jne     desktop_st_fail_final
+        cmp     qword [desktop_test_menu_opens], 0
+        jne     desktop_st_fail_final
+        cmp     qword [desktop_menu_flag], 0
+        jne     desktop_st_fail_final
+        cmp     qword [desktop_app_launch_requested], 0
+        jne     desktop_st_fail_final
+        cmp     qword [desktop_prev_buttons], 0
         jne     desktop_st_fail_final
         mov     qword [desktop_test_stage], DESKTOP_STAGE_DONE
         mov     [desktop_test_selftest_mask], r12

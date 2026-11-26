@@ -83,8 +83,17 @@ desktop_wait_count:
         ret
 
 ; ------------------------------------------------------------------
-; the main-loop redraw pass: consume the new key buffer entries, then
-; synchronise the cursor with the accumulated input coordinates
+; the main-loop redraw pass, DESKTOP-v2 frozen order:
+;   1. restore the cursor OLD position (blit of the save buffer)
+;   2. desktop_click_pump: the menu / taskbar click operations
+;   3. desktop_echo_pump: consume the new key buffer entries
+;   4. place the cursor at the NEW position (save + composite + draw)
+; The clamp/evidence publication mirrors desktop_cursor_sync, which
+; stays frozen for the app POLL path. Task 143 (DEFECT-1): EVERY pass
+; restores the OLD sprite first, stationary included, so no readback
+; save (menu_open / cursor_place) ever captures a live cursor; a menu
+; redraw under a stationary cursor also forces the re-place
+; (click_pump returns eax = 1).
 ; in
 ; nothing; runs with IF = 0 (self test wait or resident loop context)
 ; out
@@ -94,8 +103,55 @@ desktop_wait_count:
 desktop_pump:
         desktop_enter
         cld
+        ; clamp the accumulated input coordinates, publish the evidence
+        mov     r12, [input_mouse_x]
+        cmp     r12, DESKTOP_CURSOR_XMAX
+        jbe     .x_ok
+        mov     r12, DESKTOP_CURSOR_XMAX
+.x_ok:
+        mov     r13, [input_mouse_y]
+        cmp     r13, DESKTOP_CURSOR_YMAX
+        jbe     .y_ok
+        mov     r13, DESKTOP_CURSOR_YMAX
+.y_ok:
+        mov     [desktop_test_cursor_x], r12
+        mov     [desktop_test_cursor_y], r13
+        xor     r14d, r14d              ; redraw-needed flag
+        cmp     r12, [desktop_cursor_x]
+        jne     .moved
+        cmp     r13, [desktop_cursor_y]
+        jne     .moved
+        ; task 143 (DEFECT-1): the stationary path FALLS THROUGH to the
+        ; OLD restore as well. A start press with a stationary cursor
+        ; opens the menu: menu_open's readback and the place readback
+        ; below must never capture the live sprite (the task-125 gate
+        ; only covered the menu-CLOSE sister). Restoring first keeps
+        ; EVERY readback save sprite-free; the forced re-place is
+        ; pixel-neutral because the cursor is drawn last.
+.moved:
+        mov     r14d, 1
+        ; 1. restore the background under the OLD position first
+        lea     rcx, [desktop_cursor_save]
+        mov     rdx, [desktop_cursor_x]
+        mov     r8, [desktop_cursor_y]
+        mov     r9d, DESKTOP_SPRITE_W
+        mov     dword [rsp+32], DESKTOP_SPRITE_H
+        call    video_blit_rect
+.restored:
+        ; 2. the menu / taskbar click operations
+        call    desktop_click_pump
+        or      r14d, eax
+        ; 3. the keyboard echo
         call    desktop_echo_pump
-        call    desktop_cursor_sync
+        ; 4. save + composite + draw at the NEW position
+        test    r14d, r14d
+        jz      .out
+        mov     rcx, r12
+        mov     rdx, r13
+        call    desktop_cursor_place
+        mov     [desktop_cursor_x], r12
+        mov     [desktop_cursor_y], r13
+.out:
         xor     eax, eax
         desktop_leave
         ret
@@ -129,4 +185,8 @@ desktop_run:
         hlt                             ; sleep until a device IRQ wakes us
         cli
         call    desktop_pump
+        ; task 125: consume a CHIP-8 launch request in the same IF = 0
+        ; window (click mode: publish the APP_RUNNING/APP_EXIT stages)
+        mov     ecx, 1
+        call    desktop_launch_pump
         jmp     .loop
