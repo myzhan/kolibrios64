@@ -1,5 +1,10 @@
 # NEEDHELP — DESKTOP-v2 断点接手文档
 
+> 续跑结果见 [移植变更史 §12](docs/PORTING-32TO64.md#12-desktop-v2壁纸开始菜单与-chip-8-启动)。
+> P0-1 的四张实帧均通过残影探针和全盒比对。P0-2 的两张游戏实帧均通过独立模型全帧比对，
+> 单像素残影试验按预期失败。P0-3 的 14 项宿主门禁和 QEMU 五腿均通过。
+> 第 12 节也记录了常驻桌面审查发现的运行期限制。下文保留 WIP 交接时的状态。
+
 编写：Hank（任务 144），2026-11-27。面向外部接手 agent。
 仓库 `/Users/zhanqp/github/osdev/kolibrios64`，盘点时 HEAD=`46083ac`（=origin/main）。
 本文档随 WIP 存档提交一起推送（提交消息 `WIP: DESKTOP-v2 wallpaper + start menu +

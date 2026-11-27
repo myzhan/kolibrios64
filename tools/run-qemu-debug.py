@@ -2551,6 +2551,13 @@ def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None,
         req(mb is not None and lb == mb,
             "menu launch start-click box == the final frame box "
             "pixel for pixel (no cursor residue)")
+        # Use a capture from before the menu was first opened so a pixel
+        # leaked into both frames cannot pass by agreement.
+        clean_box = residue_box(ppm_echo)
+        req(clean_box is not None and lb == clean_box,
+            "menu launch start-click box == the pre-menu box pixel for pixel")
+        req(clean_box is not None and residue_box(menu.get("close")) == clean_box,
+            "menu close start-click box == the pre-menu box pixel for pixel")
         for e in menu.get("errors", ()):
             req(False, f"menu leg: {e}")
 

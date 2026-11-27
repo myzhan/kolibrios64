@@ -880,6 +880,14 @@ def sandbox_repo(prefix, build_script=None):
     os.makedirs(os.path.join(sandbox, "tools"))
     shutil.copy(CHECKER, os.path.join(sandbox, "tools",
                                      os.path.basename(CHECKER)))
+    # The full checker builds a nested bootstrap fixture with the FAT16
+    # builder and ROM inputs from its own repository root.
+    shutil.copy(os.path.join(REPO, "tools", "build-fat16-image.py"),
+                os.path.join(sandbox, "tools", "build-fat16-image.py"))
+    chip8 = os.path.join(sandbox, "user", "chip8")
+    shutil.copytree(os.path.join(REPO, "user", "chip8", "roms"),
+                    os.path.join(chip8, "roms"))
+    shutil.copy(os.path.join(REPO, "user", "chip8", "api.inc"), chip8)
     build = os.path.join(sandbox, "build_fasm2.sh")
     if build_script is None:
         shutil.copy(os.path.join(REPO, "build_fasm2.sh"), build)

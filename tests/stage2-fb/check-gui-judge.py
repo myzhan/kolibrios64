@@ -28,8 +28,11 @@ pass, and every mutation below must FAIL. Nothing here executes target
 code; the judge is a pure function.
 
 Run: python3 tests/stage2-fb/check-gui-judge.py
+Add --five-art-dir DIR to compare both QEMU game captures against the
+full desktop and CHIP-8 models. Run tests/stage2-app/check.py first.
 """
 
+import argparse
 import hashlib
 import importlib.util
 import sys
@@ -204,8 +207,64 @@ def desktop_frame(font, cursor_xy, echo_text=b'hi', menu_open=False):
                 rows[y][x] = dt.ACCENT_COLOR if border else dt.MENU_COLOR
         draw_text(rows, font, dt.MENU_TEXT[:-1], dt.MENU_TEXT_X,
                   dt.MENU_TEXT_Y, 0xFFFFFF)
-    place_cursor(rows, cursor_xy)
+    if cursor_xy is not None:
+        place_cursor(rows, cursor_xy)
     return rows
+
+
+def five_game_rows(font, frame):
+    """Composite the model's BGRX game rectangle over the cursor-free desktop."""
+    if len(frame) != rq.APP_FB_W * rq.APP_FB_H * 4:
+        raise ValueError('incorrect CHIP-8 model frame size')
+    rows = desktop_frame(font, None)
+    for row in range(rq.APP_FB_H):
+        for col in range(rq.APP_FB_W):
+            off = (row * rq.APP_FB_W + col) * 4
+            b, g, r, _ = frame[off:off + 4]
+            rows[rq.APP_FB_Y + row][rq.APP_FB_X + col] = \
+                (r << 16) | (g << 8) | b
+    for y in range(dt.RUN_Y, dt.RUN_Y + dt.RUN_H):
+        for x in range(dt.RUN_X, dt.RUN_X + dt.RUN_W):
+            rows[y][x] = dt.RUN_COLOR
+    return rows
+
+
+def require_frame_match(capture, model):
+    """Compare decoded RGB, reporting the first mismatching pixel."""
+    w, h, actual = rq.parse_ppm(capture)
+    mw, mh, expected = rq.parse_ppm(model)
+    if (w, h) != (mw, mh):
+        raise ValueError(f'capture size {w}x{h}, expected {mw}x{mh}')
+    if actual == expected:
+        return
+    for off in range(0, len(expected), 3):
+        got, want = actual[off:off + 3], expected[off:off + 3]
+        if got != want:
+            y, x = divmod(off // 3, w)
+            raise ValueError(
+                f'pixel ({x},{y}) is #{got.hex()}, expected #{want.hex()}')
+
+
+def check_five_captures(art_dir):
+    try:
+        frame = (REPO / 'build' / 'user-chip8' /
+                 'ibm-expected-frame.bin').read_bytes()
+        model = render_ppm(five_game_rows(font_bytes(), frame))
+    except (OSError, ValueError) as exc:
+        print(f'FAIL: five-game model: {exc}')
+        return 1
+
+    failed = False
+    for name in ('screen-five-game.ppm', 'screen-five-game2.ppm'):
+        path = art_dir / name
+        try:
+            require_frame_match(path.read_bytes(), model)
+        except (OSError, ValueError) as exc:
+            print(f'FAIL: {path}: {exc}')
+            failed = True
+        else:
+            print(f'PASS: {path}: {dt.SCREEN_W * dt.SCREEN_H} RGB pixels match')
+    return int(failed)
 
 
 def app_flat_frame(font, cursor_xy, echo_text=b'hi'):
@@ -490,33 +549,21 @@ def main():
     five_cursor = (dt.ENTRY_CX, dt.ENTRY_CY)
     five_exit_rows = desktop_frame(font, five_cursor)
 
-    def erase_cursor(rows, cursor_xy):
-        cx, cy = cursor_xy
-        wp = wallpaper_rows()
-        for r in range(dt.SPRITE_H):
-            for c in range(dt.SPRITE_W):
-                rows[cy + r][cx + c] = wp[cy + r][cx + c]
-        return rows
-
-    def five_game_rows(exp):
-        rows = erase_cursor(desktop_frame(font, five_cursor), five_cursor)
-        for row in range(rq.APP_FB_H):
-            for col in range(rq.APP_FB_W):
-                off = (row * rq.APP_FB_W + col) * 4
-                b, g, r, _ = exp[off:off + 4]
-                rows[rq.APP_FB_Y + row][rq.APP_FB_X + col] = \
-                    (r << 16) | (g << 8) | b
-        for y in range(dt.RUN_Y, dt.RUN_Y + dt.RUN_H):
-            for x in range(dt.RUN_X, dt.RUN_X + dt.RUN_W):
-                rows[y][x] = dt.RUN_COLOR
-        return rows
-
     exp_frame = b''.join(
         bytes((0xFF, 0xFF, 0xFF, 0))
         if ((cx // rq.APP_CELL + cy // rq.APP_CELL) % 2) == 0 else bytes(4)
         for cy in range(rq.APP_FB_H) for cx in range(rq.APP_FB_W))
-    five_game = five_game_rows(exp_frame)
+    five_game = five_game_rows(font, exp_frame)
     ppm_five_game = render_ppm(five_game)
+    # Sprite outline at (32,17), inside the start-click box but off the probes.
+    one_pixel_residue = set_pixel(ppm_five_game, 32, 17, dt.CURSOR_BLACK)
+    try:
+        require_frame_match(one_pixel_residue, ppm_five_game)
+    except ValueError as exc:
+        check('full-frame comparison catches one pixel of cursor residue',
+              'pixel (32,17)' in str(exc))
+    else:
+        check('full-frame comparison catches one pixel of cursor residue', False)
     ppm_five_exit = render_ppm(five_exit_rows)
     app_ev_five = {
         'app_ready': 1, 'app_stage': rq.APP_STAGE_DONE,
@@ -713,6 +760,13 @@ def main():
     menu_neg('menu close cursor pixel corrupted',
              ev=dict(menu_ev, close=set_pixel(menu_ev['close'], 700, 600,
                                               dt.BG_COLOR)))
+    # A single sprite pixel shared by all three captures used to satisfy
+    # both the sampled probes and launch-to-final box equality.
+    menu_launch_residue = set_pixel(menu_ev['launch'], 32, 17, dt.CURSOR_BLACK)
+    menu_close_residue = set_pixel(menu_ev['close'], 32, 17, dt.CURSOR_BLACK)
+    menu_neg('menu launch and close share one off-probe cursor pixel',
+             ev=dict(menu_ev, launch=menu_launch_residue, close=menu_close_residue),
+             p=menu_close_residue)
     menu_neg('menu leg error recorded',
              ev=dict(menu_ev, errors=['step 3 gate never reached']))
     for name, value in (('desktop_test_clicks', 3),
@@ -753,8 +807,7 @@ def main():
             fv=dict(five_ev) if ev is None else ev)
 
     # the THREE mandatory FAILs of the task book
-    five_exit_nocursor = render_ppm(erase_cursor(
-        [r[:] for r in five_exit_rows], five_cursor))
+    five_exit_nocursor = render_ppm(desktop_frame(font, None))
     five_neg('five redraw order swapped (base repaint erased the cursor)',
              ev=dict(five_ev, exit=five_exit_nocursor,
                      exit2=five_exit_nocursor))
@@ -779,7 +832,7 @@ def main():
                                              rq.DESKTOP_BAR)))
     five_neg('five game2 rectangle black (one-shot blit gate)',
              ev=dict(five_ev, game2=render_ppm(
-                 five_game_rows(bytes(rq.APP_FB_W * rq.APP_FB_H * 4)))))
+                 five_game_rows(font, bytes(rq.APP_FB_W * rq.APP_FB_H * 4)))))
     five_neg('five game2 pixel shifted (relaunch drawing leak)',
              ev=dict(five_ev, game2=set_pixel(
                  ppm_five_game, rq.APP_FB_X + 15, rq.APP_FB_Y + 5,
@@ -893,4 +946,9 @@ def main():
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument('--five-art-dir', type=Path,
+                        help='QEMU --five artifact directory')
+    args = parser.parse_args()
+    sys.exit(check_five_captures(args.five_art_dir)
+             if args.five_art_dir is not None else main())
