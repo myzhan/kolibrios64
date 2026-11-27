@@ -1261,9 +1261,9 @@
 
 - **32 位做法**：mousedrv.inc save/restore（§9.1），背景读回由
   显示驱动完成，无统一读回原语契约。
-- **64 位做法**：光标 sprite 为冻结 12×18 箭头，每像素一字节
-  （0 透明/1 黑/2 白）共 216 字节，逐字节 + sha256
-  （f46ce0e0…497ad7）由 stage2-desktop 门禁双重钉死。移动协议
+- **64 位做法**：12×18 光标图块中的箭头与尾柄共用一条经过热点的 45° 轴线。每像素一字节
+  （0 透明/1 黑/2 白）共 216 字节，像素和 SHA-256
+  （f52a399c…b7caabc）由 stage2-desktop 门禁校验。移动协议
   冻结：**先 restore 旧位**（video_blit_rect 写回 save 缓冲）→
   save 新位背景（video_readback_rect）→ composite（透明保留
   背景）→ blit draw 缓冲；hotspot clamp 1012/750 保 sprite 全在

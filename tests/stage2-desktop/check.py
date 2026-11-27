@@ -77,28 +77,28 @@ CURSOR_WHITE = 0xFFFFFF
 # the frozen arrow, an independent copy of the cursor.inc pattern:
 # '.' transparent, 'B' black outline, 'W' white fill, row major
 SPRITE_ROWS = [
-    'B...........',
-    'BWB.........',
-    'BWWB........',
-    'BWWWB.......',
-    'BWWWWB......',
-    'BWWWWWB.....',
-    'BWWWWWWB....',
-    'BWWWWWWWB...',
-    'BWWWWWWWWB..',
-    'BWWWWWWWWWB.',
-    'BWWWWWWWWWWB',
-    'BWWWWWWWWWWB',
-    'BWWWWBBBBBB.',
-    'BWWBWWB.....',
-    'BWB.BWWB....',
-    'BB...BWWB...',
-    '......BWWB..',
-    '.......BB...',
+    'BB..........',
+    'BWBBBB......',
+    '.BWWWWBBBBB.',
+    '.BWWWWWWWB..',
+    '.BWWWWWWB...',
+    '.BWWWWWB....',
+    '..BWWWWWB...',
+    '..BWWBWWWB..',
+    '..BWB.BWWWB.',
+    '..BB...BWWWB',
+    '..B.....BWWB',
+    '.........BB.',
+    '............',
+    '............',
+    '............',
+    '............',
+    '............',
+    '............',
 ]
 SPRITE = bytes({'.': 0, 'B': 1, 'W': 2}[ch]
                for row in SPRITE_ROWS for ch in row)
-SPRITE_SHA256 = 'f46ce0e0921bb78e2ffc420f062d21575ce4ea1e62ff5e65cd12c81965497ad7'
+SPRITE_SHA256 = 'f52a399c4986723b620472433c41bf483e4b44aa15c09080d28e9e172b7caabc'
 
 # the initial cursor position DERIVES from the input self test exit
 # coordinates (512+5, 384+3), never magic
@@ -1808,8 +1808,8 @@ FIXTURES = [
      '        mov     dword [rsp+32], 1\n', 'check'),
     # the sprite pattern is frozen byte for byte plus sha256
     ('sprite-data-drift', 'kernel/desktop/cursor.inc',
-     '        db 1,2,2,2,2,1,1,1,1,1,1,0',
-     '        db 1,2,2,2,2,1,1,1,1,1,2,0', 'check'),
+     '        db 0,0,0,0,0,0,0,0,0,1,1,0',
+     '        db 0,0,0,0,0,0,0,0,0,1,0,0', 'check'),
     # the frozen keys count derives from the injection, the private
     # assertion fires on drift
     ('desktop-final-count-drift', 'kernel/desktop/api.inc',
