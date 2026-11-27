@@ -26,7 +26,8 @@
 | kolibrios64 | `e2bcbe7` | docs：FONT-FIX 提交哈希补录 |
 | kolibrios64 | `424fed2` | FS-v1：virtio-blk + 只读 FAT16 + 文件 syscall 4..9（QEMU 验证，见 §10；含 APP-v1 轨一 CPU/MM 用户态前置，收口文件不可拆分裁决） |
 | kolibrios64 | `3b1617d` | docs：FS-v1 提交哈希补录 |
-| kolibrios64 | `31d342c` | APP-v1：首个用户程序 CHIP-8（Ring 3 + SYSCALL + FS 装载，QEMU 验证，见 §11；当前 HEAD） |
+| kolibrios64 | `31d342c` | APP-v1：首个用户程序 CHIP-8（Ring 3 + SYSCALL + FS 装载，QEMU 验证，见 §11） |
+| kolibrios64 | `8997110` | DESKTOP-v2：壁纸、开始菜单、CHIP-8 重启与光标残影复验（QEMU 验证，见 §12） |
 | fasm2 | `0253b7f` | macOS x64 自举工作流收口（自举里程碑，含 `aad830d` 自举宿主与自宿主测试） |
 
 以上锚点已用 `git log --oneline` 核对。本文档随后续里程碑一并提交，不单独入库。
