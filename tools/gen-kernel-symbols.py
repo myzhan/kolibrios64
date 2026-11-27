@@ -81,11 +81,14 @@ def assemble_elf(bin_dir, fasm2_dir):
             "to bootstrap it, or set FASMG")
     wrapper = os.path.join(REPO, "tools", "kernel64-elf.asm")
     env = dict(os.environ, INCLUDE=os.path.join(fasm2_dir, "include"))
+    cmd = [host, "-e100", "-iInclude 'fasm2.inc'"]
+    if env.get("K64_SMOKE_TEST") == "1":
+        cmd.append("-iK64_SMOKE_TEST = 1")
     fd, tmp = tempfile.mkstemp(suffix=".elf", dir=bin_dir)
     os.close(fd)
     try:
         r = subprocess.run(
-            [host, "-e100", "-iInclude 'fasm2.inc'", wrapper, tmp],
+            cmd + [wrapper, tmp],
             env=env, cwd=REPO)
         if r.returncode != 0:
             die(f"fasmg failed on {wrapper} (exit {r.returncode})")

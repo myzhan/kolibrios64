@@ -32,6 +32,18 @@ video_bgrx:
         and     eax, 0x00FFFFFF
         ret
 
+if defined K64_RUNTIME
+; Store one logical pixel in two physical scanlines. Clobbers r8.
+macro video_store_2x row*, x*, color*
+        mov     dword [row + x*8], color
+        mov     dword [row + x*8 + 4], color
+        mov     r8d, dword [video_fb_state + VIDEO_FB_STATE.stride]
+        add     r8, row
+        mov     dword [r8 + x*8], color
+        mov     dword [r8 + x*8 + 4], color
+end macro
+end if
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; clip a rectangle against the framebuffer geometry
 ; in
@@ -99,6 +111,20 @@ video_putpixel:
         jae     .clipped
         cmp     rdx, r11
         jae     .clipped
+if defined K64_RUNTIME
+        cmp     byte [video_fb_double], 0
+        je      .native
+        shl     rdx, 1
+        mov     eax, dword [video_fb_state + VIDEO_FB_STATE.stride]
+        imul    rax, rdx
+        mov     rdi, qword [video_fb_state + VIDEO_FB_STATE.fb_va]
+        add     rdi, rax
+        mov     eax, r8d
+        call    video_bgrx
+        video_store_2x rdi, rcx, eax
+        jmp     .clipped
+.native:
+end if
         ; address = fb_va + y * stride + x * 4
         mov     eax, dword [video_fb_state + VIDEO_FB_STATE.stride]
         imul    rax, rdx
@@ -134,6 +160,15 @@ video_fill_rect:
         call    video_clip_rect
         test    eax, eax
         jz      .clipped
+if defined K64_RUNTIME
+        cmp     byte [video_fb_double], 0
+        je      .fill_native
+        shl     rcx, 1
+        shl     rdx, 1
+        shl     r8, 1
+        shl     r9, 1
+.fill_native:
+end if
         mov     r13, rcx                ; x
         mov     r14, rdx                ; y
         mov     r15, r8                 ; w
@@ -199,6 +234,10 @@ video_blit_rect:
         mov     r15, r8                 ; w
         mov     rbx, r9                 ; h
         mov     rsi, r12
+if defined K64_RUNTIME
+        cmp     byte [video_fb_double], 0
+        jne     .scaled
+end if
         ; row base = fb_va + y * stride + x * 4
         mov     eax, dword [video_fb_state + VIDEO_FB_STATE.stride]
         imul    rax, rdx
@@ -221,6 +260,39 @@ video_blit_rect:
         add     rdi, r13
         dec     rbx
         jnz     .row
+if defined K64_RUNTIME
+        jmp     .clipped
+.scaled:
+        mov     r13d, dword [video_fb_state + VIDEO_FB_STATE.stride]
+        shl     rdx, 1
+        imul    rdx, r13
+        mov     rdi, qword [video_fb_state + VIDEO_FB_STATE.fb_va]
+        add     rdi, rdx
+        lea     rdi, [rdi + rcx*8]
+        sub     r14, r15
+        shl     r14, 2                  ; packed source row remainder
+        lea     r12, [r13*2]
+        mov     rax, r15
+        shl     rax, 3
+        sub     r12, rax                ; destination row-pair remainder
+.scaled_row:
+        lea     rdx, [rdi + r13]
+        mov     rcx, r15
+.scaled_pixel:
+        lodsd
+        mov     [rdi], eax
+        mov     [rdi + 4], eax
+        mov     [rdx], eax
+        mov     [rdx + 4], eax
+        add     rdi, 8
+        add     rdx, 8
+        dec     rcx
+        jnz     .scaled_pixel
+        add     rsi, r14
+        add     rdi, r12
+        dec     rbx
+        jnz     .scaled_row
+end if
 .clipped:
         xor     eax, eax
         jmp     .done
@@ -271,6 +343,10 @@ video_readback_rect:
         mov     r15, r8                 ; w
         mov     rbx, r9                 ; h
         mov     rdi, r12
+if defined K64_RUNTIME
+        cmp     byte [video_fb_double], 0
+        jne     .scaled
+end if
         ; row base = fb_va + y * stride + x * 4
         mov     eax, dword [video_fb_state + VIDEO_FB_STATE.stride]
         imul    rax, rdx
@@ -293,6 +369,33 @@ video_readback_rect:
         add     rdi, r14
         dec     rbx
         jnz     .row
+if defined K64_RUNTIME
+        jmp     .clipped
+.scaled:
+        mov     r13d, dword [video_fb_state + VIDEO_FB_STATE.stride]
+        shl     r13, 1
+        imul    rdx, r13
+        mov     rsi, qword [video_fb_state + VIDEO_FB_STATE.fb_va]
+        add     rsi, rdx
+        lea     rsi, [rsi + rcx*8]
+        sub     r14, r15
+        shl     r14, 2                  ; packed destination row remainder
+        mov     rax, r15
+        shl     rax, 3
+        sub     r13, rax                ; source row-pair remainder
+.scaled_row:
+        mov     rcx, r15
+.scaled_pixel:
+        mov     eax, [rsi]              ; upper-left pixel of the 2x2 block
+        stosd
+        add     rsi, 8
+        dec     rcx
+        jnz     .scaled_pixel
+        add     rsi, r13
+        add     rdi, r14
+        dec     rbx
+        jnz     .scaled_row
+end if
 .clipped:
         xor     eax, eax
         jmp     .done

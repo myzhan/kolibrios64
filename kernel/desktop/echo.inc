@@ -7,9 +7,8 @@
 ;;
 ;; Desktop shell: the keyboard echo.
 ;;
-;; The pump consumes the input key buffer through a private consumed
-;; index (the input module stays untouched): every new entry with a
-;; printable ascii 0x20..0x7E is drawn into the frozen text area and
+;; The pump advances the keyboard ring head and its desktop cursor.
+;; Every printable ASCII entry (0x20..0x7E) is drawn into the text area and
 ;; counted, Enter starts a new line, Backspace erases the last glyph
 ;; cell by restoring the wallpaper source row by row (DESKTOP-v2: the
 ;; background is the embedded image, not a flat color). A full line
@@ -22,9 +21,9 @@
 ; ------------------------------------------------------------------
 ; consume every new key buffer entry
 ; in
-; nothing; reads input_kbd_used / input_kbd_buf, advances
-; desktop_kbd_consumed (the self test snapshots the input exit fill
-; level first, so the input self test keys are never re-echoed)
+; nothing; reads input_kbd_used / input_kbd_buf, advances the head and
+; desktop_kbd_consumed. The diagnostic desktop snapshots the write
+; sequence first, skipping the input self test events.
 ; out
 ; eax = DESKTOP_OK
 ; ------------------------------------------------------------------
@@ -32,15 +31,23 @@
 desktop_echo_pump:
         desktop_enter
         cld
+if defined K64_RUNTIME
+        ; Drain queued keys after the menu's saved background is restored.
+        cmp     qword [desktop_menu_flag], 0
+        jne     .done
+        mov     rax, [input_kbd_head]
+        mov     [desktop_kbd_consumed], rax
+end if
 .loop:
         mov     r12, [desktop_kbd_consumed]
         cmp     r12, [input_kbd_used]
         jae     .done
         mov     rax, r12
-        shl     rax, 4                  ; 16 bytes per entry
+        input_kbd_slot
         lea     rdx, [input_kbd_buf]
         mov     r13, [rdx + rax]        ; the ascii qword
         inc     qword [desktop_kbd_consumed]
+        inc     qword [input_kbd_head]
         mov     rcx, r13
         call    desktop_echo_key
         jmp     .loop
@@ -72,6 +79,13 @@ desktop_echo_key:
         ; printable: a full screen stops and counts, never scrolls
         cmp     qword [desktop_echo_row], DESKTOP_ECHO_ROWS
         jae     .drop
+if defined K64_RUNTIME
+        imul    rax, [desktop_echo_row], DESKTOP_ECHO_COLS + 1
+        add     rax, [desktop_echo_col]
+        lea     rdx, [desktop_echo_text]
+        mov     [rdx + rax], r12b
+        mov     byte [app_window_dirty], 1
+else
         ; draw the glyph through video_puts, one char scratch cell
         mov     [desktop_echo_char], r12b
         mov     rax, [desktop_echo_col]
@@ -85,6 +99,7 @@ desktop_echo_key:
         mov     r8d, DESKTOP_ECHO_COLOR
         lea     r9, [desktop_echo_char]
         call    video_puts
+end if
         inc     qword [desktop_test_keys]
         inc     qword [desktop_echo_col]
         cmp     qword [desktop_echo_col], DESKTOP_ECHO_COLS
@@ -109,6 +124,13 @@ desktop_echo_key:
         cmp     qword [desktop_echo_col], 0
         je      .out                    ; line start: nothing to erase
         dec     qword [desktop_echo_col]
+if defined K64_RUNTIME
+        imul    rax, [desktop_echo_row], DESKTOP_ECHO_COLS + 1
+        add     rax, [desktop_echo_col]
+        lea     rdx, [desktop_echo_text]
+        mov     byte [rdx + rax], 0
+        mov     byte [app_window_dirty], 1
+else
         ; DESKTOP-v2: restore the glyph cell from the wallpaper source,
         ; one packed 8 pixel row per blit, 16 rows top to bottom
         mov     rax, [desktop_echo_col]
@@ -136,6 +158,7 @@ desktop_echo_key:
         inc     r15
         dec     r13d
         jnz     .erase_row
+end if
 .out:
         xor     eax, eax
         desktop_leave
@@ -149,6 +172,30 @@ desktop_echo_key:
 desktop_title:
         db 'K64 Desktop v0.1', 0
 desktop_title_end:
+
+if defined K64_RUNTIME
+; Repaint the retained echo after desktop_repaint_base. Each row is an
+; independent NUL-terminated string so Enter alone never draws pixels.
+desktop_repaint_echo:
+        desktop_enter
+        lea     r12, [desktop_echo_text]
+        mov     r13d, DESKTOP_ECHO_Y
+.row:
+        cmp     byte [r12], 0
+        je      .next
+        mov     ecx, DESKTOP_ECHO_X
+        mov     edx, r13d
+        mov     r8d, DESKTOP_ECHO_COLOR
+        mov     r9, r12
+        call    video_puts
+.next:
+        add     r12, DESKTOP_ECHO_COLS + 1
+        add     r13d, DESKTOP_FONT_H
+        cmp     r13d, DESKTOP_SCREEN_H
+        jb      .row
+        desktop_leave
+        ret
+end if
 
 if desktop_title_end - desktop_title <> DESKTOP_TITLE_LEN + 1
         err 'the title text must stay K64 Desktop v0.1'

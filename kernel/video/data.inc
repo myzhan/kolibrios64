@@ -26,6 +26,35 @@ video_fb_state:         db VIDEO_FB_STATE_size dup 0
 
 ; the failing layer of the last video_selftest run, 0 = success
 video_selftest_mask:    dq 0
+if defined K64_RUNTIME
+video_fb_double:        db 0            ; one logical pixel covers 2x2 GOP pixels
+video_gpu_dirty:        db 0
+video_gpu_online:       db 0
+video_gpu_inflight:     db 0
+        align 8
+gpu_pci:                dd 0
+gpu_output_id:          dd 0
+gpu_notify:             dq 0
+gpu_config:             dq 0
+gpu_dma_delta:          dq 0
+gpu_next_frame:         dq 0
+gpu_pages:              dd 0
+gpu_width:              dd 0
+gpu_height:             dd 0
+        align 4096
+gpu_descriptors:        db GPU_QUEUE_SIZE * 16 dup 0
+gpu_available:          db 4 + GPU_QUEUE_SIZE * 2 dup 0
+        align 4
+gpu_used:               db 4 + GPU_QUEUE_SIZE * 8 dup 0
+        align 16
+gpu_response:           db GPU_RESPONSE_BYTES dup 0
+        align 4096
+gpu_request:            db GPU_REQUEST_BYTES dup 0
+gpu_backing:            dq GPU_MAX_PAGES dup 0
+gpu_columns:            dd GPU_MAX_WIDTH dup 0
+        align 4096
+gpu_canvas:             dd VIDEO_ST_WIDTH * VIDEO_ST_HEIGHT dup 0
+end if
 
 ; tail padding, emitted as data so the file keeps every zero byte
         db (VIDEO_PAGE_SIZE - (($ - video_data_start) and (VIDEO_PAGE_SIZE-1))) and (VIDEO_PAGE_SIZE-1) dup 0

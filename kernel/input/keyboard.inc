@@ -33,8 +33,8 @@
 ;; then the en_US set 1 translation aligned with the 32 bit data32.inc
 ;; keymap/keymap_shift semantics. Every key event stores one
 ;; 16 byte buffer entry (ascii + raw scancode); extended keys store
-;; raw | 0x100 with ascii 0. A full buffer drops the entry and counts
-;; the drop, it never overwrites.
+;; raw | 0x100 with ascii 0. Read and write sequences index a ring. A
+;; full ring drops new entries and counts each drop.
 ;;
 
 input_keyboard_irq:
@@ -140,9 +140,11 @@ input_keyboard_irq:
         xor     r8d, 0x20
 .store:
         mov     rax, [input_kbd_used]
+        sub     rax, [input_kbd_head]
         cmp     rax, INPUT_KBD_CAP
         jae     .drop
-        shl     rax, 4                  ; 16 bytes per entry
+        mov     rax, [input_kbd_used]
+        input_kbd_slot
         lea     rdx, [input_kbd_buf]
         mov     [rdx + rax], r8
         mov     [rdx + rax + 8], r10

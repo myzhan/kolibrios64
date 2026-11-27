@@ -52,6 +52,8 @@ APP_SYS_EXIT     = 0            ; rdi = exit code, never returns
 APP_SYS_BLIT     = 1            ; rdi = src, esi/edx = x/y, r10d/r8d = w/h
 APP_SYS_READ_KEY = 2            ; rax = ascii (0 = empty), rdx = raw set 1
 APP_SYS_POLL     = 3            ; rax = x|y<<16, rdx = buttons, r8d = ticks
+APP_POLL_CLIENT  = 0x434C4E54    ; rdi = 'CLNT' selects client coordinates
+APP_POLL_PRESS   = 0x100        ; rdx flag for a queued client left press
 
 ; the frozen K64 errno set, module private spelling
 APP_OK          = 0

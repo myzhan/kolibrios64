@@ -1761,7 +1761,7 @@ def check_bootstrap_outdir(root):
         env = dict(os.environ)
         env.pop("FASMG", None)
         env.update({"OUTDIR": kernel_out, "FASM2_DIR": "fasm2",
-                    "FASM1": "./fasm1-stub"})
+                    "FASM1": "./fasm1-stub", "K64_SMOKE_TEST": "1"})
         proc = subprocess.run([sandbox_build], cwd=tmp, env=env,
                               capture_output=True, text=True)
         check(proc.returncode == 0,

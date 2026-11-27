@@ -121,8 +121,7 @@ ECHO_SAVE_BYTES = ECHO_SAVE_W * ECHO_SAVE_H * 4
 BOUNCE_ROW = FB_WIDTH * 4
 PROGRAM_PATH_MAX = 24
 PROGRAM_PATH = b'/PROGRAMS/CHIP8.BIN\x00'
-# task 141 W1: the fixed-budget interactive loop shrinks the program
-CHIP8_SIZE = 3255
+CHIP8_SIZE = 3315
 
 DATA_PAGES_TOTAL = 22
 SYSCALL_STACK = 4096
@@ -148,7 +147,7 @@ VIDEO_FB_STATE_READY = 0
 # image is a new independent freeze (task 115)
 DISK_SHA = 'e9e83dad3f6d5193ac15c7a35834cc5190ca34e978b537d80be9fa9beb7bc42b'
 DISK_BIG_SHA = 'a810280509cd05f67dce37dc46e67cbfeb2e9432b73a105108f9a2d298500543'
-DISK_APP_SHA = 'aec9f70167e6e18170a638bf4af3d5bf28817cf2ff37d6fec5a137cec12f3170'
+DISK_APP_SHA = 'a846e27f77057ab5a31c83dcc2894818e550d5bcc8876c3337ea07a5ac7090b3'
 
 # the data layout, offsets from app_data_start
 DATA_LABELS = {
@@ -226,6 +225,7 @@ M = [
     'desktop_bar_h', 'desktop_title_x', 'desktop_title_y',
     'desktop_title_color', 'video_fb_state_ready',
     'kernel_base',
+    'input_kbd_head', 'desktop_kbd_consumed',
 ]
 
 CONSTANTS = {
@@ -486,8 +486,8 @@ def region(img, start, stop):
 def check_manifest(rep, img):
     rep.check('manifest.magic', True, MAGIC.decode())
     rep.equal('manifest.version', img['version'], MANIFEST_VERSION)
-    rep.equal('manifest.entry_count', len(M), 180)
-    rep.equal('manifest.count_field', img['count'], 180)
+    rep.equal('manifest.entry_count', len(M), 182)
+    rep.equal('manifest.count_field', img['count'], 182)
     for name, want in CONSTANTS.items():
         rep.equal('manifest.%s' % name, img[name], want & 0xFFFFFFFFFFFFFFFF)
 
@@ -1433,6 +1433,24 @@ def check_module_hygiene(rep, img):
     sysret = 0
     swapgs = 0
     allowed = {img.at('fs_test_reads'), img.at('blk_test_reads')}
+    launch_lo, launch_hi = region(img, 'launch', 'program_path')
+    launch_loads = {s: t for s, t, _ in
+                    rip_sites(img, launch_lo, launch_hi, b'\x48\x8B', 0x05, 0)}
+    launch_stores = {s: t for s, t, _ in
+                     rip_sites(img, launch_lo, launch_hi, b'\x48\x89', 0x05, 0)}
+    head = img.at('input_kbd_head')
+    desktop_tail = img.at('desktop_kbd_consumed')
+    handoff = {(s, t) for s, t in launch_stores.items()
+               if (t == head and launch_stores.get(s - 7) == img.at('kbd_consumed')
+                   and launch_loads.get(s - 14) == img.at('input_kbd_used'))
+               or (t == desktop_tail and launch_loads.get(s - 7) == head)}
+    key_lo, key_hi = region(img, 'h_read_key', 'h_poll')
+    key_increments = {s: t for s, t, _ in
+                      rip_sites(img, key_lo, key_hi, b'\x48\xFF', 0x05, 0)}
+    release = {(s, t) for s, t in key_increments.items()
+               if t == head and key_increments.get(s - 7) == img.at('kbd_consumed')}
+    rep.check('hygiene.keyboard_handoff_writes', {t for _, t in handoff}
+              == {head, desktop_tail} and len(handoff) == 2 and len(release) == 1)
     lo, hi = img.at('data_start'), img.at('data_end')
     for at, end in windows:
         code = d[at:end]
@@ -1443,9 +1461,11 @@ def check_module_hygiene(rep, img):
         for prefix, modrm, tail in ((b'\x48\x89', 0x05, 0),
                                     (b'\x48\x89', 0x25, 0),
                                     (b'\x4C\x89', 0x25, 0),
+                                    (b'\x48\xFF', 0x05, 0),
                                     (b'\x48\xC7', 0x05, 4)):
             for s, t, _ in rip_sites(img, at, end, prefix, modrm, tail):
-                if not (lo <= t < hi) and t not in allowed:
+                if (not (lo <= t < hi) and t not in allowed
+                        and (s, t) not in handoff and (s, t) not in release):
                     bad_writes.append((s, t))
         iretq += code.count(bytes.fromhex('48 CF'))
         sysret += code.count(bytes.fromhex('48 0F 07'))
@@ -1457,6 +1477,7 @@ def check_module_hygiene(rep, img):
                  (b'\x48\x8B', 0x15, 0), (b'\x48\x8B', 0x25, 0),
                  (b'\x48\x8B', 0x35, 0), (b'\x4C\x8B', 0x05, 0),
                  (b'\x48\x89', 0x05, 0), (b'\x48\x89', 0x25, 0),
+                 (b'\x48\xFF', 0x05, 0),
                  (b'\x4C\x89', 0x25, 0), (b'\x4C\x3B', 0x25, 0),
                  (b'\x48\x3B', 0x05, 0),
                  (b'\x48\x8D', 0x05, 0), (b'\x48\x8D', 0x0D, 0),
@@ -1973,7 +1994,7 @@ def check_sources(rep, root):
               'format binary' in asm_text)
     order = re.findall(r"^include\s+'([^']+)'", asm_text, re.M)
     rep.equal('source.include_order', order,
-              ['api.inc', 'app.inc', 'selftest.inc', 'data.inc'])
+              ['api.inc', 'app.inc', 'tasks.inc', 'window.inc', 'selftest.inc', 'data.inc'])
     rep.check('source.app_asm_end_assertion',
               'if $ <> app_data_end' in asm_text)
 
@@ -2096,9 +2117,9 @@ def check_sources(rep, root):
               'cmp     qword [fs_test_dirents + 8], FS_TEST_BIG_SIZE'
               in fs_st)
 
-    # the frozen STI ownership across the whole kernel source tree;
-    # task 115 adjudication: the APP-v1 interactive POLL leg is the
-    # third legal owner (LVT masked, RTEs re-masked, ticks stay 11)
+    # The desktop owns regular IRQ waits. POLL yields to the scheduler
+    # there and owns its own IRQ window in the diagnostic build.
+    # The app layout probe separately checks the emitted diagnostic code.
     hits = []
     for path in sorted((root / 'kernel').rglob('*')):
         if path.suffix not in ('.asm', '.inc') or not path.is_file():
@@ -2107,8 +2128,8 @@ def check_sources(rep, root):
         for m in re.finditer(r'^\s*sti\b', text, re.M):
             hits.append(str(path.relative_to(root)))
     rep.equal('source.kernel_sti_sites', hits,
-              ['kernel/app/app.inc', 'kernel/desktop/desktop.inc',
-               'kernel/irq/selftest.inc'])
+              ['kernel/app/app.inc'] +
+              ['kernel/desktop/desktop.inc', 'kernel/irq/selftest.inc'])
 
     # the data region is real zero bytes, never a BSS promise
     data = (root / 'kernel' / 'app' / 'data.inc').read_text(encoding='utf-8')
@@ -2138,10 +2159,16 @@ def check_sources(rep, root):
                'cpu_user_fault_set_handler',
                'video_fill_rect', 'video_blit_rect', 'video_readback_rect',
                'video_puts', 'desktop_cursor_sync', 'desktop_cursor_place',
-               'desktop_repaint_base',
-               'input_ioapic_write'}
+               'desktop_repaint_base', 'desktop_repaint_echo',
+               'input_ioapic_write', 'app_window_copy_row', 'app_window_present',
+               'app_task_yield', 'app_window_poll_client'}
     stray = []
     text = (root / 'kernel' / 'app' / 'app.inc').read_text(encoding='utf-8')
+    poll_start = text.index('app_h_poll:')
+    poll = text[poll_start:text.index('.snapshot:', poll_start)]
+    rep.check('source.poll_irq_windows', len(re.findall(r'^\s*sti\b', poll, re.M)) == 1
+              and 'call    app_task_yield' in poll
+              and not re.search(r'^\s*hlt\b', poll, re.M))
     for m in re.finditer(r'^\s*call\s+(\S+)', text, re.M):
         if m.group(1) not in allowed:
             stray.append(m.group(1))

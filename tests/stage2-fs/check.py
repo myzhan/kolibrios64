@@ -131,8 +131,8 @@ IMAGE_SHA = 'e9e83dad3f6d5193ac15c7a35834cc5190ca34e978b537d80be9fa9beb7bc42b'
 BIG_IMAGE_SHA = 'a810280509cd05f67dce37dc46e67cbfeb2e9432b73a105108f9a2d298500543'
 # APP-v1 hosted-program image: /PROGRAMS/CHIP8.BIN instead of BIG.BIN,
 # the same ROMS and geometry, so the plain sector totals still hold
-APP_IMAGE_SHA = 'aec9f70167e6e18170a638bf4af3d5bf28817cf2ff37d6fec5a137cec12f3170'
-TEST_CHIP8_SIZE = 3255
+APP_IMAGE_SHA = 'a846e27f77057ab5a31c83dcc2894818e550d5bcc8876c3337ea07a5ac7090b3'
+TEST_CHIP8_SIZE = 3315
 
 TEST_IBM_SIZE = 132
 TEST_TETRIS_SIZE = 494
@@ -2170,8 +2170,8 @@ def check_sources(rep, root):
         for m in re.finditer(r'^\s*sti\b', text, re.M):
             hits.append(str(path.relative_to(root)))
     rep.equal('source.kernel_sti_sites', hits,
-              ['kernel/app/app.inc', 'kernel/desktop/desktop.inc',
-               'kernel/irq/selftest.inc'])
+              ['kernel/app/app.inc'] * 3 +
+              ['kernel/desktop/desktop.inc', 'kernel/irq/selftest.inc'])
 
     # the IRQ dispatch table is byte frozen and never mentions fs
     dispatch = (root / 'kernel' / 'irq' / 'dispatch.inc').read_text(

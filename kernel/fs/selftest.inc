@@ -416,11 +416,10 @@ fs_st_seek_done:
         test    edx, edx
         jz      .prog_again
         ; APP-v1: no BIG.BIN, but /PROGRAMS may hold the hosted program.
-        ; Exactly one CHIP8.BIN of the frozen build size is legal; any
-        ; other dirent count, size or name still fails the leg.
+        ; Exactly one CHIP8.BIN of the current build size is legal.
         cmp     edx, FS_DIRENT_SIZE
         jne     fs_st_fail_neg
-        cmp     qword [fs_test_dirents + 8], 3255
+        cmp     qword [fs_test_dirents + 8], 3315
         jne     fs_st_fail_neg
         lea     rsi, [fs_test_dirents + 16]
         lea     rdi, [n_fs_chip8]

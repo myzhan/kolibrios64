@@ -46,10 +46,11 @@ desktop_selftest:
         ; the echo starts AFTER the input self test entries: 'a' and
         ; its break already sit in the buffer, the desktop must not
         ; re-echo them (the frozen keys count derives from the desktop
-        ; injection only). Snapshot the fill level, never a hardcoded
-        ; index: the input module stays untouched.
+        ; injection only). Skip those entries by publishing the current
+        ; write sequence as both the desktop cursor and the queue head.
         mov     rax, [input_kbd_used]
         mov     [desktop_kbd_consumed], rax
+        mov     [input_kbd_head], rax
 
         ; ---------------- leg 0: the wallpaper background ----------------
         lea     rcx, [desktop_wallpaper]

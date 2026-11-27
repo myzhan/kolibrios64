@@ -34,7 +34,7 @@ input_ioapic_max:          dq 0         ; measured RTE entry count
 input_mouse_id:            dq 0         ; measured mouse ID after reset
 input_kbd_mods:            dq 0         ; modifier state bits
 input_kbd_e0:              dq 0         ; 0xE0 prefix pending
-input_kbd_used:            dq 0         ; key buffer fill level
+input_kbd_used:            dq 0         ; next keyboard write sequence
 input_kbd_drops:           dq 0         ; entries dropped on a full buffer
 input_mouse_state:         dq 0         ; packet state machine 0/1/2
 input_mouse_b1:            dq 0         ; packet byte 1 in flight
@@ -50,6 +50,15 @@ input_kbd_buf:             dq INPUT_KBD_CAP * 2 dup 0
 ; diagnostics, ASCII only, printed on the failure path only
 msg_input_selftest  db 'K64-INPUT-SELFTEST failed legs = ', 0
 msg_input_nl        db 13, 10, 0
+
+align 8
+input_kbd_head:            dq 0         ; oldest unread keyboard sequence
+if defined K64_RUNTIME
+input_mouse_buttons:       dq 0         ; buttons from the last complete packet
+input_mouse_edge_write:    dq 0
+; Each edge is x | y<<16 | left<<32, followed by the APIC tick count.
+input_mouse_edges:         dq INPUT_MOUSE_EDGE_CAP * 2 dup 0
+end if
 
 ; tail padding, emitted as data so the file keeps every zero byte
         db (INPUT_PAGE_SIZE - (($ - input_data_start) and (INPUT_PAGE_SIZE - 1))) and (INPUT_PAGE_SIZE - 1) dup 0

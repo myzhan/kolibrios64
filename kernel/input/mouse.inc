@@ -115,6 +115,31 @@ input_mouse_irq:
         mov     rax, INPUT_MOUSE_YMAX
 .y_store:
         mov     [input_mouse_y], rax
+if defined K64_RUNTIME
+        ; Record left edges only after a complete PS/2 packet, even when
+        ; the app is drawing and a full click occurs before its next POLL.
+        mov     edx, r10d
+        and     edx, 7
+        mov     rcx, [input_mouse_buttons]
+        mov     [input_mouse_buttons], rdx
+        xor     ecx, edx
+        test    cl, 1
+        jz      .packet_done
+        shl     rax, 16
+        or      rax, [input_mouse_x]
+        and     edx, 1
+        shl     rdx, 32
+        or      rax, rdx
+        mov     rcx, [input_mouse_edge_write]
+        and     ecx, INPUT_MOUSE_EDGE_CAP - 1
+        shl     ecx, 4
+        lea     rdx, [input_mouse_edges]
+        mov     [rdx + rcx], rax
+        mov     rax, [irq_tick_count]
+        mov     [rdx + rcx + 8], rax
+        inc     qword [input_mouse_edge_write]
+.packet_done:
+end if
         mov     qword [input_mouse_state], 0
         inc     qword [input_test_mouse_count]
         ret

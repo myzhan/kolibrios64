@@ -249,8 +249,10 @@ app_probe_manifest:
         dq      DESKTOP_TITLE_COLOR
         dq      VIDEO_FB_STATE.ready
         dq      FS_KERNEL_BASE
+        dq      input_kbd_head
+        dq      desktop_kbd_consumed
 app_probe_manifest_end:
 
-if (app_probe_manifest_end - app_probe_manifest) <> 180 * 8
+if (app_probe_manifest_end - app_probe_manifest) <> 182 * 8
         err 'the manifest must keep its fixed entry count'
 end if

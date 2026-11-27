@@ -168,6 +168,16 @@ INPUT_TIMER_WINDOW  = 0x1000000
 ; ------------------------------------------------------------------
 
 INPUT_KBD_CAP       = 120               ; key buffer entries
+
+; rax = queue sequence on entry, packed slot byte offset on return.
+; Clobbers rcx and rdx. Producer and consumers run with IF clear.
+macro input_kbd_slot
+        xor     edx, edx
+        mov     ecx, INPUT_KBD_CAP
+        div     rcx
+        mov     rax, rdx
+        shl     rax, 4
+end macro
 INPUT_KBD_ENTRY     = 16                ; ascii qword + raw scancode qword
 INPUT_SCANCODE_E0   = 0xE0
 ; 0xE1 introduces the Pause sequence (E1 1D 45, break E1 9D C5): the
@@ -176,6 +186,10 @@ INPUT_SCANCODE_E0   = 0xE0
 INPUT_SCANCODE_E1   = 0xE1
 INPUT_SCANCODE_BREAK = 0x80
 INPUT_RAW_E0_FLAG   = 0x100             ; extended keys store raw | 0x100
+
+if defined K64_RUNTIME
+INPUT_MOUSE_EDGE_CAP = 32              ; power of two, keeps the newest edges
+end if
 
 ; modifier bits of input_kbd_mods
 INPUT_MOD_LSHIFT    = 0x01

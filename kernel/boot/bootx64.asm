@@ -62,8 +62,13 @@ EXIT_BOOT_SERVICES_RETRIES = 4
 ; GOP handover: the loader looks for this exact mode and keeps the current
 ; one when the firmware does not offer it. The mode walk is bounded twice,
 ; by MaxMode and by GOP_MAX_MODES, so a lying MaxMode cannot spin forever.
-GOP_TARGET_WIDTH  = 1024
-GOP_TARGET_HEIGHT = 768
+if defined K64_SMOKE_TEST
+        GOP_TARGET_WIDTH  = 1024
+        GOP_TARGET_HEIGHT = 768
+else
+        GOP_TARGET_WIDTH  equ r14d
+        GOP_TARGET_HEIGHT equ r15d
+end if
 GOP_MAX_MODES     = 64
 
 ; COM1 is the only console that survives ExitBootServices, so the loader
@@ -691,7 +696,7 @@ endp
 ; FRAMEBUFFER flag clear, nothing here ever panics. The GOP Mode and Info
 ; structures are EfiBootServicesData, so this must run before
 ; ExitBootServices; the values are copied into BootInfo afterwards.
-proc gop_handover uses rbx r12 r13
+proc gop_handover uses rbx r12 r13 r14 r15
         mov     [gop_valid], 0
         mov     [gop_interface], 0
         mov     [gop_match], 0
@@ -715,9 +720,14 @@ proc gop_handover uses rbx r12 r13
         mov     r11, qword [r10 + EFI_GRAPHICS_OUTPUT_PROTOCOL.Mode]
         test    r11, r11
         jz      .no_framebuffer
+if ~ defined K64_SMOKE_TEST
+        mov     GOP_TARGET_WIDTH, 2048
+        mov     GOP_TARGET_HEIGHT, 1536
+end if
 
         ; walk the mode table from mode 0 looking for the exact target size;
         ; the first failure ends the walk and keeps the current mode
+.scan_modes:
         xor     r12d, r12d    ; candidate mode number
         mov     ebx, GOP_MAX_MODES
         mov     eax, dword [r11 + EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE.MaxMode]
@@ -749,6 +759,18 @@ proc gop_handover uses rbx r12 r13
         dec     rbx
         jmp     .scan
 .scan_done:
+if ~ defined K64_SMOKE_TEST
+        cmp     [gop_match], 0
+        jne     .select_mode
+        cmp     GOP_TARGET_WIDTH, 1024
+        je      .select_mode
+        mov     GOP_TARGET_WIDTH, 1024
+        mov     GOP_TARGET_HEIGHT, 768
+        mov     r10, [gop_interface]
+        mov     r11, qword [r10 + EFI_GRAPHICS_OUTPUT_PROTOCOL.Mode]
+        jmp     .scan_modes
+.select_mode:
+end if
 
         ; only a validated exact match may switch modes: the miss paths
         ; (budget spent, QueryMode failure, empty Info) arrive here with

@@ -61,6 +61,12 @@ video_puts:
         mov     eax, dword [video_fb_state + VIDEO_FB_STATE.height]
         cmp     rdx, rax
         jae     .row_next
+if defined K64_RUNTIME
+        cmp     byte [video_fb_double], 0
+        je      .row_address
+        shl     rdx, 1
+.row_address:
+end if
         ; row base = fb_va + (y + row) * stride
         mov     eax, dword [video_fb_state + VIDEO_FB_STATE.stride]
         imul    rax, rdx
@@ -80,6 +86,13 @@ video_puts:
         jae     .col_next
         test    r9b, 0x01
         jz      .col_next
+if defined K64_RUNTIME
+        cmp     byte [video_fb_double], 0
+        je      .pixel_native
+        video_store_2x rdi, rcx, r14d
+        jmp     .col_next
+.pixel_native:
+end if
         mov     dword [rdi + rcx*4], r14d
 .col_next:
         shr     r9b, 1

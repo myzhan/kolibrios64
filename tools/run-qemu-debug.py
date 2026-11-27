@@ -720,11 +720,11 @@ FSYS_GUEST_DIRENTS = (704, 256)
 # so the restored fs/blk finals are the plain ones (24 / 34).
 APP_OK_MARKER = "K64-APP-OK"
 APP_SKIP_MARKER = "K64-APP-SKIP"
-APP_IMAGE_SHA256 = ("aec9f70167e6e18170a638bf4af3d5bf"
-                    "28817cf2ff37d6fec5a137cec12f3170")
+APP_IMAGE_SHA256 = ("a846e27f77057ab5a31c83dcc2894818"
+                    "e550d5bcc8876c3337ea07a5ac7090b3")
 APP_TABLE_BUDGET = 3
 APP_LAUNCH_PAGES = 516
-APP_PROGRAM_SIZE = 3255
+APP_PROGRAM_SIZE = 3315
 APP_STAGE_IDLE = 0
 APP_STAGE_IBM_READY = 1
 APP_STAGE_EXIT_REQ = 2
@@ -780,23 +780,18 @@ PPM_FIVE_EXIT_PROBES = (
 # counters and the -d int delivery counts never drift. Round boundaries
 # are caught with a hardware breakpoint at the user main_loop VA published
 # by tests/stage2-app/check.py (build/user-chip8/interactive-probes.json).
-APP_INT_KEY_COUNT = 4          # Enter make + 7 make + 7 break + ESC make
+APP_INT_KEY_COUNT = 4          # Enter make + Down make/break + ESC make
 APP_INT_MIN_BLIT = 2           # the IBM logo plus at least one tetris frame
 APP_INT_MIN_POLL = 72          # the capture boundary is round 71 + 1
 APP_SC_ENTER = 0x1C
 APP_SC_ESC = 0x01
-APP_SC_KEY7_MAKE = 0x08
-APP_SC_KEY7_BREAK = 0x88
+APP_SC_DOWN_MAKE = 0x150
+APP_SC_DOWN_BREAK = 0x1D0
 APP_ASCII_ENTER = 0x0D
 APP_ASCII_ESC = 27
-APP_ASCII_KEY7 = 0x37
-# The break carries a NON-ZERO ascii so the frozen user key_drain (which
-# stops draining on ascii 0, treating it as the empty queue) actually
-# processes the release edge; the raw scancode keeps the 0x80 break bit.
-# This is a debug-buffer injection convention, not the IRQ handler path
-# (which stores ascii 0 for breaks); it exercises the true press/release
-# level semantics the chip8 model replays.
+# Both Down events carry ASCII zero, like the 8042 E0 path.
 APP_INT_SYMBOLS = (("input_kbd_buf", 8), ("input_kbd_used", 8))
+INPUT_KBD_CAP = 120
 
 _qemu_proc = None
 
@@ -927,6 +922,8 @@ def counter_addresses(art, extra=()):
     symbols = tuple(seen.items())
     with open(wrapper, "w", encoding="utf-8") as f:
         f.write("format elf64\n")
+        if os.environ.get("K64_SMOKE_TEST") == "1":
+            f.write("K64_SMOKE_TEST = 1\n")
         f.write("include '%s'\n" % os.path.join(REPO, "kernel", "kernel64.asm"))
         for name, _ in symbols:
             f.write("public %s\n" % name)
@@ -1749,12 +1746,13 @@ def monitor_command(art, cmd, timeout=10.0):
     return buf.decode(errors="replace").strip()
 
 
-def parse_ppm(data):
+def parse_ppm(data, *, qemu_row_padding=False):
     """Pure-Python PPM P6 parser -> (width, height, rgb bytes).
 
     No PIL or any other dependency: header tokens are read with comment
     skipping, exactly one whitespace byte separates maxval from the
-    binary payload, maxval must be 255. Raises ValueError on any defect.
+    binary payload, maxval must be 255. QEMU screendump can export
+    four-byte aligned rows at widths that are not multiples of four.
     """
     if not data.startswith(b"P6"):
         raise ValueError("not a P6 PPM")
@@ -1783,6 +1781,10 @@ def parse_ppm(data):
         raise ValueError(f"unsupported PPM header {w}x{h} maxval {maxval}")
     pos += 1  # the single whitespace byte after maxval
     px = data[pos:]
+    row_bytes = w * 3
+    padded_row = (row_bytes + 3) & ~3
+    if qemu_row_padding and padded_row != row_bytes and len(px) == padded_row * h:
+        px = b"".join(px[y:y + row_bytes] for y in range(0, len(px), padded_row))
     if len(px) != w * h * 3:
         raise ValueError(f"PPM payload {len(px)} bytes, need {w * h * 3}")
     return w, h, px
@@ -1962,8 +1964,8 @@ def interactive_leg(args, art, counter_addrs, deadline):
     chip8 model replay (interactive-probes.json):
       inject Enter -> the wait_enter leg consumes it, tetris loads,
       stop #1..#21: 20 rounds -> capture screen-int-20.ppm
-      stop #68 (67 rounds, pc 0x23C delay 10): inject key7 MAKE
-      stop #69 (68 rounds, the make consumed): inject key7 BREAK
+      stop #68 (67 rounds, pc 0x23C delay 10): inject Down make
+      stop #69 (68 rounds, the make consumed): inject Down break
       stop #72 (71 rounds, last key draw presented at round 70):
       capture screen-int-71-key.ppm
       clear the breakpoint, inject ESC, detach -> round 72 drains ESC,
@@ -2001,12 +2003,13 @@ def interactive_leg(args, art, counter_addrs, deadline):
 
         def inject_key(raw, ascii_code, label):
             used = int.from_bytes(sess.read_mem(used_addr, 8), "little")
-            log.append(f"{label}: kbd used={used} read")
-            sess.write_mem(buf_addr + used * 16,
+            slot = used % INPUT_KBD_CAP
+            log.append(f"{label}: kbd write sequence={used}")
+            sess.write_mem(buf_addr + slot * 16,
                            struct.pack("<QQ", ascii_code, raw))
             sess.write_mem(used_addr, struct.pack("<Q", used + 1))
             log.append(f"{label}: raw={raw:#x} ascii={ascii_code:#x} "
-                       f"-> kbd slot {used}")
+                       f"-> kbd slot {slot}")
 
         inject_key(APP_SC_ENTER, APP_ASCII_ENTER, "enter make")
         sess.set_hbreak(va)
@@ -2038,9 +2041,9 @@ def interactive_leg(args, art, counter_addrs, deadline):
                 log.append(f"stop {stops}: screen-int-20.ppm captured "
                            f"({stop_k1 - 1} rounds)")
             elif stops == stop_make:
-                inject_key(APP_SC_KEY7_MAKE, APP_ASCII_KEY7, "key7 make")
+                inject_key(APP_SC_DOWN_MAKE, 0, "Down make")
             elif stops == stop_break:
-                inject_key(APP_SC_KEY7_BREAK, APP_ASCII_KEY7, "key7 break")
+                inject_key(APP_SC_DOWN_BREAK, 0, "Down break")
             elif stops == stop_cap2:
                 ppm2 = screendump(art, name="screen-int-71-key.ppm")
                 log.append(f"stop {stops}: screen-int-71-key.ppm captured "
@@ -2512,12 +2515,12 @@ def judge(serial, debug, counters, early_exit, gui_mode="ok", ppm=None,
                 "pixel for pixel (640x320 BGRX)")
             req(app_frame_match(app.get("int_ppm2"),
                                 app.get("int_expected2")),
-                "interactive frame @71 rounds (key7 tap) == the model "
+                "interactive frame @71 rounds (Down tap) == the model "
                 "key frame pixel for pixel (640x320 BGRX)")
             exp2 = app.get("int_expected2")
             nokey = app.get("int_expected_nokey")
             req(exp2 is not None and nokey is not None and exp2 != nokey,
-                "the key7 tap frame differs from the no-key reference "
+                "the Down tap frame differs from the no-key reference "
                 "(the injected direction key changed the game)")
             lit1 = app_frame_lit(app.get("int_ppm1"))
             req(lit1 is not None and lit1 > 0,
@@ -2630,14 +2633,16 @@ def qemu_argv(args, art, esp):
                        + ",format=raw"),
             "-device", "virtio-blk-pci-transitional,drive=blk0",
             "-nic", "none",
-            "-display", "none",
+            "-display", args.display or ("cocoa,zoom-to-fit=on" if args.desktop else "none"),
             "-monitor", ("unix:" + os.path.join(art, "monitor.sock")
                          + ",server=on,wait=off"),
             "-serial", "file:" + os.path.join(art, "serial.log"),
-            "-d", "int,guest_errors,cpu_reset",
-            "-D", os.path.join(art, "qemu-debug.log"),
-            "-no-reboot", "-no-shutdown",
-            "-gdb", f"tcp:127.0.0.1:{args.port}"]
+            "-no-reboot", "-no-shutdown"]
+    if args.desktop:
+        return argv + ["-vga", "none", "-device", "virtio-vga,xres=2048,yres=1536"]
+    argv.extend(["-d", "int,guest_errors,cpu_reset",
+                 "-D", os.path.join(art, "qemu-debug.log"),
+                 "-gdb", f"tcp:127.0.0.1:{args.port}"])
     if not args.no_freeze:
         argv.append("-S")
     return argv
@@ -3317,8 +3322,13 @@ def smoke(args, art, proc, counter_addrs, counter_errors):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--no-freeze", action="store_true",
-                    help="smoke mode: run without -S under a timeout")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--no-freeze", action="store_true",
+                      help="smoke mode: run without -S under a timeout")
+    mode.add_argument("--desktop", action="store_true",
+                      help="boot the regular desktop with CHIP-8 and Files")
+    ap.add_argument("--display",
+                    help="QEMU display backend (desktop default: resizable Cocoa)")
     ap.add_argument("--gui-skip", action="store_true",
                     help="expect the non-fatal GUI skip path "
                          "(K64-GUI-SKIP) instead of K64-GUI-OK; no pixel "
@@ -3362,7 +3372,7 @@ def main():
                          "against (task 141 S4)")
     ap.add_argument("--app-interactive", action="store_true",
                     help="task 141 W1: implies --app. After the IBM logo "
-                         "frame, inject Enter/key7/ESC through the gdbstub "
+                         "frame, inject Enter/Down/ESC through the gdbstub "
                          "key buffer and catch the tetris round boundaries "
                          "with a hardware breakpoint at main_loop; asserts "
                          "the two model tetris frames pixel for pixel and "
@@ -3387,6 +3397,9 @@ def main():
                          "game2/exit2.ppm and assert the relaunch (runs 3 "
                          "/ exits 3, pixel-identical exit frames)")
     args = ap.parse_args()
+    if args.desktop and any((args.gui_skip, args.fs, args.fsprobe,
+                             args.app, args.app_interactive, args.menu, args.five)):
+        ap.error("--desktop cannot be combined with smoke diagnostics")
     if args.app_interactive:
         args.app = True
     if args.five:
@@ -3400,7 +3413,9 @@ def main():
         print(f"run-qemu-debug: {args.qemu} not found", file=sys.stderr)
         sys.exit(1)
     args.disk = os.path.abspath(args.disk)
-    if not os.path.isfile(args.disk):
+    default_disk = os.path.join(REPO, "build", "fs-v1", "disk.img")
+    desktop_default_disk = args.desktop and args.disk == default_disk
+    if not desktop_default_disk and not os.path.isfile(args.disk):
         print(f"run-qemu-debug: {args.disk} missing; run "
               "tools/build-fat16-image.py first (FS-v1 M1/M2)",
               file=sys.stderr)
@@ -3427,10 +3442,16 @@ def main():
             os.unlink(p)
     print(f"run-qemu-debug: session artifacts: {art}")
 
+    os.environ["K64_SMOKE_TEST"] = "0" if args.desktop else "1"
     bin_dir = build(art)
-    va, off = entry_va(os.path.join(bin_dir, "KERNEL64.BIN"))
     esp = make_esp(art, bin_dir)
-    elf = gen_symbols(art, bin_dir)
+    if desktop_default_disk:
+        args.disk = os.path.join(art, "disk-desktop.img")
+        shutil.copyfile(os.path.join(REPO, "build", "fs-v1", "disk-desktop.img"),
+                        args.disk)
+    if not args.desktop:
+        va, off = entry_va(os.path.join(bin_dir, "KERNEL64.BIN"))
+        elf = gen_symbols(art, bin_dir)
     counter_addrs, counter_errors = {}, []
     if args.no_freeze:
         extra = INPUT_FORENSIC_SYMBOLS + BLK_COUNTER_SYMBOLS + BLK_DIAG_SYMBOLS
@@ -3458,14 +3479,15 @@ def main():
     signal.signal(signal.SIGINT, on_signal)
     signal.signal(signal.SIGTERM, on_signal)
     _qemu_proc = subprocess.Popen(argv, cwd=art, start_new_session=True)
-    print(f"run-qemu-debug: QEMU pid {_qemu_proc.pid} "
-          f"(own session, port {args.port})")
+    mode_desc = "regular desktop" if args.desktop else f"gdbstub port {args.port}"
+    print(f"run-qemu-debug: QEMU pid {_qemu_proc.pid} ({mode_desc})")
 
     if args.no_freeze:
         ok = smoke(args, art, _qemu_proc, counter_addrs, counter_errors)
         sys.exit(0 if ok else 1)
 
-    print_guidance(args, art, va, off, elf)
+    if not args.desktop:
+        print_guidance(args, art, va, off, elf)
     try:
         rc = _qemu_proc.wait()
     except KeyboardInterrupt:

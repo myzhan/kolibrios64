@@ -1,0 +1,5 @@
+{
+    "/PROGRAMS/CHIP8.BIN": "build/user-chip8/chip8.bin",
+    "/PROGRAMS/FILES.BIN": "build/user-files/files.bin",
+    "/README.TXT": "README.md"
+}

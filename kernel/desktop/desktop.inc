@@ -101,6 +101,17 @@ desktop_wait_count:
 ; ------------------------------------------------------------------
 
 desktop_pump:
+if defined K64_RUNTIME
+        desktop_enter
+        call    app_window_pump
+        cmp     qword [app_window_front], 0
+        jne     .done
+        call    desktop_echo_pump
+.done:
+        xor     eax, eax
+        desktop_leave
+        ret
+else
         desktop_enter
         cld
         ; clamp the accumulated input coordinates, publish the evidence
@@ -155,6 +166,7 @@ desktop_pump:
         xor     eax, eax
         desktop_leave
         ret
+end if
 
 ; ------------------------------------------------------------------
 ; the resident event loop, the normal end of a successful boot
@@ -180,6 +192,15 @@ desktop_run:
         mov     ecx, DESKTOP_IOAPIC_IDX_MOUSE_LO
         mov     edx, DESKTOP_RTE_MOUSE_LIVE
         call    input_ioapic_write
+if defined K64_RUNTIME
+        call    app_runtime_init
+        mov     rax, [input_mouse_edge_write]
+        mov     [app_window_edge_read], rax
+        call    video_gpu_init
+        cmp     byte [video_gpu_online], 0
+        je      .loop
+        call    desktop_start_timer
+end if
 .loop:
         sti
         hlt                             ; sleep until a device IRQ wakes us
@@ -189,4 +210,22 @@ desktop_run:
         ; window (click mode: publish the APP_RUNNING/APP_EXIT stages)
         mov     ecx, 1
         call    desktop_launch_pump
+if defined K64_RUNTIME
+        call    app_tasks_pump
+        call    app_window_flush
+        call    video_gpu_pump
+end if
         jmp     .loop
+
+if defined K64_RUNTIME
+; The 100 Hz timer paces user tasks and polls the graphics config event.
+desktop_start_timer:
+        mov     rax, [irq_calib_hz]
+        xor     edx, edx
+        mov     ecx, IRQ_TICK_HZ
+        div     rcx
+        mov     rdx, IRQ_LAPIC_VA
+        mov     dword [rdx + IRQ_LAPIC_LVT_TIMER], IRQ_VEC_TIMER or IRQ_LVT_PERIODIC
+        mov     [rdx + IRQ_LAPIC_INIT_COUNT], eax
+        ret
+end if

@@ -43,6 +43,42 @@
 ; ------------------------------------------------------------------
 
 desktop_click_pump:
+if defined K64_RUNTIME
+        desktop_enter
+        inc     qword [desktop_test_clicks]
+        cmp     ecx, DESKTOP_START_W
+        jae     .other
+        cmp     edx, DESKTOP_START_H
+        jae     .other
+        inc     qword [desktop_test_start_clicks]
+        cmp     qword [desktop_menu_flag], 0
+        jne     .toggle
+        inc     qword [desktop_test_menu_opens]
+        jmp     .toggle
+.other:
+        cmp     qword [desktop_menu_flag], 0
+        je      .unused
+        cmp     ecx, DESKTOP_MENU_W
+        jae     .toggle
+        sub     edx, DESKTOP_MENU_Y
+        shr     edx, 5
+        cmp     edx, DESKTOP_APP_COUNT
+        jae     .toggle
+        inc     edx
+        mov     [desktop_app_launch_requested], rdx
+        inc     qword [desktop_test_entry_clicks]
+.toggle:
+        xor     qword [desktop_menu_flag], 1
+        call    app_window_suspend_input
+        mov     byte [app_window_dirty], 1
+        mov     eax, 1
+        jmp     .out
+.unused:
+        xor     eax, eax
+.out:
+        desktop_leave
+        ret
+else
         desktop_enter
         cld
         xor     eax, eax                ; no menu redraw by default
@@ -101,6 +137,7 @@ desktop_click_pump:
 .out:
         desktop_leave
         ret
+end if
 
 ; ------------------------------------------------------------------
 ; open the menu: save the background, draw the frame, panel and label
@@ -114,37 +151,57 @@ desktop_click_pump:
 desktop_menu_open:
         desktop_enter
         cld
+if ~ defined K64_RUNTIME
         ; save the background under the menu rectangle, data page 2
         lea     rcx, [desktop_menu_save]
         mov     edx, DESKTOP_MENU_X
         mov     r8d, DESKTOP_MENU_Y
         mov     r9d, DESKTOP_MENU_W
-        mov     dword [rsp+32], DESKTOP_MENU_H
+        mov     dword [rsp+32], DESKTOP_MENU_ACTIVE_H
         call    video_readback_rect
         test    eax, eax
         jnz     .out
+end if
         ; the 1 pixel accent frame
         mov     ecx, DESKTOP_MENU_X
         mov     edx, DESKTOP_MENU_Y
         mov     r8d, DESKTOP_MENU_W
-        mov     r9d, DESKTOP_MENU_H
+        mov     r9d, DESKTOP_MENU_ACTIVE_H
         mov     dword [rsp+32], DESKTOP_ACCENT_COLOR
         call    video_fill_rect
         ; the inner panel
         mov     ecx, DESKTOP_MENU_INNER_X
         mov     edx, DESKTOP_MENU_INNER_Y
         mov     r8d, DESKTOP_MENU_INNER_W
-        mov     r9d, DESKTOP_MENU_INNER_H
+        mov     r9d, DESKTOP_MENU_ACTIVE_H - 2
         mov     dword [rsp+32], DESKTOP_MENU_COLOR
         call    video_fill_rect
-        ; the single entry label, white on the panel
+if defined K64_RUNTIME
+        ; Draw the same catalog that the launcher uses for hit testing.
+        lea     r12, [app_catalog + 8]
+        mov     r13d, DESKTOP_MENU_TEXT_Y
+        mov     ebx, DESKTOP_APP_COUNT
+.label:
+        mov     ecx, DESKTOP_MENU_TEXT_X
+        mov     edx, r13d
+        mov     r8d, DESKTOP_TITLE_COLOR
+        mov     r9, [r12]
+        call    video_puts
+        add     r12, 16
+        add     r13d, 32
+        dec     ebx
+        jnz     .label
+else
         mov     ecx, DESKTOP_MENU_TEXT_X
         mov     edx, DESKTOP_MENU_TEXT_Y
         mov     r8d, DESKTOP_TITLE_COLOR
         lea     r9, [desktop_menu_text]
         call    video_puts
+end if
+if ~ defined K64_RUNTIME
         mov     qword [desktop_menu_flag], 1
         inc     qword [desktop_test_menu_opens]
+end if
         xor     eax, eax
 .out:
         desktop_leave
@@ -165,7 +222,7 @@ desktop_menu_close:
         mov     edx, DESKTOP_MENU_X
         mov     r8d, DESKTOP_MENU_Y
         mov     r9d, DESKTOP_MENU_W
-        mov     dword [rsp+32], DESKTOP_MENU_H
+        mov     dword [rsp+32], DESKTOP_MENU_ACTIVE_H
         call    video_blit_rect
         mov     qword [desktop_menu_flag], 0
         desktop_leave
@@ -179,6 +236,11 @@ desktop_menu_close:
 desktop_menu_text:
         db 'CHIP-8', 0
 desktop_menu_text_end:
+
+if defined K64_RUNTIME
+desktop_files_text:
+        db      'Files', 0
+end if
 
 if desktop_menu_text_end - desktop_menu_text <> DESKTOP_MENU_TEXT_LEN + 1
         err 'the menu entry label must stay CHIP-8'

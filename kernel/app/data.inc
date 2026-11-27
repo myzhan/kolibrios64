@@ -49,6 +49,9 @@ app_resolve_rec:     db 64 dup 0  ; +176
 
 ; the fs_stat output buffer for the program size gate
 app_stat_buf:        db FS_STAT_SIZE dup 0   ; +240
+if defined K64_RUNTIME
+APP_TASK_STATE_SIZE = app_resolve_rec - app_stage
+end if
 
 ; tail padding of the state page, emitted as real zero bytes
         db (4096 - (($ - app_data_start) and 4095)) and 4095 dup 0
@@ -73,13 +76,31 @@ app_fs_snapshot:     db 4096 dup 0
 ; page 21: the private SYSCALL stack, growing down from app_data_end
 app_syscall_stack:   db APP_SYSCALL_STACK dup 0
 app_syscall_stack_top:
+if defined K64_RUNTIME
+app_task_running:     dq 0
+app_task_host_rsp:    dq 0
+app_task_host_rsp0:   dq 0
+app_task_aperture:    dq 0
+app_tasks_ready:      db 0
+app_window_dirty:    db 0
+        align 8
+app_window_edge_read: dq 0
+app_window_front:     dq 0
+app_window_drag_owner: dq 0
+app_window_row:      dd APP_SCREEN_W dup 0
+        align 16
+app_task_host_fx:
+        db APP_TASK_FX_SIZE dup 0
+app_task_slots:      db APP_TASK_SIZE * DESKTOP_APP_COUNT dup 0
+        db (4096 - (($ - app_data_start) and 4095)) and 4095 dup 0
+end if
 app_data_end:
 
 if (app_data_end - app_data_start) mod 4096
         display "app data block is not page aligned", 13, 10
         err
 end if
-if app_data_end - app_data_start <> APP_DATA_PAGES_TOTAL * 4096
+if app_syscall_stack_top - app_data_start <> APP_DATA_PAGES_TOTAL * 4096
         display "app data budget changed from the frozen 22 pages", 13, 10
         err
 end if
@@ -103,9 +124,11 @@ if (app_syscall_stack - app_data_start) <> 21 * 4096
         display "the syscall stack must be the last page", 13, 10
         err
 end if
-if app_syscall_stack_top <> app_data_end
-        display "the syscall stack top must close the region", 13, 10
-        err
+if ~ defined K64_RUNTIME
+        if app_syscall_stack_top <> app_data_end
+                display "the syscall stack top must close the region", 13, 10
+                err
+        end if
 end if
 if app_syscall_stack_top and 15
         display "the syscall stack top must be 16 byte aligned", 13, 10

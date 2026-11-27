@@ -130,8 +130,18 @@ video_init:
         mov     r10d, dword [r12 + VIDEO_BOOTINFO.gop_pixels_per_line]
         mov     r11d, dword [r12 + VIDEO_BOOTINFO.gop_pixel_format]
 
-        ; publish the geometry, stride is pitch * 4 and every draw row
-        ; offset is computed from it
+if defined K64_RUNTIME
+        cmp     r8d, VIDEO_ST_WIDTH * 2
+        jne     .geometry_ready
+        cmp     r9d, VIDEO_ST_HEIGHT * 2
+        jne     .geometry_ready
+        mov     byte [video_fb_double], 1
+        shr     r8d, 1
+        shr     r9d, 1
+.geometry_ready:
+end if
+        ; publish the logical geometry and physical pitch/stride.
+        ; Every draw row uses the physical stride.
         mov     dword [video_fb_state + VIDEO_FB_STATE.width], r8d
         mov     dword [video_fb_state + VIDEO_FB_STATE.height], r9d
         mov     dword [video_fb_state + VIDEO_FB_STATE.pitch], r10d

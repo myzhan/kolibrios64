@@ -17,14 +17,15 @@
 ;;   text.inc     video_puts, the clipped 8x16 text renderer
 ;;   font.inc     the constant ASCII font subset, 1520 bytes
 ;;   selftest.inc the frozen deterministic pattern
+;;   virtio-gpu.inc  regular desktop scanout and PCI control queue
 ;;   data.inc     every mutable byte, 4 KiB aligned at both ends
 ;;
 ;; data.inc must stay last: it ends on a page boundary and no code may
 ;; follow it, so a loader can map the block read write without dragging
 ;; instructions into the mapping.
 ;;
-;; The module calls vmm_map_mmio of kernel/mm and nothing else outside
-;; its own files: whoever includes video.asm must include mm.asm first.
+;; The GOP handover uses the MMIO mapper. The regular desktop scanout
+;; also uses the PCI config accessors, PMM and VMM.
 ;; It does not call the console or the serial port and never panics:
 ;; every unexpected condition is an EAX status of the public entries.
 ;;
@@ -46,4 +47,7 @@ include 'draw.inc'
 include 'text.inc'
 include 'font.inc'
 include 'selftest.inc'
+if defined K64_RUNTIME
+include 'virtio-gpu.inc'
+end if
 include 'data.inc'

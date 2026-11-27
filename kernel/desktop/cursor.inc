@@ -126,6 +126,9 @@ desktop_cursor_sync:
         cmp     r13, [desktop_cursor_y]
         je      .out
 .move:
+if defined K64_RUNTIME
+        mov     byte [video_gpu_dirty], 1
+end if
         ; restore the background under the OLD position first
         lea     rcx, [desktop_cursor_save]
         mov     rdx, [desktop_cursor_x]

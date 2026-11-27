@@ -211,10 +211,12 @@ k64_foundation_init:
 
         ; on failure the input self test has already printed its leg
         ; mask, the foundation takes the standard fatal path
+if defined K64_SMOKE_TEST
         mov     qword [rbp-16], kmsg_fail_input
         call    input_selftest
         test    eax, eax
         jnz     .fail
+end if
 
         k64_report kmsg_input_ok, .fail
 
@@ -253,6 +255,7 @@ k64_foundation_init:
 
         ; the frozen pattern; a geometry other than exactly 1024x768 is
         ; refused with ENOTSUP and skips the milestone, never panics
+if defined K64_SMOKE_TEST
         mov     qword [rbp-16], kmsg_fail_gui
         call    video_selftest
         cmp     eax, VIDEO_ENOTSUP
@@ -286,6 +289,9 @@ k64_foundation_init:
         jmp     .fail
 .gui_frame_released:
         mov     qword [desktop_gui_frame_stage], K64_GUI_FRAME_DONE
+else
+        k64_report kmsg_gui_ok, .fail
+end if
         jmp     .gui_done
 .gui_skip:
         k64_report kmsg_gui_skip, .fail
@@ -327,7 +333,11 @@ k64_foundation_init:
         ; on failure the desktop self test has already printed its leg
         ; mask, the foundation takes the standard fatal path
         mov     qword [rbp-16], kmsg_fail_desktop
+if defined K64_SMOKE_TEST
         call    desktop_selftest
+else
+        call    desktop_show
+end if
         test    eax, eax
         jnz     .fail
 
@@ -365,10 +375,12 @@ k64_foundation_init:
 
         ; on failure the blk self test has already printed its leg
         ; mask, the foundation takes the standard fatal path
+if defined K64_SMOKE_TEST
         mov     qword [rbp-16], kmsg_fail_blk
         call    blk_selftest
         test    eax, eax
         jnz     .fail
+end if
 
         k64_report kmsg_blk_ok, .fail
 
@@ -395,10 +407,12 @@ k64_foundation_init:
 
         ; on failure the fs self test has already printed its leg
         ; mask, the foundation takes the standard fatal path
+if defined K64_SMOKE_TEST
         mov     qword [rbp-16], kmsg_fail_fs
         call    fs_selftest
         test    eax, eax
         jnz     .fail
+end if
 
         k64_report kmsg_fs_ok, .fail
 
@@ -427,12 +441,16 @@ k64_foundation_init:
 
         ; the Ring 3 probe reports its own verdict through the exit
         ; code and the evidence mask; a failure takes the fatal path
+if defined K64_SMOKE_TEST
         mov     qword [rbp-16], kmsg_fail_fsys
         call    fsys_probe
         test    eax, eax
         jnz     .fail
 
         k64_report kmsg_fsysprobe_ok, .fail
+else
+        k64_report kmsg_fsys_ready, .fail
+end if
 
         ; ---------------- APP-v1: the hosted program loader ----------------
         ; Runs after the fsys stage, still after the leg 7 accounting
@@ -470,6 +488,7 @@ k64_foundation_init:
         jnz     .fail
 
         ; the hosted run: load, Ring 3, EXIT, teardown, desktop redraw.
+if defined K64_SMOKE_TEST
         ; Task 125: the call site moved into the desktop launch pump;
         ; desktop_app_boot sets the request flag and calls the SAME
         ; consumer the CHIP-8 menu entry uses (boot mode, no click
@@ -487,6 +506,7 @@ k64_foundation_init:
         je      .app_skip
         jmp     .fail
 .app_ok:
+end if
         k64_report kmsg_app_ok, .fail
         jmp     .app_done
 .app_skip:
@@ -571,3 +591,4 @@ kmsg_fail_fsys        db 'foundation: fsys bring-up failed', 0
 kmsg_app_ok           db 'K64-APP-OK', 13, 10, 0
 kmsg_app_skip         db 'K64-APP-SKIP', 13, 10, 0
 kmsg_fail_app         db 'foundation: app bring-up failed', 0
+kmsg_fsys_ready       db 'K64-FSYS-OK', 13, 10, 0

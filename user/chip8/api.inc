@@ -142,7 +142,7 @@ st_sound        rb 1                    ; +0x19 sound timer (silent)
 st_draw         rb 1                    ; +0x1A draw flag
 st_mode         rb 1                    ; +0x1B 0 = IBM leg, 1 = interactive
 st_stack        rw STACK_DEPTH          ; +0x1C call stack
-st_key          rb KEY_COUNT            ; +0x3C key levels, 1 = pressed
+st_key          rb KEY_COUNT            ; +0x3C per-key numeric and arrow masks
 st_rand         rd 1                    ; +0x4C LCG state
 st_last_tick    rd 1                    ; +0x50 legacy tick snapshot, unused
                                         ; since task 141 W1 (kept: frozen layout)
@@ -179,11 +179,8 @@ ROM_TETRIS_SHA1 = 0xF3A2FD81A2FFEAB4
 ROM_TETRIS_SHA2 = 0x7DA87731883F9601
 ROM_TETRIS_SHA3 = 0xD37BA019976F94DD
 
-; sha256(chip8.bin) after scheme B VA relocation (3255 bytes, task 141
-; W1 fixed-budget interactive loop), a non-emitting record for the
-; integration judge; comments emit no bytes so the image hash is stable
-; across re-assembly:
-; 9da19f2d0b537ac85cfb758e9615f0a111f32b96c125150b91218bb8ff630f82
+; sha256(chip8.bin), 3315 bytes with raw Set 1 arrow support:
+; 79f55550699fa61a82b8b258193c87f59c4d4ff4da223a8a9878fbdffafe6b81
 
 ; ------------------------------------------------------------------
 ; self-contained MS x64 procedure macros

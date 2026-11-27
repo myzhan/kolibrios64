@@ -440,6 +440,12 @@ DESKTOP_MENU_X      = 0
 DESKTOP_MENU_Y      = 32
 DESKTOP_MENU_W      = 200
 DESKTOP_MENU_H      = 34
+if defined K64_RUNTIME
+        DESKTOP_APP_COUNT = 2
+        DESKTOP_MENU_ACTIVE_H = DESKTOP_APP_COUNT * 32 + 2
+else
+        DESKTOP_MENU_ACTIVE_H = DESKTOP_MENU_H
+end if
 DESKTOP_MENU_COLOR  = 0x2C3E50          ; the inner panel, the bar color
 DESKTOP_ACCENT_COLOR = 0x9594A2         ; the frame + taskbar accents,
                                         ; the wallpaper gray band color

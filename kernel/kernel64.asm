@@ -17,6 +17,10 @@ include 'fasm2_compat.inc'
 include 'const.inc'
 include 'boot/bootinfo.inc'
 
+if ~ defined K64_SMOKE_TEST
+        K64_RUNTIME = 1
+end if
+
 org VIRT_KERNEL_BASE
 
 DEFAULT_STACK_SIZE = 4096*4

@@ -101,6 +101,14 @@ desktop_repaint_base:
 ; ------------------------------------------------------------------
 
 desktop_launch_pump:
+if defined K64_RUNTIME
+        xor     ecx, ecx
+        xchg    rcx, [desktop_app_launch_requested]
+        test    ecx, ecx
+        jnz     app_task_start
+        xor     eax, eax
+        ret
+else
         desktop_enter
         cld
         mov     r13d, ecx               ; the publication mode
@@ -164,6 +172,7 @@ desktop_launch_pump:
         mov     eax, r12d
         desktop_leave
         ret
+end if
 
 ; ------------------------------------------------------------------
 ; the foundation boot call site: route the boot-time hosted run
@@ -184,4 +193,23 @@ desktop_app_boot:
         call    desktop_launch_pump
         desktop_leave
         ret
+
+if defined K64_RUNTIME
+; Paint the initial desktop without the diagnostic input handshake.
+desktop_show:
+        desktop_enter
+        call    desktop_repaint_base
+        test    eax, eax
+        jnz     .out
+        mov     qword [input_mouse_x], DESKTOP_CURSOR_X0
+        mov     qword [input_mouse_y], DESKTOP_CURSOR_Y0
+        mov     qword [desktop_cursor_x], DESKTOP_CURSOR_X0
+        mov     qword [desktop_cursor_y], DESKTOP_CURSOR_Y0
+        mov     ecx, DESKTOP_CURSOR_X0
+        mov     edx, DESKTOP_CURSOR_Y0
+        call    desktop_cursor_place
+.out:
+        desktop_leave
+        ret
+end if
 

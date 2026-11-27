@@ -457,15 +457,15 @@ proc chip8_step
         mov     ecx, r12d
         movzx   ecx, byte [r11 + rcx + (st_v - APP_DATA_BASE)]
         and     ecx, 0x0F
-        cmp     byte [r11 + rcx + (st_key - APP_DATA_BASE)], 1
-        je      .pc4
+        cmp     byte [r11 + rcx + (st_key - APP_DATA_BASE)], 0
+        jne     .pc4
         jmp     .pc2
 .key_not_pressed:
         mov     ecx, r12d
         movzx   ecx, byte [r11 + rcx + (st_v - APP_DATA_BASE)]
         and     ecx, 0x0F
-        cmp     byte [r11 + rcx + (st_key - APP_DATA_BASE)], 1
-        jne     .pc4
+        cmp     byte [r11 + rcx + (st_key - APP_DATA_BASE)], 0
+        je      .pc4
         jmp     .pc2
 
 .opF:
@@ -499,8 +499,8 @@ proc chip8_step
 .fx0A_scan:
         cmp     ecx, KEY_COUNT
         jae     .done
-        cmp     byte [r11 + rcx + (st_key - APP_DATA_BASE)], 1
-        je      .fx0A_found
+        cmp     byte [r11 + rcx + (st_key - APP_DATA_BASE)], 0
+        jne     .fx0A_found
         inc     ecx
         jmp     .fx0A_scan
 .fx0A_found:

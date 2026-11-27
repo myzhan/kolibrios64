@@ -81,10 +81,14 @@ desktop_test_app_exits:       dq 0      ; 1976, clean app teardowns
 ; data page 2: the menu background save, one packed BGRX dword per
 ; pixel of the frozen (0,32,200,34) rectangle, exactly the compact
 ; layout video_readback_rect produces and video_blit_rect consumes
-desktop_menu_save:            dd (DESKTOP_MENU_SAVE_BYTES / 4) dup 0
+desktop_menu_save:            dd (DESKTOP_MENU_W * DESKTOP_MENU_ACTIVE_H) dup 0
 
 ; tail padding, emitted as data so the file keeps every zero byte
         db (DESKTOP_PAGE_SIZE - (($ - desktop_data_start) and (DESKTOP_PAGE_SIZE - 1))) and (DESKTOP_PAGE_SIZE - 1) dup 0
+if defined K64_RUNTIME
+desktop_echo_text:            db (DESKTOP_ECHO_ROWS * (DESKTOP_ECHO_COLS + 1)) dup 0
+        db (DESKTOP_PAGE_SIZE - (($ - desktop_data_start) and (DESKTOP_PAGE_SIZE - 1))) and (DESKTOP_PAGE_SIZE - 1) dup 0
+end if
 desktop_data_end:
 
 if (desktop_data_start and (DESKTOP_DATA_ALIGN - 1)) <> 0
@@ -174,7 +178,11 @@ end if
 if desktop_menu_save - desktop_data_start <> DESKTOP_DATA_OFF_MENU_SAVE
         err 'the DESKTOP v2 menu save must own data page 2'
 end if
-if desktop_data_end - desktop_data_start <> DESKTOP_DATA_PAGES * DESKTOP_PAGE_SIZE
+if defined K64_RUNTIME
+        if desktop_echo_text - desktop_menu_save < DESKTOP_MENU_W * DESKTOP_MENU_ACTIVE_H * 4
+                err 'runtime echo storage overlaps the menu backing buffer'
+        end if
+else if desktop_data_end - desktop_data_start <> DESKTOP_DATA_PAGES * DESKTOP_PAGE_SIZE
         err 'the DESKTOP v2 data region is exactly 8 pages'
 end if
 if desktop_data_end <= desktop_data_start

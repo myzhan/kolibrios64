@@ -11,6 +11,7 @@
 #   FASM2_DIR  fasm2 checkout (default: <repo>/../fasm2)
 #   FASM1      flat assembler 1.x executable used when the host is bootstrapped
 #   OUTDIR     output directory (default: <repo>/build/fasm2)
+#   K64_SMOKE_TEST=1 enables the host-driven kernel boot diagnostics
 #
 # All three may be given as a relative path. They are made absolute against
 # the directory this script was started from before any other path is used,
@@ -140,9 +141,16 @@ fi
 assemble() {
         src=$1
         out=$2
+        set -- "-iInclude 'fasm2.inc'"
+        if [ "${K64_SMOKE_TEST:-0}" = 1 ]; then
+                case "$src" in
+                        kernel/kernel64.asm|kernel/boot/bootx64.asm)
+                                set -- "$@" "-iK64_SMOKE_TEST = 1" ;;
+                esac
+        fi
         echo "build_fasm2.sh: $src -> $out"
         INCLUDE="$fasm2_dir/include" "$host" -e100 \
-                -i"Include 'fasm2.inc'" "$root/$src" "$out"
+                "$@" "$root/$src" "$out"
 }
 
 mkdir -p "$outdir"
@@ -165,6 +173,14 @@ assemble user/chip8/chip8.asm "$root/build/user-chip8/chip8.bin"
 python3 "$root/tools/build-fat16-image.py" \
         --manifest "$root/tests/stage2-app/app-manifest.json" \
         --out "$root/build/fs-v1/disk-app.img"
+
+if [ "${K64_SMOKE_TEST:-0}" != 1 ]; then
+        mkdir -p "$root/build/user-files"
+        assemble user/files/files.asm "$root/build/user-files/files.bin"
+        python3 "$root/tools/build-fat16-image.py" \
+                --manifest "$root/user/desktop-manifest.json" \
+                --out "$root/build/fs-v1/disk-desktop.img"
+fi
 
 assemble kernel/boot/bootx64.asm "$outdir/BOOTX64.EFI"
 assemble kernel/kernel64.asm "$outdir/KERNEL64.BIN"

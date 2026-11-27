@@ -1022,8 +1022,8 @@ def check_sources(rep, root):
         for m in re.finditer(r'^\s*sti\b', text, re.M):
             hits.append(str(path.relative_to(root)))
     rep.equal('source.kernel_sti_sites', hits,
-              ['kernel/app/app.inc', 'kernel/desktop/desktop.inc',
-               'kernel/irq/selftest.inc'])
+              ['kernel/app/app.inc'] * 3 +
+              ['kernel/desktop/desktop.inc', 'kernel/irq/selftest.inc'])
     st = (module / 'selftest.inc').read_text(encoding='utf-8')
     rep.check('source.selftest_owns_cli',
               len(re.findall(r'^\s*cli\b', st, re.M)) >= 3)

@@ -41,6 +41,10 @@ end if
 include 'api.inc'
 
 include 'app.inc'
+if defined K64_RUNTIME
+include 'tasks.inc'
+include 'window.inc'
+end if
 include 'selftest.inc'
 include 'data.inc'
 

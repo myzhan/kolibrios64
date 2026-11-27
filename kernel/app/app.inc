@@ -183,11 +183,23 @@ app_h_blit:
         jc      .einval
         cmp     eax, APP_SCREEN_W
         ja      .einval
+if defined K64_RUNTIME
+        cmp     r14d, APP_BLIT_DST_X
+        jb      .einval
+        cmp     eax, APP_BLIT_DST_X + APP_FB_WIDTH
+        ja      .einval
+end if
         mov     eax, r15d
         add     eax, ebp
         jc      .einval
         cmp     eax, APP_SCREEN_H
         ja      .einval
+if defined K64_RUNTIME
+        cmp     r15d, APP_BLIT_DST_Y
+        jb      .einval
+        cmp     eax, APP_BLIT_DST_Y + APP_FB_HEIGHT
+        ja      .einval
+end if
         ; full source range validation, read-only
         mov     eax, ebx
         imul    eax, ebp
@@ -208,6 +220,12 @@ app_h_blit:
         call    app_copy_from_user
         test    eax, eax
         jnz     .out
+if defined K64_RUNTIME
+        mov     ecx, r14d
+        mov     edx, r15d
+        mov     r8d, ebx
+        call    app_window_copy_row
+else
         mov     dword [rsp+32], 1       ; h = 1
         mov     rcx, app_bounce
         mov     edx, r14d
@@ -216,6 +234,7 @@ app_h_blit:
         call    video_blit_rect
         test    eax, eax
         jnz     .out
+end if
         mov     eax, ebx
         shl     rax, 2
         add     r13, rax                ; next source row
@@ -223,6 +242,9 @@ app_h_blit:
         dec     ebp
         jmp     .row_loop
 .done:
+if defined K64_RUNTIME
+        call    app_window_present
+end if
         inc     qword [app_blit_count]
         cmp     qword [app_blit_count], 1
         jne     .ok
@@ -240,8 +262,8 @@ app_h_blit:
 ; ------------------------------------------------------------------
 ; syscall 2, READ_KEY: non-blocking, consumes the public input key
 ; buffer from the launch snapshot cursor. The Enter make flips the
-; module into interactive mode. When the host wrote EXIT_REQ and the
-; queue is empty, an ESC make is fabricated on EVERY empty read (task
+; module into interactive mode. In the diagnostic kernel, EXIT_REQ
+; fabricates an ESC make on every empty queue read (task
 ; 141 S5: the comment matches the implementation, there is no one-shot
 ; flag) so the unmodified user key_drain exits through its own frozen
 ; path; the fabricated key never advances the consumed cursor or the
@@ -252,29 +274,77 @@ app_h_blit:
 app_h_read_key:
         app_enter
         mov     r12, rcx                ; the SYSCALL frame
+if defined K64_RUNTIME
+        mov     rbx, [app_task_running]
+        cmp     byte [rbx + task_focus_lost], 0
+        je      .focused
+        ; Release previously delivered makes when focus changes, even
+        ; if the physical releases went to a different application.
+        xor     r9d, r9d
+.release_scan:
+        bsf     r8, [rbx + task_keys + r9*8]
+        jnz     .release_key
+        inc     r9d
+        cmp     r9d, APP_TASK_KEY_WORDS
+        jb      .release_scan
+        mov     byte [rbx + task_focus_lost], 0
+.focused:
+        cmp     rbx, [app_window_front]
+        jne     .empty
+        cmp     qword [desktop_menu_flag], 0
+        jne     .empty
+        mov     rax, [input_kbd_head]
+else
         mov     rax, [app_kbd_consumed]
+end if
         cmp     rax, [input_kbd_used]
         jae     .empty
-        shl     rax, 4                  ; 16 byte entries: ascii + raw
+        input_kbd_slot
         lea     rcx, [input_kbd_buf]
         add     rcx, rax
         mov     rdx, [rcx]              ; ascii
         mov     r8, [rcx + 8]           ; raw set 1
+if defined K64_RUNTIME
+        mov     eax, r8d
+        and     eax, INPUT_RAW_E0_FLAG or 0x7F
+        test    r8b, 0x80
+        jnz     .break
+        bts     [rbx + task_keys], rax
+        jmp     .counted
+.break:
+        btr     [rbx + task_keys], rax
+.counted:
+else
         inc     qword [app_kbd_consumed]
+end if
+        inc     qword [input_kbd_head]
         inc     qword [app_key_count]
+if ~ defined K64_RUNTIME
         cmp     r8, APP_SC_ENTER
         jne     .deliver
         mov     qword [app_interactive], 1
+end if
 .deliver:
         mov     [r12 + CPU_FRAME_RDX], r8
         mov     rax, rdx
         jmp     .out
+if defined K64_RUNTIME
+.release_key:
+        btr     [rbx + task_keys + r9*8], r8
+        shl     r9d, 6
+        or      r8d, r9d
+        or      r8d, 0x80
+        xor     edx, edx
+        jmp     .deliver
+end if
 .empty:
+if ~ defined K64_RUNTIME
         cmp     qword [app_stage], APP_STAGE_EXIT_REQ
         jne     .zero
         mov     qword [r12 + CPU_FRAME_RDX], APP_SC_ESC
         mov     eax, APP_ASCII_ESC
         jmp     .out
+end if
 .zero:
         mov     qword [r12 + CPU_FRAME_RDX], 0
         xor     eax, eax
@@ -284,7 +354,8 @@ app_h_read_key:
 
 ; ------------------------------------------------------------------
 ; syscall 3, POLL: sync the cursor first (the frozen semantics), then
-; park. IBM leg: a bounded pause window with IF = 0, the GUI frame
+; Park for real input in the regular kernel. The diagnostic IBM leg
+; uses a bounded pause window with IF = 0, the GUI frame
 ; precedent, because a gdbstub write cannot wake HLT. Interactive leg
 ; (task 141 W1): the same bounded pause-spin shape inside the single
 ; sti...cli window, LVT timer masked first, both device RTEs live only
@@ -294,13 +365,18 @@ app_h_read_key:
 ; keeps the CPU runnable for the debugger while real keyboard/mouse
 ; IRQs still land inside the bounded STI window (no resident window).
 ; rax = mouse_x | mouse_y<<16, rdx = buttons, r8d = tick snapshot
-; (irq_test_ticks, frozen at 11; the interactive user loop no longer
-; consumes it, task 141 W1)
+; In regular mode rdi = APP_POLL_CLIENT selects client coordinates,
+; -1 outside the client, and APP_POLL_PRESS for a sampled left press.
+; A press reports its event tick. Other results use the current tick.
 ; ------------------------------------------------------------------
 
 app_h_poll:
         app_enter
         mov     r12, rcx                ; the SYSCALL frame
+if defined K64_RUNTIME
+        inc     qword [app_poll_count]
+        call    app_task_yield
+else
         call    desktop_cursor_sync
         inc     qword [app_poll_count]
         cmp     qword [app_interactive], 0
@@ -333,14 +409,44 @@ app_h_poll:
         mov     ecx, APP_IOAPIC_IDX_MOUSE_LO
         mov     edx, APP_RTE_MOUSE_MASKED
         call    input_ioapic_write
+end if
 .snapshot:
+if defined K64_RUNTIME
+        mov     rbp, [app_task_running]
+        cmp     byte [rbp + window_close], 0
+        je      .input_snapshot
+        mov     qword [r12 + CPU_FRAME_RDI], 0
+        mov     rcx, r12
+        jmp     app_h_exit
+.input_snapshot:
+        mov     r8, [irq_tick_count]
+        cmp     rbp, [app_window_front]
+        jne     .inactive
+        cmp     qword [desktop_menu_flag], 0
+        jne     .inactive
+        cmp     qword [r12 + CPU_FRAME_RDI], APP_POLL_CLIENT
+        jne     .raw_pointer
+        call    app_window_poll_client
+        jmp     .return_input
+.raw_pointer:
+        mov     byte [rbp + window_pressed], 0
+end if
         mov     rax, [input_mouse_x]
         mov     rdx, [input_mouse_y]
         shl     rdx, 16
         or      rax, rdx
+if defined K64_RUNTIME
+        mov     rdx, [input_mouse_buttons]
+        jmp     .return_input
+.inactive:
+        mov     rax, -1
+        xor     edx, edx
+else
         mov     rdx, [input_mouse_b1]
         and     rdx, 7
         mov     r8, [irq_test_ticks]
+end if
+.return_input:
         mov     [r12 + CPU_FRAME_RDX], rdx
         mov     [r12 + CPU_FRAME_R8], r8
         app_leave
@@ -398,6 +504,7 @@ app_init:
 ; background under the sprite, no stale save is reused.
 ; ------------------------------------------------------------------
 
+if ~ defined K64_RUNTIME
 app_redraw_desktop:
         app_enter
         call    desktop_repaint_base
@@ -415,6 +522,7 @@ app_redraw_desktop:
         call    desktop_cursor_place
         app_leave
         ret
+end if
 
 ; ------------------------------------------------------------------
 ; app_launch: the hosted program leg. Reads /PROGRAMS/CHIP8.BIN through
@@ -451,13 +559,20 @@ app_launch:
         jne     .enotready
         cmp     dword [video_fb_state + VIDEO_FB_STATE.ready], 0
         je      .enotready
+if ~ defined K64_RUNTIME
         cmp     qword [desktop_echo_row], 0
         jne     .early_eio              ; the save covers only row 0
+end if
         cmp     qword [app_stage], APP_STAGE_IDLE
         je      .stage_ok
         cmp     qword [app_stage], APP_STAGE_DONE
         jne     .ealready
 .stage_ok:
+if defined K64_RUNTIME
+        mov     rbp, [app_task_running]
+        test    rbp, rbp
+        jz      .enotready
+end if
         ; task 125 relaunch: reset the per-run state so a second run
         ; publishes IBM_READY again and judges on its OWN exit code,
         ; fault seam and BLIT evidence; pure stores, the ordered call
@@ -471,16 +586,22 @@ app_launch:
         ; (task 125): a relaunch must NOT re-copy fsys_bounce, the previous
         ; run's file payloads already clobbered it
         ; snapshot the frozen counters and the table alloc/drop baseline
+if ~ defined K64_RUNTIME
         mov     rax, [fs_test_reads]
         mov     [app_saved_fs_reads], rax
         mov     rax, [blk_test_reads]
         mov     [app_saved_blk_reads], rax
+end if
         mov     rax, [mm_vmm_state + MM_VMM_STATE.table_allocs]
         mov     [app_table_base], rax
         mov     rax, [mm_vmm_state + MM_VMM_STATE.table_drops]
         mov     [app_drops_base], rax
         ; the program size gate: 0 < size <= the frozen 16 KiB domain
+if defined K64_RUNTIME
+        mov     rcx, [rbp + task_path]
+else
         lea     rcx, [app_program_path]
+end if
         mov     rdx, app_stat_buf
         call    fs_stat
         test    eax, eax
@@ -501,7 +622,11 @@ app_launch:
         call    pmm_alloc_page
         test    eax, eax
         jnz     .enomem
+if defined K64_RUNTIME
+        mov     [rbp + task_pages + r12*8], rdx
+else
         mov     [app_pages + r12*8], rdx
+end if
         inc     r12d
         cmp     r12d, APP_LAUNCH_PAGES
         jb      .alloc
@@ -510,7 +635,11 @@ app_launch:
         ; frames are pmm pages below 4 GiB, the identity address of a
         ; frame IS its physical address, the fs core never sees a
         ; user pointer
+if defined K64_RUNTIME
+        mov     rcx, [rbp + task_path]
+else
         lea     rcx, [app_program_path]
+end if
         xor     edx, edx                ; FS_O_RDONLY
         call    fs_open
         test    eax, eax
@@ -528,7 +657,11 @@ app_launch:
         mov     ebx, 0x1000
 .read_chunk:
         mov     ecx, r13d
+if defined K64_RUNTIME
+        mov     rdx, [rbp + task_pages + r12*8]
+else
         mov     rdx, [app_pages + r12*8]
+end if
         mov     r8, rbx
         call    fs_read
         test    eax, eax
@@ -554,7 +687,11 @@ app_launch:
         mov     eax, r12d
         shl     rax, 12
         add     rcx, rax
+if defined K64_RUNTIME
+        mov     rdx, [rbp + task_pages + r12*8]
+else
         mov     rdx, [app_pages + r12*8]
+end if
         mov     r8, MM_MAP_US
         call    vmm_map_user_page
         test    eax, eax
@@ -571,7 +708,11 @@ app_launch:
         mov     eax, r12d
         shl     rax, 12
         add     rcx, rax
+if defined K64_RUNTIME
+        mov     rdx, [rbp + task_pages + APP_CODE_PAGES*8 + r12*8]
+else
         mov     rdx, [app_pages + APP_CODE_PAGES*8 + r12*8]
+end if
         mov     r8, MM_MAP_US or MM_MAP_RW or MM_MAP_NX
         call    vmm_map_user_page
         test    eax, eax
@@ -585,6 +726,7 @@ app_launch:
         mov     [app_table_delta], rax
         cmp     rax, APP_TABLE_BUDGET
         jne     .fail_eio
+if ~ defined K64_RUNTIME
         ; save the echo first line through the only legal FB read path
         mov     dword [rsp+32], APP_ECHO_SAVE_H
         mov     rcx, app_echo_save
@@ -599,6 +741,7 @@ app_launch:
         ; the desktop self test keys are never delivered to the program
         mov     rax, [input_kbd_used]
         mov     [app_kbd_consumed], rax
+        mov     [input_kbd_head], rax
         ; a private syscall stack, the fsys probe discipline
         mov     rax, [cpu_tss_rsp0]
         mov     [app_saved_rsp0], rax
@@ -638,7 +781,8 @@ app_launch:
         call    cpu_user_fault_set_handler
         test    eax, eax
         jnz     .fail_rsp0
-        ; park the kernel context and enter ring 3, IF stays 0
+end if
+        ; park the loader context and enter ring 3
         mov     [app_launch_rsp], rsp
         lea     rax, [.resume]
         mov     [app_launch_rip], rax
@@ -649,9 +793,32 @@ app_launch:
         push    APP_USER_CS
         mov     rax, APP_USER_CODE_BASE
         push    rax
+if defined K64_RUNTIME
+        ; Ring 3 sees a fresh register set on first entry.
+        xor     eax, eax
+        xor     ecx, ecx
+        xor     edx, edx
+        xor     ebx, ebx
+        xor     ebp, ebp
+        xor     esi, esi
+        xor     edi, edi
+        xor     r8d, r8d
+        xor     r9d, r9d
+        xor     r10d, r10d
+        xor     r11d, r11d
+        xor     r12d, r12d
+        xor     r13d, r13d
+        xor     r14d, r14d
+        xor     r15d, r15d
+end if
         iretq
 .resume:
         ; ring 0 again, IF = 0, rsp restored by app_h_exit/app_h_fault
+if defined K64_RUNTIME
+        mov     rbp, [app_task_running]
+else
+        mov     rax, [input_kbd_head]
+        mov     [desktop_kbd_consumed], rax
         mov     ecx, APP_SYS_EXIT
         xor     edx, edx
         call    cpu_syscall_set_handler
@@ -668,6 +835,7 @@ app_launch:
         call    cpu_user_fault_set_handler
         mov     rcx, [app_saved_rsp0]
         call    cpu_set_rsp0
+end if
         ; fd safety sweep: a program that exited without closing its
         ; ROM fds must not leak slots into the next launch; the frozen
         ; fs self test counters are untouched by fs_close
@@ -687,11 +855,13 @@ app_launch:
         inc     r12d
         jmp     .sweep
 .swept:
+if ~ defined K64_RUNTIME
         ; restore the frozen counters before the verdict
         mov     rax, [app_saved_fs_reads]
         mov     [fs_test_reads], rax
         mov     rax, [app_saved_blk_reads]
         mov     [blk_test_reads], rax
+end if
         cmp     qword [app_exit_code], 0
         jne     .fail_eio
         cmp     qword [app_fault_vector], 0
@@ -717,6 +887,7 @@ app_launch:
         mov     eax, APP_EIO
         jmp     .out
 .stat_absent:
+if ~ defined K64_RUNTIME
         ; a disk without /PROGRAMS/CHIP8.BIN skips the app leg non
         ; fatally: the FS-v1 images stay bootable and the frozen
         ; 13-marker judge caliber is unchanged. The directory walk may
@@ -728,10 +899,12 @@ app_launch:
         mov     rdx, [app_saved_blk_reads]
         mov     [blk_test_reads], rdx
         mov     eax, ebx
+end if
         jmp     .out
 .fail_eio:
         mov     r15d, APP_EIO
         jmp     .teardown
+if ~ defined K64_RUNTIME
 .fail_rsp0:
         ; a registration failed: clear exactly the registered handlers,
         ; put the foundation RSP0 back, then the common teardown (S3)
@@ -749,6 +922,7 @@ app_launch:
         mov     rcx, [app_saved_rsp0]
         call    cpu_set_rsp0
         mov     eax, r14d
+end if
 .fail:
         test    eax, eax
         jnz     .fail_park
@@ -756,6 +930,12 @@ app_launch:
 .fail_park:
         mov     r15d, eax
 .teardown:
+if defined K64_RUNTIME
+        ; Other tasks can allocate and free tables between this task's
+        ; launch and exit. Check the attached subtree in isolation.
+        mov     rax, [mm_vmm_state + MM_VMM_STATE.table_drops]
+        mov     [app_drops_base], rax
+end if
         ; release every leaf mapping; ENOENT is tolerated so the
         ; partial allocation and partial map failure paths share the
         ; same loop, exactly the fsys W3 discipline
@@ -787,6 +967,11 @@ app_launch:
         inc     r12d
         jmp     .unmap_loop
 .unmapped:
+if defined K64_RUNTIME
+        mov     rax, [app_task_aperture]
+        cmp     qword [rax], 0
+        jne     .teardown_eio
+else
         ; the net table count must be back at the snapshot baseline
         mov     rax, [mm_vmm_state + MM_VMM_STATE.table_allocs]
         sub     rax, [mm_vmm_state + MM_VMM_STATE.table_drops]
@@ -794,25 +979,44 @@ app_launch:
         sub     rdx, [app_drops_base]
         cmp     rax, rdx
         jne     .teardown_eio
+end if
         mov     rax, [mm_vmm_state + MM_VMM_STATE.table_drops]
         sub     rax, [app_drops_base]
         mov     [app_table_released], rax
+if defined K64_RUNTIME
+        test    r15d, r15d
+        jnz     .free_frames
+        cmp     rax, APP_TABLE_BUDGET
+        je      .free_frames
+        mov     r15d, APP_EIO
+.free_frames:
+end if
         ; free the physical frames actually held, zero the array
         xor     r12d, r12d
 .free_loop:
         cmp     r12, [app_pages_held]
         jae     .freed
+if defined K64_RUNTIME
+        mov     rcx, [rbp + task_pages + r12*8]
+else
         mov     rcx, [app_pages + r12*8]
+end if
         call    pmm_free_page
         test    eax, eax
         jnz     .teardown_eio
+if defined K64_RUNTIME
+        mov     qword [rbp + task_pages + r12*8], 0
+else
         mov     qword [app_pages + r12*8], 0
+end if
         inc     r12d
         jmp     .free_loop
 .freed:
         mov     qword [app_pages_held], 0
-        ; the desktop comes back in full: frame, echo line, cursor
+        ; restore the desktop base, echo and cursor
+if ~ defined K64_RUNTIME
         call    app_redraw_desktop
+end if
         mov     qword [app_stage], APP_STAGE_DONE
         mov     eax, r15d
         jmp     .out
@@ -833,4 +1037,16 @@ app_program_path:
 app_program_path_end:
 if app_program_path_end - app_program_path > APP_PROGRAM_PATH_MAX
         err 'the program path exceeds the frozen budget'
+end if
+
+if defined K64_RUNTIME
+app_files_path:
+        db      '/PROGRAMS/FILES.BIN', 0
+align 8
+app_catalog:
+        dq      app_program_path, desktop_menu_text
+        dq      app_files_path, desktop_files_text
+if $ - app_catalog <> DESKTOP_APP_COUNT * 16
+        err 'the desktop menu and application tables disagree'
+end if
 end if

@@ -1869,6 +1869,11 @@ FIXTURES = [
      '        ; window (click mode: publish the APP_RUNNING/APP_EXIT stages)\n'
      '        mov     ecx, 1\n'
      '        call    desktop_launch_pump\n'
+     'if defined K64_RUNTIME\n'
+     '        call    app_tasks_pump\n'
+     '        call    app_window_flush\n'
+     '        call    video_gpu_pump\n'
+     'end if\n'
      '        jmp     .loop\n',
      '        call    desktop_pump\n'
      '        jmp     .loop\n', 'check'),
